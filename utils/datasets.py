@@ -31,6 +31,20 @@ def batched_random_crop(imgs, crop_froms, padding):
     return jax.vmap(random_crop, (0, 0, None))(imgs, crop_froms, padding)
 
 
+def get_noise_preimage_dataset(dataset, num_clusters=1):
+    """Return a dataset with placeholders for the noise preimage."""
+    size = get_size(dataset)
+    noise_preimage_mean = jax.tree_util.tree_map(lambda arr: np.zeros((size, num_clusters, *arr.shape[1:]), dtype=np.float32), dataset['actions'])
+    noise_preimage_cov = jax.tree_util.tree_map(lambda arr: np.eye(*arr.shape[1:], dtype=np.float32)[None, None].repeat(size, axis=0).repeat(num_clusters, axis=1), dataset['actions'])
+    noise_preimage_weights = np.ones((size, num_clusters), dtype=np.float32) / num_clusters
+    dataset = {
+        **dataset,
+        'noise_preimage_mean': noise_preimage_mean,
+        'noise_preimage_cov': noise_preimage_cov,
+        'noise_preimage_weights': noise_preimage_weights
+    }
+    return dataset
+
 class Dataset(FrozenDict):
     """Dataset class."""
 
@@ -54,6 +68,7 @@ class Dataset(FrozenDict):
         self.frame_stack = None  # Number of frames to stack; set outside the class.
         self.p_aug = None  # Image augmentation probability; set outside the class.
         self.return_next_actions = False  # Whether to additionally return next actions; set outside the class.
+        self.return_preimage_noise = False  # Whether to sample preimage noise from the EM mixture; set outside the class.
 
         # Compute terminal and initial locations.
         self.terminal_locs = np.nonzero(self['terminals'] > 0)[0]
@@ -95,6 +110,14 @@ class Dataset(FrozenDict):
         if self.return_next_actions:
             # WARNING: This is incorrect at the end of the trajectory. Use with caution.
             result['next_actions'] = self._dict['actions'][np.minimum(idxs + 1, self.size - 1)]
+        if self.return_preimage_noise:
+            # Sample a latent noise per transition from its precomputed EM mixture.
+            from utils.flow_inversion import sample_preimage_noise  # local import to avoid a cycle
+            result['noise_preimage'] = sample_preimage_noise(
+                result['noise_preimage_mean'],
+                result['noise_preimage_cov'],
+                result['noise_preimage_weights'],
+            )
         return result
 
     def augment(self, batch, keys):

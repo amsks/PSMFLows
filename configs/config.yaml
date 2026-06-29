@@ -1,6 +1,7 @@
 defaults:
   - _self_
   - agent: fql
+  - inversion: default
 
 # Run parameters (formerly absl flags in main.py).
 run_group: Debug
