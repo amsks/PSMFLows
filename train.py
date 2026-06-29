@@ -104,21 +104,6 @@ def build_pixel_cfgs(cfg):
 
 
 def make_agent(cfg: DictConfig, obs_space, action_dim: int):
-    if cfg.agent == "tdmpc2":
-        from agents.tdmpc2 import TDMPC2Agent
-        t = cfg.get("tdmpc2", {})
-        return TDMPC2Agent(
-            obs_space,
-            action_dim,
-            device=cfg.device,
-            horizon=cfg.get("horizon", 3),
-            batch_size=cfg.batch_size,
-            random_goal_ratio=t.get("random_goal_ratio", 0.5),
-            success_threshold=t.get("success_threshold", 0.04),
-            **{k: v for k, v in t.items()
-               if k not in ("random_goal_ratio", "success_threshold", "horizon")},
-        )
-
     if cfg.agent in ("psm", "psm_flowbc"):
         _obs_normalizer_cfg, _rgb_encoder_cfg, _augmentator_cfg = build_pixel_cfgs(cfg)
         psm_shared = dict(
