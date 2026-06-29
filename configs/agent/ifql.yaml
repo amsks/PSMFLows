@@ -1,0 +1,14 @@
+agent_name: ifql
+action_dim: null       # set automatically from data
+lr: 3e-4
+batch_size: 256
+actor_hidden_dims: [512, 512, 512, 512]
+value_hidden_dims: [512, 512, 512, 512]
+layer_norm: true
+actor_layer_norm: false
+discount: 0.99
+tau: 0.005
+expectile: 0.9
+num_samples: 32        # action samples for rejection sampling
+flow_steps: 10
+encoder: null

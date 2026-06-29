@@ -1,0 +1,17 @@
+agent_name: rebrac
+lr: 3e-4
+batch_size: 256
+actor_hidden_dims: [512, 512, 512, 512]
+value_hidden_dims: [512, 512, 512, 512]
+layer_norm: true
+actor_layer_norm: false
+discount: 0.99
+tau: 0.005
+tanh_squash: true
+actor_fc_scale: 0.01
+alpha_actor: 0.0
+alpha_critic: 0.0
+actor_freq: 2
+actor_noise: 0.2
+actor_noise_clip: 0.5
+encoder: null

@@ -1,0 +1,26 @@
+defaults:
+  - _self_
+  - agent: fql
+
+# Run parameters (formerly absl flags in main.py).
+run_group: Debug
+seed: 0
+env_name: cube-double-play-singletask-v0
+save_dir: exp/
+restore_path: null
+restore_epoch: null
+
+offline_steps: 1000000
+online_steps: 0
+buffer_size: 2000000
+log_interval: 5000
+eval_interval: 100000
+save_interval: 1000000
+
+eval_episodes: 50
+video_episodes: 0
+video_frame_skip: 3
+
+p_aug: null
+frame_stack: null
+balanced_sampling: 0

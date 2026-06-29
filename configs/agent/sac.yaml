@@ -1,0 +1,16 @@
+agent_name: sac
+lr: 3e-4
+batch_size: 256
+actor_hidden_dims: [512, 512, 512, 512]
+value_hidden_dims: [512, 512, 512, 512]
+layer_norm: true
+actor_layer_norm: false
+discount: 0.99
+tau: 0.005
+target_entropy: null              # null for automatic tuning
+target_entropy_multiplier: 0.5
+tanh_squash: true
+state_dependent_std: true
+actor_fc_scale: 0.01
+q_agg: min
+backup_entropy: false

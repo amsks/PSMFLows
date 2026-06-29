@@ -6,3 +6,14 @@ dist/
 .DS_Store
 .idea/
 .ruff_cache/
+
+# Virtual environments
+.venv/
+.venv*/
+venv/
+
+# Run artifacts
+exp/
+outputs/
+multirun/
+wandb/

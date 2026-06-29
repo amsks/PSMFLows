@@ -1,0 +1,16 @@
+agent_name: fql
+ob_dims: null          # set automatically from data
+action_dim: null       # set automatically from data
+lr: 3e-4
+batch_size: 256
+actor_hidden_dims: [512, 512, 512, 512]
+value_hidden_dims: [512, 512, 512, 512]
+layer_norm: true
+actor_layer_norm: false
+discount: 0.99
+tau: 0.005
+q_agg: mean
+alpha: 10.0            # BC coefficient (tune per environment)
+flow_steps: 10
+normalize_q_loss: false
+encoder: null          # visual encoder name (None, 'impala_small', ...)
