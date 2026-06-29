@@ -1,0 +1,23 @@
+# @package _global_
+defaults:
+  - psm
+  - _self_
+
+agent: flow_psm
+
+bc_coeff: 0.0          # scaffold trains the behavior flow only; Q-head off
+flow_steps: 10
+lr_actor_vf: 3.0e-4
+
+actor:
+  name: noise_conditioned_actor
+  hidden_dim: 512
+  hidden_layers: 2
+  embedding_layers: 2
+
+actor_vf:
+  hidden_dim: 512
+  hidden_layers: 4
+
+flow_psm:
+  u0_dim: null         # null -> defaults to action_dim

@@ -34,6 +34,7 @@ from agents.fb.agent import FBAgent
 from agents.fb.flow_bc.agent import FBFlowBCAgent
 from agents.psm.agent import PSMAgent
 from agents.psm.flow_bc.agent import PSMFlowBCAgent
+from agents.psm.flow_psm.agent import FlowPSMAgent
 from agents.rldp.agent import RLDPAgent
 from agents.rldp.flow_bc.agent import RLDPFlowBCAgent
 from data.ogbench import load_ogbench_dataset
@@ -45,7 +46,6 @@ from nn_models import (
     DrQEncoderArchiConfig,
     ForwardArchiConfig,
     IdentityNNConfig,
-    MLPEncoderArchiConfig,
     NoiseConditionedActorArchiConfig,
     SimpleActorArchiConfig,
     SimpleVectorFieldArchiConfig,
@@ -86,6 +86,11 @@ def build_pixel_cfgs(cfg):
         rgb_encoder_cfg = DrQEncoderArchiConfig(feature_dim=rgb_block.get("feature_dim"))
     elif rgb_block is not None and rgb_block.get("name") == "mlp":
         # State-side param-matched MLP encoder (cube_single_encmatch ablation).
+        # Lazy import: MLPEncoderArchiConfig is not present in this snapshot's
+        # nn_models; importing it lazily keeps train.py importable for all other
+        # (state/DrQ/Identity) paths.
+        from nn_models import MLPEncoderArchiConfig
+
         rgb_encoder_cfg = MLPEncoderArchiConfig(
             feature_dim=rgb_block.get("feature_dim", 256),
             hidden_dim=rgb_block.get("hidden_dim", 1100),
@@ -104,7 +109,7 @@ def build_pixel_cfgs(cfg):
 
 
 def make_agent(cfg: DictConfig, obs_space, action_dim: int):
-    if cfg.agent in ("psm", "psm_flowbc"):
+    if cfg.agent in ("psm", "psm_flowbc", "flow_psm"):
         _obs_normalizer_cfg, _rgb_encoder_cfg, _augmentator_cfg = build_pixel_cfgs(cfg)
         psm_shared = dict(
             obs_space=obs_space,
@@ -141,7 +146,7 @@ def make_agent(cfg: DictConfig, obs_space, action_dim: int):
             amp=cfg.get("amp", False),
             device=cfg.device,
         )
-        if cfg.agent == "psm_flowbc":
+        if cfg.agent in ("psm_flowbc", "flow_psm"):
             actor_cfg = NoiseConditionedActorArchiConfig(
                 hidden_dim=cfg.actor.hidden_dim,
                 hidden_layers=cfg.actor.hidden_layers,
@@ -151,14 +156,17 @@ def make_agent(cfg: DictConfig, obs_space, action_dim: int):
                 hidden_dim=cfg.actor_vf.hidden_dim,
                 hidden_layers=cfg.actor_vf.hidden_layers,
             )
-            return PSMFlowBCAgent(
+            flow_kwargs = dict(
                 actor_cfg=actor_cfg,
                 actor_vf_cfg=actor_vf_cfg,
                 flow_steps=cfg.flow_steps,
                 lr_actor_vf=cfg.lr_actor_vf,
                 bc_coeff=cfg.get("bc_coeff", 0.0),
-                **psm_shared,
             )
+            if cfg.agent == "flow_psm":
+                u0_dim = cfg.get("flow_psm", {}).get("u0_dim", None)
+                return FlowPSMAgent(u0_dim=u0_dim, **flow_kwargs, **psm_shared)
+            return PSMFlowBCAgent(**flow_kwargs, **psm_shared)
         # plain psm: TD3 actor built inside PSMModel from the actor_cfg dict
         psm_shared["actor_cfg"] = {"hidden_dim": cfg.actor.hidden_dim,
                                    "hidden_layers": cfg.actor.hidden_layers,
