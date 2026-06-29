@@ -1,0 +1,7 @@
+num_clusters: 1
+alpha: 1.0
+num_samples: 100
+n_steps: 10
+n_initial_steps: 100
+batch_size: 256
+seed: 0
