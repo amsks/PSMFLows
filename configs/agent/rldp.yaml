@@ -1,0 +1,13 @@
+# @package _global_
+defaults:
+  - fb            # inherit forward/backward/actor/encoder + all training kwargs
+  - _self_
+
+agent: rldp
+horizon: 5                   # RLDP samples horizon-5 windows for SP loss
+ortho_coef: 0.01             # much lower than FB's 1000 — encoder absorbs B-regularization
+predictor:
+  hidden_dim: 512
+  hidden_layers: 2
+  embedding_layers: 2
+  num_parallel: 2

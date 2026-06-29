@@ -1,0 +1,36 @@
+# @package _global_
+# Pixel cube-single PSM+FlowBC. Mirrors visual_cube_single.yaml but selects the
+# psm_flowbc agent (the FB visual domain hard-codes agent: fb_flowbc, and `agent`
+# is a config group so it cannot be force-added on the CLI — hence a sibling domain).
+defaults:
+  - /agent: psm_flowbc
+  - _self_
+
+domain: cube-single-play-v0      # create_ogbench_env prepends "visual-" for pixels
+agent: psm_flowbc
+obs_type: pixels
+frame_stack: 3
+
+# Pixel module selection (consumed by train.build_pixel_cfgs)
+obs_normalizer:
+  name: RGBNormalizerConfig
+rgb_encoder:
+  name: drq
+  feature_dim: 256
+augmentator:
+  name: random_shifts
+  pad: 2
+
+# Architecture deltas vs state (match the FB visual domain's shared pixel knobs)
+z_dim: 50
+batch_size: 256
+discount: 0.99
+bc_coeff: 3.0
+actor:
+  name: noise_conditioned_actor
+  hidden_dim: 512
+  hidden_layers: 2
+  embedding_layers: 2
+actor_vf:
+  hidden_dim: 512
+  hidden_layers: 4

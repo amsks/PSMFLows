@@ -1,0 +1,5 @@
+# @package _global_
+# tmpfs (RAM-backed) storage — no sudo, ephemeral on reboot. Default.
+jax_python: /dev/shm/.venv-jax/bin/python
+output_root: /dev/shm/gciql_outputs
+ogbench_home_symlink: ~/.ogbench

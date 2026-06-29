@@ -1,0 +1,51 @@
+defaults:
+  - _self_
+  - domain: antmaze_medium      # domain config selects its own agent via its defaults list
+  - override hydra/launcher: basic
+
+# Domain (overridden by domain/*.yaml)
+domain: antmaze-medium-navigate-v0
+obs_type: state
+data_path: datasets
+n_transitions: null         # null = load full dataset
+load_n_episodes: 1000
+
+# Training
+num_train_steps: 1_000_000
+batch_size: 256
+eval_every: 50_000
+log_every: 1_000
+save_every: 200_000
+seed: 42
+device: cuda
+
+# Resume (crash-recovery; see PAPER/specs/2026-06-09-training-resume-design.md)
+resume: false               # true => auto-find latest step_*.pt in save_dir and continue
+resume_from: null           # explicit checkpoint path; takes priority over resume
+force: false                # allow a fresh run to overwrite a non-empty save_dir
+
+# Eval
+eval_n_episodes: 10
+eval_relabel_size: 10_000
+eval_shift_reward: 1.0
+save_eval_videos: false     # opt-in: record first episode per task as GIF
+
+# Logging
+use_wandb: false
+wandb_project: factored-fb
+wandb_run_name: ${domain}__${agent}__s${seed}   # also names the output dir (resume needs a stable dir)
+wandb_entity: amsks             # ALWAYS amsks. NOT the al-laq-fb team default (null -> team). Override only intentionally.
+wandb_group: null               # useful for --multirun (e.g. group=fb_antmaze)
+wandb_tags: []                  # list of strings, e.g. [baseline, antmaze]
+wandb_save_code: true           # snapshot train.py and configs/ into the run
+
+# Artifact paths (per-run, resolved against Hydra's runtime output dir)
+save_dir: ${hydra:runtime.output_dir}/checkpoints
+eval_videos_dir: ${hydra:runtime.output_dir}/eval_videos
+
+hydra:
+  run:
+    dir: outputs/${wandb_run_name}
+  sweep:
+    dir: outputs/multirun/${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${hydra.job.num}__s${seed}

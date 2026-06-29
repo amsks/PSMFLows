@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - /agent: fb_flowbc
+  - _self_
+
+domain: cube-single-play-v0
+# agent + ortho_coef come from the agent config (defaults selects fb_flowbc by default;
+# CLI `agent=rldp` swaps the group to rldp/rldp_flowbc). FB launcher passes ortho_coef
+# explicitly so FB behavior is unchanged.
+bc_coeff: 3.0
+lr_b: 1.0e-4

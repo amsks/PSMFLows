@@ -1,0 +1,29 @@
+# CRL + FB FlowBC actor on visual cube-single with the DrQ front-end. Deltas vs
+# cube_single_state_crl_flowbc: the env, the DrQ encoder overrides
+# (encoder/frame_stack/p_aug), 500k steps, eval_on_cpu=0, run_group. OGBENCH_DRQ_FRONTEND
+# is set by run_gciql because encoder == 'drq'.
+defaults:
+  - storage: shm
+  - _self_
+variant: visual
+env_name: visual-cube-single-play-v0
+agent_file: tools/wandb_mode_shim/crl_flowbc.py
+seed: 0
+train_steps: 500000
+log_interval: 5000
+eval_interval: 100000
+save_interval: 50000
+eval_episodes: 50
+eval_on_cpu: 0
+run_group: factored-fb-crl-flowbc-pixel-drq
+# Resume support (all null = fresh run); see cube_single_state_crl_flowbc.yaml.
+restore_path: null
+restore_epoch: null
+exp_name: null
+agent_overrides:
+  bc_coeff: 3.0
+  batch_size: 256
+  encoder: drq
+  frame_stack: 3
+  p_aug: 1.0
+wandb_mode: online

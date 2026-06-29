@@ -1,0 +1,24 @@
+# Visual cube GCIVL with FB's DrQ visual front-end. Identical to
+# cube_single_visual_drq.yaml except the agent (agents/gcivl.py), alpha (10.0,
+# OGBench's GCIVL visual recipe), and run_group.
+defaults:
+  - storage: shm
+  - _self_
+variant: visual
+env_name: visual-cube-single-play-v0
+agent_file: agents/gcivl.py
+seed: 0
+train_steps: 500000
+log_interval: 5000
+eval_interval: 100000
+save_interval: 50000
+eval_episodes: 50
+eval_on_cpu: 0
+run_group: factored-fb-gcivl-pixel-drq
+agent_overrides:
+  alpha: 10.0
+  batch_size: 256
+  encoder: drq
+  frame_stack: 3
+  p_aug: 1.0
+wandb_mode: online

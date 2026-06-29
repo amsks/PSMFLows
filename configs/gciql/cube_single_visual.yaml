@@ -1,0 +1,21 @@
+# Visual cube: deltas vs state per impls/hyperparameters.sh:837-838.
+defaults:
+  - storage: shm
+  - _self_
+variant: visual
+env_name: visual-cube-single-play-v0
+agent_file: agents/gciql.py
+seed: 0
+train_steps: 500000
+log_interval: 5000
+eval_interval: 100000
+save_interval: 50000
+eval_episodes: 50
+eval_on_cpu: 0
+run_group: factored-fb-gciql-pixel
+agent_overrides:
+  alpha: 1.0
+  batch_size: 256
+  encoder: impala_small
+  p_aug: 0.5
+wandb_mode: online

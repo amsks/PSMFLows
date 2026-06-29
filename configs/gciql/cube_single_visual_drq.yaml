@@ -1,0 +1,27 @@
+# Visual cube GCIQL with FB's DrQ visual front-end (encoder + random_shifts
+# augmentation + frame_stack=3 + RGBNorm), so the only FB-vs-baseline difference
+# is the RL algorithm. encoder=drq is registered, and p_aug=1.0 + the augment
+# swap are wired, by tools/wandb_mode_shim (gated on OGBENCH_DRQ_FRONTEND, which
+# run_gciql.py sets because encoder == 'drq'). Deltas vs cube_single_visual.yaml:
+# encoder, frame_stack, p_aug, run_group.
+defaults:
+  - storage: shm
+  - _self_
+variant: visual
+env_name: visual-cube-single-play-v0
+agent_file: agents/gciql.py
+seed: 0
+train_steps: 500000
+log_interval: 5000
+eval_interval: 100000
+save_interval: 50000
+eval_episodes: 50
+eval_on_cpu: 0
+run_group: factored-fb-gciql-pixel-drq
+agent_overrides:
+  alpha: 1.0
+  batch_size: 256
+  encoder: drq
+  frame_stack: 3
+  p_aug: 1.0
+wandb_mode: online

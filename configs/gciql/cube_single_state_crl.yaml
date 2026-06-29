@@ -1,0 +1,22 @@
+# CRL — stock OGBench contrastive RL (DDPG+BC actor), state cube-single. The
+# NON-FlowBC CRL baseline (vs cube_single_state_crl_flowbc.yaml, which swaps the actor
+# for FB's flow-matching actor). agent_file points at the vendored OGBench CRL agent
+# (agents/crl.py, resolves at cwd=impls). alpha=3.0 is the OGBench cube-single-play
+# recipe (third_party/ogbench/impls/hyperparameters.sh). State => no encoder.
+defaults:
+  - storage: shm
+  - _self_
+variant: state
+env_name: cube-single-play-v0
+agent_file: agents/crl.py
+seed: 0
+train_steps: 1000000
+log_interval: 5000
+eval_interval: 100000
+save_interval: 1000000
+eval_episodes: 50
+eval_on_cpu: 1
+run_group: factored-fb-crl
+agent_overrides:
+  alpha: 3.0           # OGBench cube-single CRL recipe (default get_config alpha is 0.1)
+wandb_mode: online     # JAX/shim forces entity=amsks, project=factored-fb

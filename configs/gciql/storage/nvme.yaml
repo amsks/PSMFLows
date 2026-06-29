@@ -1,0 +1,6 @@
+# @package _global_
+# Spare instance-store NVMe — durable across reboot only if remounted; needs
+# one-time `make install-jax` after mounting /mnt/scratch1 (see README).
+jax_python: /mnt/scratch1/.venv-jax/bin/python
+output_root: /mnt/scratch1/gciql_outputs
+ogbench_home_symlink: ~/.ogbench

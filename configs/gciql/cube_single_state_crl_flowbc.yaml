@@ -1,0 +1,31 @@
+# CRL + FB FlowBC actor on state cube-single. agent_name=crl_flowbc is registered,
+# and the agent file is resolved to an absolute path, by tools/wandb_mode_shim
+# (see run_gciql._resolve_agent_file). Deltas vs cube_single_state_crl.yaml: the
+# agent file, bc_coeff (3.0, FB manipulation default), run_group. State => no encoder.
+defaults:
+  - storage: shm
+  - _self_
+variant: state
+env_name: cube-single-play-v0
+agent_file: tools/wandb_mode_shim/crl_flowbc.py
+seed: 0
+train_steps: 1000000
+log_interval: 5000
+eval_interval: 100000
+save_interval: 1000000
+eval_episodes: 50
+eval_on_cpu: 1
+run_group: factored-fb-crl-flowbc
+# Resume support (all null = fresh run). Set on the CLI to continue a killed run
+# into the SAME output dir as a single 0..train_steps run would have produced:
+#   restore_path : dir holding params_<restore_epoch>.pkl (== the target save dir)
+#   restore_epoch: checkpoint step to load; also offsets saved ckpt epochs and
+#                  wandb/CSV steps so files are named params_<restore_epoch+i>.
+#   exp_name     : pin the run dir / wandb name to the original (else timestamped).
+# Then pass train_steps = REMAINING steps (e.g. 400000 to finish a 1M run @600k).
+restore_path: null
+restore_epoch: null
+exp_name: null
+agent_overrides:
+  bc_coeff: 3.0
+wandb_mode: online

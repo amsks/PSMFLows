@@ -1,0 +1,6 @@
+# Isolated environment for the vendored OGBench (JAX) GCIQL track.
+# Installed into /mnt/scratch1/.venv-jax — NEVER mixed with the PyTorch .venv.
+# The `ogbench` env/dataset library is installed from the VENDORED source
+# (pinned to the vendored commit), pulling its [train] extra (jax/flax/etc.).
+-e ./third_party/ogbench[train]
+tqdm

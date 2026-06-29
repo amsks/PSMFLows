@@ -1,0 +1,23 @@
+# @package _global_
+defaults:
+  - fb           # inherit everything from configs/agent/fb.yaml
+  - _self_
+
+agent: fb_flowbc
+
+# FlowBC-specific
+bc_coeff: 0.3        # antmaze default; manipulation domains override to 3.0
+flow_steps: 10
+lr_actor_vf: 3.0e-4
+
+# Actor becomes noise-conditioned
+actor:
+  name: noise_conditioned_actor
+  hidden_dim: 512
+  hidden_layers: 2
+  embedding_layers: 2
+
+# Velocity field for flow matching
+actor_vf:
+  hidden_dim: 512
+  hidden_layers: 4

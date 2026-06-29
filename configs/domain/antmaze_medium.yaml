@@ -1,0 +1,15 @@
+# @package _global_
+defaults:
+  - /agent: fb_flowbc
+  - _self_
+
+# Matches td_jepa's scripts/train/proprio/launch_fb_ogbench.py sweep_antmaze:
+#   agent = FBFlowBCAgent (noise-conditioned actor + actor_vf flow matching)
+#   bc_coeff = 0.3
+#   ortho_coef sweep: [100, 1000]
+#   lr_b sweep:       [1e-4, 1e-5]
+domain: antmaze-medium-navigate-v0
+agent: fb_flowbc
+bc_coeff: 0.3
+ortho_coef: 1.0      # default; sweep 100/1000 on CLI to match td_jepa
+lr_b: 1.0e-4         # default; sweep 1e-4/1e-5 on CLI to match td_jepa

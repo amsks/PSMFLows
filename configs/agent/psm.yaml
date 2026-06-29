@@ -1,0 +1,48 @@
+# @package _global_
+agent: psm
+
+# representation
+z_dim: 128                # reference PSM basis; sweep-best PSM config (0.34 @500k)
+norm_z: true
+max_log_seed: 16          # proto (binary) z dimension
+phi_input: s              # s | as | sas | ss  (s => phi(next_obs))
+norm_obs: false
+
+batch_size: 1024
+discount: 0.98            # reference PSM basis (match the domain default)
+device: cuda
+
+# phi (basis)
+phi:
+  hidden_dim: 256
+  hidden_layers: 2
+  norm: true
+  batch_norm: false
+
+# sf / psm psi (successor nets)
+sf:
+  hidden_dim: 1024
+  hidden_layers: 1
+  embedding_layers: 2
+  num_parallel: 2
+
+# TD3 actor (PSMAgent; replaced by FlowBC in psm_flowbc)
+actor:
+  hidden_dim: 1024
+  hidden_layers: 1
+  embedding_layers: 2
+
+# optimization
+lr_sf: 1.0e-4
+lr_phi: 1.0e-5            # sweep winner (ortho_coef=1 × lr_phi=1e-5), best at z128 basis
+lr_actor: 1.0e-4
+weight_decay: 0.0
+clip_grad_norm: 0.0
+target_tau: 0.01          # reference PSM basis
+ortho_coef: 1.0
+mix_ratio: 0.5
+pessimism_penalty: 0.0
+actor_pessimism_penalty: 0.5
+stddev: 0.2               # fixed actor std (reference stddev_schedule="0.2")
+stddev_clip: 0.3
+amp: false

@@ -1,0 +1,10 @@
+# @package _global_
+defaults:
+  - /agent: fb_flowbc
+  - _self_
+
+domain: cube-double-play-v0
+agent: fb_flowbc
+bc_coeff: 3.0
+ortho_coef: 1.0
+lr_b: 1.0e-4

@@ -1,0 +1,13 @@
+# @package _global_
+defaults:
+  - fb_flowbc     # inherit fb + flow_bc machinery (noise actor + vector field)
+  - _self_
+
+agent: rldp_flowbc
+horizon: 5
+ortho_coef: 0.01
+predictor:
+  hidden_dim: 512
+  hidden_layers: 2
+  embedding_layers: 2
+  num_parallel: 2

@@ -1,0 +1,21 @@
+# configs/hydra/launcher/slurm.yaml
+# Hydra submitit SLURM launcher — used by scripts/run_sweep_slurm.sh
+#
+# Install dep first: pip install -e ".[slurm]"
+# Override partition on the CLI: hydra.launcher.partition=YOUR_PARTITION
+
+_target_: hydra_plugins.hydra_submitit_launcher.submitit_launcher.SlurmLauncher
+
+partition: ???          # MUST override: --partition gpu, gpu_a100, etc.
+account: null           # optional: your slurm account / project
+qos: null               # optional: e.g. "normal", "high"
+
+nodes: 1
+tasks_per_node: 1
+gpus_per_node: 1
+cpus_per_task: 4
+mem_gb: 32
+
+timeout_min: 1440       # 24 h — enough for 1 M-step FB run
+
+submitit_folder: ${hydra.sweep.dir}/.submitit/%j

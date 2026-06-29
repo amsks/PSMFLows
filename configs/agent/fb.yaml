@@ -1,0 +1,52 @@
+# @package _global_
+agent: fb
+# core hyperparameters (override on CLI with `lr_b=1e-5` etc.)
+z_dim: 50
+L_dim: 50
+actor_encode_obs: false
+discount: 0.99
+lr_f: 1.0e-4
+lr_b: 1.0e-4
+lr_actor: 1.0e-4
+weight_decay: 0.0
+clip_grad_norm: 0.0
+ortho_coef: 1.0
+train_goal_ratio: 0.5
+fb_pessimism_penalty: 0.0
+actor_pessimism_penalty: 0.0
+actor_std: 0.2
+stddev_clip: 0.3
+f_target_tau: 0.005
+b_target_tau: 0.005
+bc_coeff: 0.0            # 0 for plain FB; td_jepa sets 0.3 on antmaze, 3.0 on cube via FBFlowBCAgent
+q_loss_coef: 0.0         # td_jepa's optional aux Q-MSE loss (off by default)
+# Experiment B: coverage-balanced (goal-agnostic) reweight of the FB diagonal term.
+reweight_alpha: 0.0                          # 0 = off (current FB exactly); try 0.25, 0.5
+reweight_clip: 10.0                          # per-sample weight cap (clamped to [1/clip, clip])
+reweight_density_path: analysis/cube_density.npz
+weight_diag: false                          # false = pure rho'-FB (diagonal unweighted); true = coverage-PRIORITIZED
+weight_z: false                             # true = resample goal-derived z by w (rare-goal exposure for F/actor)
+onestep: false                              # true = one-step FB (F not z-conditioned + SARSA next-action; behavior successor)
+goal_cond: false        # V1: feed the explicit goal obs into forward map + actor
+fixed_b: none           # V2: 'none' (learned B) | 'cube_xyz' (fixed USFA featurizer, z_dim->3)
+amp: false
+
+# Per-network architecture (td_jepa OGBench launch defaults)
+forward:
+  hidden_dim: 512
+  hidden_layers: 2
+  embedding_layers: 2
+  num_parallel: 2
+backward:
+  hidden_dim: 512
+  hidden_layers: 4
+  norm: true
+left_encoder:
+  hidden_dim: 512
+  hidden_layers: 4
+  norm: true
+actor:
+  name: simple
+  hidden_dim: 512
+  hidden_layers: 2
+  embedding_layers: 2

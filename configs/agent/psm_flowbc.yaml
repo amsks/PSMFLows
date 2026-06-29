@@ -1,0 +1,20 @@
+# @package _global_
+defaults:
+  - psm
+  - _self_
+
+agent: psm_flowbc
+
+bc_coeff: 3.0          # manipulation default (cube); antmaze would use 0.3
+flow_steps: 10
+lr_actor_vf: 3.0e-4
+
+actor:
+  name: noise_conditioned_actor
+  hidden_dim: 512
+  hidden_layers: 2
+  embedding_layers: 2
+
+actor_vf:
+  hidden_dim: 512
+  hidden_layers: 4
