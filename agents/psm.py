@@ -176,14 +176,21 @@ class PSMAgent(flax.struct.PyTreeNode):
         params["actor"], opt["actor"] = _step(self.txs["actor"], g_actor, params["actor"], opt["actor"])
 
         info = {**psm_i, **sf_i, **a_i}
-        return self.replace(params=flax.core.freeze(params), opt_states=opt), info
+        return self.replace(params=params, opt_states=opt), info
 
     def _draw_injection(self, batch, rng):
         c = self.config
         B = batch["observations"].shape[0]
         adim = c["action_dim"]
-        r1, r2, r3, r4, r5, r6 = jax.random.split(rng, 6)
-        z_cont = project_z(jax.random.normal(r1, (B, c["z_dim"])), c["norm_z"])
+        r1, r2, r3, r4, r5, rperm = jax.random.split(rng, 6)
+        # SF-branch z: Gaussian, with a mix_ratio fraction replaced by project_z(phi(goal[perm]))
+        # (reference sample_mixed_z, as a jit-friendly mask instead of dynamic indexing).
+        gauss_z = project_z(jax.random.normal(r1, (B, c["z_dim"])), c["norm_z"])
+        goal = batch["next_observations"]
+        perm = jax.random.permutation(rperm, B)
+        mixed_z = project_z(self._apply("phi", self.params["phi"], goal)[perm], c["norm_z"])
+        mix_mask = (jax.random.uniform(r5, (B,)) < c["mix_ratio"])[:, None]
+        z_cont = jnp.where(mix_mask, mixed_z, gauss_z)
         zbin = (jax.random.randint(r2, (B,), 0, 2 ** c["max_log_seed"])[:, None]
                 & (1 << jnp.arange(c["max_log_seed"]))) > 0
         z_psm = zbin.astype(jnp.float32)
@@ -197,20 +204,33 @@ class PSMAgent(flax.struct.PyTreeNode):
         return dict(z_cont=z_cont, z_psm=z_psm, proto_next_action=proto_na,
                     actor_next_action=sf_na, actor_sample=actor_smp)
 
-    @jax.jit
     def update(self, batch):
+        # NOTE: not @jax.jit yet — nets/txs/proto are dict-valued static fields that
+        # are not hashable for jit's static aux. Functionally correct; jitting (via
+        # a ModuleDict/FrozenDict refactor) is a perf follow-up.
         new_rng, rng = jax.random.split(self.rng)
         inj = self._draw_injection(batch, rng)
         new_agent, info = self.apply_update(batch, inj)
         return new_agent.replace(rng=new_rng), info
 
-    @jax.jit
     def sample_actions(self, observations, seed=None, temperature=1.0):
         # PSM acts with the TD3 actor mean; z must be supplied for goal-conditioned
         # acting. For OGBench single-task eval we infer z from rewards (see infer_z);
         # here we use a zero z as a placeholder when none is provided.
         z = jnp.zeros((*observations.shape[:-1], self.config["z_dim"]))
         return self._apply("actor", self.params["actor"], observations, z)
+
+    def total_loss(self, batch, grad_params=None, rng=None):
+        """Validation-logging loss: the three branch losses at current params (no step)."""
+        rng = rng if rng is not None else self.rng
+        inj = self._draw_injection(batch, rng)
+        B = batch["observations"].shape[0]
+        off, off_sum = self._off(B)
+        psm_fn, sf_fn, actor_fn = self._stages(self.params, batch, inj, off, off_sum)
+        psm_l, psm_i = psm_fn(self.params["phi"], self.params["psm_psi"])
+        sf_l, sf_i = sf_fn(self.params["sf_psi"], self.params["phi"])
+        a_l, a_i = actor_fn(self.params["actor"], self.params["sf_psi"])
+        return psm_l + sf_l + a_l, {**psm_i, **sf_i, **a_i}
 
     def infer_z(self, next_observations, rewards):
         phi = self._apply("phi", self.params["phi"], next_observations)
@@ -268,7 +288,7 @@ class PSMAgent(flax.struct.PyTreeNode):
         config = dict(config)
         config["ob_dims"] = list(ex_observations.shape[1:])
         config["action_dim"] = action_dim
-        return cls(rng=rng, params=flax.core.freeze(params), opt_states=opt_states,
+        return cls(rng=rng, params=params, opt_states=opt_states,
                    config=flax.core.FrozenDict(config), nets=nets, txs=txs, proto=proto)
 
 

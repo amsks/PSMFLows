@@ -63,11 +63,11 @@ def _mapped_agent():
     sf_p = load_psi_params(FIX, "sf_psi")
     psm_p = load_psi_params(FIX, "psm_psi")
     act_p = load_actor_params(FIX)
-    params = flax.core.freeze({
+    params = {
         "phi": phi_p, "sf_psi": sf_p, "psm_psi": psm_p, "actor": act_p,
         "target_phi": phi_p, "target_sf_psi": sf_p, "target_psm_psi": psm_p,
-    })
-    # init optimizer states on the FROZEN params so pytree node types match.
+    }
+    # plain dicts throughout (flax 0.8.5 init returns plain dicts); init opt to match.
     opt = {k: agent.txs[k].init(params[k]) for k in ["phi", "psm_psi", "sf_psi", "actor"]}
     return agent.replace(params=params, opt_states=opt)
 
