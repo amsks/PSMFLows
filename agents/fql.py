@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 import ml_collections
 import optax
+import distrax
 
 from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
@@ -18,6 +19,136 @@ class FQLAgent(flax.struct.PyTreeNode):
     rng: Any
     network: Any
     config: Any = nonpytree_field()
+
+    def _get_preimage_and_jacobian(self, state, action, n_steps):
+        """Preimage of `action` and the forward flow-map Jacobian d(action)/d(noise) at it.
+
+        Single example: `state` (ob_dim,), `action` (action_dim,). vmap for batches
+        so `jax.jacfwd` gives a per-example (A, A) Jacobian, not the full (B, A, B, A).
+        """
+        if self.config['encoder'] is not None:
+            state = self.network.select('actor_bc_flow_encoder')(state)
+        action = jnp.clip(action, -1, 1)
+
+        def flow_fn(x_t, t):
+            return self.network.select('actor_bc_flow')(state, x_t, t, is_encoded=True)
+
+        def implicit_euler_step(x_t, t):
+            def body(_, x_next):
+                return x_t - flow_fn(x_next, t) / n_steps
+
+            return jax.lax.fori_loop(0, 5, body, x_t)
+
+        def implicit_euler_loop(carry, i):
+            return implicit_euler_step(carry, jnp.full((1,), i / n_steps)), None
+
+        x_0, _ = jax.lax.scan(implicit_euler_loop, action, jnp.arange(n_steps - 1, -1, -1))
+
+        def forward_map(noise):
+            def body(x, i):
+                return x + flow_fn(x, jnp.full((1,), i / n_steps)) / n_steps, None
+
+            return jax.lax.scan(body, noise, jnp.arange(n_steps))[0]
+
+        return x_0, jax.jacfwd(forward_map)(x_0)
+
+    def _get_predistribution_proposal(self, state, action, n_steps, alpha=1.0):
+        """Local Gaussian proposal (mean, cov) for the preimage of `action`.
+
+        cov is the Laplace covariance of the target pi(x) ~ exp(-alpha*||flow(x)-action||)
+        around the preimage: (1/alpha^2)(J^T J)^{-1}, eigenvalues clipped for stability.
+        Larger alpha (lower temperature) => tighter proposal.
+        """
+        x_0, jacobian = self._get_preimage_and_jacobian(state, action, n_steps)
+        gram = jacobian.T @ jacobian + 1e-6 * jnp.eye(jacobian.shape[-1], dtype=jacobian.dtype)
+        eigvals, eigvecs = jnp.linalg.eigh(gram)
+        cov_eigvals = jnp.clip(1.0 / (alpha ** 2 * eigvals), a_min=0.01, a_max=1.0)
+        cov = (eigvecs * cov_eigvals[None, :]) @ eigvecs.T
+        return x_0, cov
+    
+    def compute_full_proposal_distribution(self, state, action, rng, num_samples=100, n_steps=10, n_initial_steps=100, alpha=1.0):
+        """Refine the preimage proposal toward pi(x) ~ exp(-alpha * ||flow(x) - action||) by importance sampling.
+
+        alpha is an inverse temperature (1/T): larger alpha => sharper target.
+        """
+        x_0, cov = self._get_predistribution_proposal(state, action, n_initial_steps, alpha)
+        state_b = jnp.broadcast_to(state, (num_samples, *state.shape))
+
+        def _step(carry, _):
+            x_0, cov, rng = carry
+            prop_dist = distrax.MultivariateNormalFullCovariance(loc=x_0, covariance_matrix=cov)
+            rng, sample_rng = jax.random.split(rng)
+            samples, log_prob = prop_dist.sample_and_log_prob(seed=sample_rng, sample_shape=(num_samples,))
+            actions = self.compute_flow_actions(state_b, noises=samples)
+            dist = alpha * jnp.linalg.norm(actions - action[None], axis=-1)
+            weights = jax.nn.softmax(-dist - log_prob, axis=0)
+            ess = 1.0 / jnp.sum(weights ** 2)
+            new_x_0 = jnp.sum(weights[..., None] * samples, axis=0)
+            diff = samples - new_x_0[None, :]
+            new_cov = (weights[..., None] * diff).T @ diff + 1e-6 * jnp.eye(cov.shape[-1], dtype=cov.dtype)
+            return (new_x_0, new_cov, rng), ess
+
+        (x_0, cov, rng), ess = jax.lax.scan(_step, (x_0, cov, rng), None, length=n_steps)
+        return x_0, cov, ess
+
+    def compute_full_proposal_distribution_em(self, state, action, rng, num_samples=100, n_steps=10, n_initial_steps=100, alpha=1.0, n_components=3):
+        """Importance-weighted EM fit of a Gaussian mixture to pi(x) ~ exp(-alpha * ||flow(x) - action||).
+
+        Samples are drawn from the current mixture; per-sample IS weights w_n ~ pi/q
+        carry the energy, membership responsibilities r_{k,n} assign them to components,
+        and the M-step uses gamma_{k,n} = w_n * r_{k,n}. alpha is an inverse temperature.
+        """
+        x_0, cov = self._get_predistribution_proposal(state, action, n_initial_steps, alpha)
+        action_dim = x_0.shape[-1]
+
+        rng, init_rng = jax.random.split(rng)
+        means = jax.random.multivariate_normal(init_rng, mean=x_0, cov=cov, shape=(n_components,))
+        covs = jnp.array([cov for _ in range(n_components)])
+        weights = jnp.ones(n_components) / n_components
+
+        def _em_step(carry, _):
+            means, covs, weights, rng = carry
+            rng, sample_rng = jax.random.split(rng)
+
+            component_rng = jax.random.split(sample_rng, n_components)
+            component_samples = jax.vmap(
+                lambda m, c, r: distrax.MultivariateNormalFullCovariance(loc=m, covariance_matrix=c)
+                    .sample(seed=r, sample_shape=(num_samples // n_components,))
+            )(means, covs, component_rng)
+            samples = component_samples.reshape((-1, action_dim))
+
+            state_b = jnp.broadcast_to(state, (samples.shape[0], *state.shape))
+            actions = self.compute_flow_actions(state_b, noises=samples)
+            log_energy = -alpha * jnp.linalg.norm(actions - action[None], axis=-1)
+
+            log_likelihoods = jax.vmap(
+                lambda m, c: jax.vmap(
+                    lambda x: distrax.MultivariateNormalFullCovariance(loc=m, covariance_matrix=c).log_prob(x)
+                )(samples)
+            )(means, covs)
+
+            log_joint = jnp.log(weights[..., None]) + log_likelihoods
+            log_q = jax.scipy.special.logsumexp(log_joint, axis=0)
+            responsibilities = jnp.exp(log_joint - log_q[None, :])
+            sample_weights = jax.nn.softmax(log_energy - log_q, axis=0)
+            gamma = responsibilities * sample_weights[None, :]
+
+            n_k = jnp.sum(gamma, axis=1)
+            new_weights = n_k / jnp.sum(n_k)
+            new_means = jnp.array([
+                jnp.sum(gamma[k, :, None] * samples, axis=0) / jnp.maximum(n_k[k], 1e-8)
+                for k in range(n_components)
+            ])
+            new_covs = jnp.array([
+                (gamma[k, :, None] * (samples - new_means[k])).T @ (samples - new_means[k]) / jnp.maximum(n_k[k], 1e-8)
+                + 1e-6 * jnp.eye(action_dim)
+                for k in range(n_components)
+            ])
+            ess = 1.0 / jnp.sum(sample_weights ** 2)
+            return (new_means, new_covs, new_weights, rng), ess
+
+        (means, covs, weights, rng), ess = jax.lax.scan(_em_step, (means, covs, weights, rng), None, length=n_steps)
+        return means, covs, weights, ess
 
     def critic_loss(self, batch, grad_params, rng):
         """Compute the FQL critic loss."""
@@ -252,7 +383,7 @@ def get_config():
             agent_name='fql',  # Agent name.
             ob_dims=ml_collections.config_dict.placeholder(list),  # Observation dimensions (will be set automatically).
             action_dim=ml_collections.config_dict.placeholder(int),  # Action dimension (will be set automatically).
-            lr=3e-4,  # Learning rate.
+            lr=3e-5,  # Learning rate.
             batch_size=256,  # Batch size.
             actor_hidden_dims=(512, 512, 512, 512),  # Actor network hidden dimensions.
             value_hidden_dims=(512, 512, 512, 512),  # Value network hidden dimensions.
@@ -262,7 +393,7 @@ def get_config():
             tau=0.005,  # Target network update rate.
             q_agg='mean',  # Aggregation method for target Q values.
             alpha=10.0,  # BC coefficient (need to be tuned for each environment).
-            flow_steps=10,  # Number of flow steps.
+            flow_steps=100,  # Number of flow steps.
             normalize_q_loss=False,  # Whether to normalize the Q loss.
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
         )
