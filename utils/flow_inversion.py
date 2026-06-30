@@ -7,6 +7,17 @@ from tqdm import trange
 from utils.datasets import get_noise_preimage_dataset, get_size
 
 
+def save_augmented_dataset(path, dataset):
+    """Persist a preimage-augmented dataset (dict of arrays) to a compressed .npz."""
+    np.savez_compressed(path, **{k: np.asarray(v) for k, v in dataset.items()})
+
+
+def load_augmented_dataset(path):
+    """Load a preimage-augmented dataset previously written by `save_augmented_dataset`."""
+    with np.load(path, allow_pickle=False) as z:
+        return {k: z[k] for k in z.files}
+
+
 def sample_preimage_noise(means, covs, weights, rng=None):
     """Sample one preimage-noise vector per transition from its EM Gaussian mixture.
 
