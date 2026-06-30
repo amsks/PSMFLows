@@ -118,6 +118,14 @@ class Dataset(FrozenDict):
                 result['noise_preimage_cov'],
                 result['noise_preimage_weights'],
             )
+            # Also sample the NEXT transition's preimage (u_0', the future-rollout policy index).
+            # WARNING: This is incorrect at the end of the trajectory. Use with caution.
+            nxt = np.minimum(idxs + 1, self.size - 1)
+            result['next_noise_preimage'] = sample_preimage_noise(
+                self._dict['noise_preimage_mean'][nxt],
+                self._dict['noise_preimage_cov'][nxt],
+                self._dict['noise_preimage_weights'][nxt],
+            )
         return result
 
     def augment(self, batch, keys):

@@ -9,8 +9,24 @@ inverse maps use the SAME step discretization.
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from agents.fql import FQLAgent, get_config
+
+
+@pytest.fixture(autouse=True)
+def _force_float32():
+    """Run inversion in its real operating regime (float32).
+
+    The PSM equivalence tests enable jax_enable_x64 globally at import, but the BC-flow
+    inversion code (agents/fql.py implicit-Euler scan) is not x64-safe — under x64 the time
+    `t` is float64 while the carry stays float32, breaking the scan carry-type invariant.
+    Normal training/inference is float32, so force it off here and restore the prior value.
+    """
+    prev = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", False)
+    yield
+    jax.config.update("jax_enable_x64", prev)
 
 
 def _tiny_agent(obs_dim=4, act_dim=2, flow_steps=100):
@@ -75,3 +91,31 @@ def test_save_load_roundtrips_augmented_dataset(tmp_path):
     assert set(back.keys()) == set(ds.keys())
     for k in ds:
         np.testing.assert_array_equal(back[k], ds[k])
+
+
+def test_batch_exposes_u0_and_u0prime():
+    """Task 3 (WP1): a sampled batch carries u_0 (noise_preimage) and u_0' (next_noise_preimage)."""
+    from utils.datasets import Dataset
+    from utils.flow_inversion import augment_dataset_with_preimage_distribution
+
+    agent = _tiny_agent(obs_dim=4, act_dim=2)
+    N = 32
+    ds = {
+        'observations': np.zeros((N, 4), np.float32),
+        'actions': np.zeros((N, 2), np.float32),
+        'terminals': np.zeros(N, np.float32),
+        'next_observations': np.zeros((N, 4), np.float32),
+        'rewards': np.zeros(N, np.float32),
+        'masks': np.ones(N, np.float32),
+    }
+    cfg = {'num_clusters': 2, 'alpha': 1.0, 'num_samples': 20,
+           'n_steps': 2, 'n_initial_steps': 10, 'batch_size': 16, 'seed': 0}
+    ds = augment_dataset_with_preimage_distribution(agent, ds, cfg)
+
+    d = Dataset.create(**ds)
+    d.return_preimage_noise = True
+    b = d.sample(8)
+    assert b['noise_preimage'].shape == (8, 2)
+    assert b['next_noise_preimage'].shape == (8, 2)
+    assert np.all(np.isfinite(b['noise_preimage']))
+    assert np.all(np.isfinite(b['next_noise_preimage']))
