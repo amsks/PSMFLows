@@ -63,6 +63,7 @@ class PSMAgent(flax.struct.PyTreeNode):
     rng: Any
     params: Any            # dict: phi/psm_psi/sf_psi/actor + target_phi/target_psm_psi/target_sf_psi
     opt_states: Any        # dict: phi/psm_psi/sf_psi/actor
+    z_eval: Any            # (z_dim,) task latent used by sample_actions; set via infer_eval_z
     config: Any = nonpytree_field()
     nets: Any = nonpytree_field()     # dict of nn.Module defs
     txs: Any = nonpytree_field()      # dict of optax GradientTransformation
@@ -214,10 +215,10 @@ class PSMAgent(flax.struct.PyTreeNode):
         return new_agent.replace(rng=new_rng), info
 
     def sample_actions(self, observations, seed=None, temperature=1.0):
-        # PSM acts with the TD3 actor mean; z must be supplied for goal-conditioned
-        # acting. For OGBench single-task eval we infer z from rewards (see infer_z);
-        # here we use a zero z as a placeholder when none is provided.
-        z = jnp.zeros((*observations.shape[:-1], self.config["z_dim"]))
+        # PSM acts with the TD3 actor mean, conditioned on the task latent z_eval
+        # (inferred from rewards via infer_eval_z). z_eval defaults to zeros until
+        # inferred; eval should call infer_eval_z on the trained agent first.
+        z = jnp.broadcast_to(self.z_eval, (*observations.shape[:-1], self.config["z_dim"]))
         return self._apply("actor", self.params["actor"], observations, z)
 
     def total_loss(self, batch, grad_params=None, rng=None):
@@ -237,11 +238,19 @@ class PSMAgent(flax.struct.PyTreeNode):
         z = (rewards.reshape(1, -1) @ phi).reshape(-1) / phi.shape[0]
         return project_z(z, self.config["norm_z"])
 
+    def infer_eval_z(self, next_observations, rewards):
+        """Return a copy of this agent with z_eval set to the reward-inferred task
+        latent. Call on the TRAINED agent (phi must be trained) before eval acting."""
+        return self.replace(z_eval=self.infer_z(next_observations, rewards))
+
     @classmethod
     def create(cls, seed, ex_observations, ex_actions, config):
         rng = jax.random.PRNGKey(seed)
         rng, rphi, rsf, rpsm, ract, rproto = jax.random.split(rng, 6)
-        obs_dim = ex_observations.shape[-1]
+        # PSM's bespoke phi/psi/actor operate on raw states; visual encoders are not
+        # supported yet (pixel envs are out of scope). Fail loudly rather than silently
+        # ignore a requested encoder.
+        assert config.get("encoder", None) is None, "PSM does not support visual encoders yet."
         action_dim = ex_actions.shape[-1]
         z_dim = config["z_dim"]
 
@@ -286,10 +295,46 @@ class PSMAgent(flax.struct.PyTreeNode):
         proto = (table.astype(jnp.float32), powers, max_seed)
 
         config = dict(config)
-        config["ob_dims"] = list(ex_observations.shape[1:])
+        config["ob_dims"] = tuple(ex_observations.shape[1:])
         config["action_dim"] = action_dim
         return cls(rng=rng, params=params, opt_states=opt_states,
+                   z_eval=jnp.zeros((z_dim,), jnp.float32),
                    config=flax.core.FrozenDict(config), nets=nets, txs=txs, proto=proto)
+
+
+def get_config():
+    """Importable default config, mirroring configs/agent/psm.yaml. Uses the same
+    ml_collections placeholder pattern as the other agents for auto-set fields."""
+    import ml_collections
+
+    return ml_collections.ConfigDict(
+        dict(
+            agent_name="psm",
+            batch_size=1024,
+            z_dim=128,
+            max_log_seed=16,
+            num_parallel=2,
+            discount=0.98,
+            tau=0.01,
+            ortho_coef=1.0,
+            mix_ratio=0.5,
+            pessimism_penalty=0.0,
+            actor_pessimism_penalty=0.5,
+            actor_std=0.2,
+            stddev_clip=0.3,
+            norm_z=True,
+            phi_input="s",
+            lr_phi=1.0e-4,
+            lr_sf=1.0e-4,
+            lr_actor=1.0e-4,
+            phi=dict(hidden_dim=256, hidden_layers=2),
+            sf=dict(hidden_dim=1024, hidden_layers=1, embedding_layers=2),
+            actor=dict(hidden_dim=1024, hidden_layers=1, embedding_layers=2),
+            ob_dims=ml_collections.config_dict.placeholder(list),
+            action_dim=ml_collections.config_dict.placeholder(int),
+            encoder=ml_collections.config_dict.placeholder(str),
+        )
+    )
 
 
 def _step(tx, grad, params, opt_state):

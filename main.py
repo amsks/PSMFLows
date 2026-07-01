@@ -181,8 +181,15 @@ def main(cfg: DictConfig):
         if cfg.eval_interval != 0 and (i == 1 or i % cfg.eval_interval == 0):
             renders = []
             eval_metrics = {}
+            # PSM acts on a reward-inferred task latent; infer it from the (trained)
+            # agent over a dataset sample so eval is goal-directed. No-op for agents
+            # without infer_eval_z (they act directly on observations).
+            eval_agent = agent
+            if hasattr(agent, 'infer_eval_z'):
+                z_batch = train_dataset.sample(min(train_dataset.size, 100000))
+                eval_agent = agent.infer_eval_z(z_batch['next_observations'], z_batch['rewards'])
             eval_info, trajs, cur_renders = evaluate(
-                agent=agent,
+                agent=eval_agent,
                 env=eval_env,
                 config=config,
                 num_eval_episodes=cfg.eval_episodes,
