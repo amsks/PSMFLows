@@ -17,7 +17,23 @@ import numpy as np
 import optax
 
 from utils.flax_utils import nonpytree_field
-from utils.psm_networks import PhiMap, PsiMap, PSMActor, truncated_clamp, truncated_sample
+from utils.psm_networks import (
+    FlowVectorField, NoiseConditionedActor, PhiMap, PsiMap, PSMActor,
+    truncated_clamp, truncated_sample,
+)
+
+
+class _HashableDict(dict):
+    """A dict that hashes/compares by identity so it can live in a jit static aux.
+
+    The nets/txs dicts are static (non-pytree) config for the agent; jitting `update`
+    requires them to be hashable. `.replace()` keeps these fields by reference across
+    steps, so identity hashing gives a stable key and jit cache hits."""
+
+    __hash__ = object.__hash__
+
+    def __eq__(self, other):
+        return self is other
 
 
 # ----------------------------- pure helpers -----------------------------
@@ -65,9 +81,9 @@ class PSMAgent(flax.struct.PyTreeNode):
     opt_states: Any        # dict: phi/psm_psi/sf_psi/actor
     z_eval: Any            # (z_dim,) task latent used by sample_actions; set via infer_eval_z
     config: Any = nonpytree_field()
-    nets: Any = nonpytree_field()     # dict of nn.Module defs
-    txs: Any = nonpytree_field()      # dict of optax GradientTransformation
-    proto: Any = nonpytree_field()    # (seed_to_action, powers, max_seed)
+    nets: Any = nonpytree_field()     # _HashableDict of nn.Module defs (static aux)
+    txs: Any = nonpytree_field()      # _HashableDict of optax GradientTransformation (static aux)
+    proto: Any = None                 # (seed_to_action, powers) — traced pytree; max_seed in config
 
     # ---- stage loss functions (closures built per-batch in _stage_losses) ----
     def _apply(self, name, params, *args):
@@ -81,9 +97,13 @@ class PSMAgent(flax.struct.PyTreeNode):
         obs, action, next_obs = batch["observations"], batch["actions"], batch["next_observations"]
         goal = next_obs  # phi_input='s', Identity normalizer/encoder for state
         B = obs.shape[0]
-        disc = c["discount"] * batch["masks"].reshape(-1, 1)  # masks = 1 - terminated (FQL/OGBench)
+        # Reference forces terminated=False for every transition (data/ogbench.py) => always
+        # bootstrap with full discount. OGBench masks are 0 at ~2% at-goal steps, which would
+        # cut the bootstrap there; force masks=1 to match the reference (round-2/3 audit #2).
+        disc = c["discount"]
         P = c["num_parallel"]
-        seed_to_action, powers, max_seed = self.proto
+        seed_to_action, powers = self.proto
+        max_seed = c["proto_max_seed"]
 
         z_psm = inj["z_psm"]
         proto_na = inj["proto_next_action"]
@@ -114,9 +134,11 @@ class PSMAgent(flax.struct.PyTreeNode):
             cl, cdiag, coff = contrastive_loss(M, jax.lax.stop_gradient(target_M), disc, off, off_sum)
             return cl, {"sf_loss": cl, "sf_diag": cdiag, "sf_offdiag": coff}
 
-        actor_smp = inj["actor_sample"]
+        actor_smp = inj.get("actor_sample")  # None for the flow actor (uses _flow_actor_fn)
 
         def actor_loss_fn(actor_p, sf_p):
+            # DDPGBC actor: TD3 deterministic mean + truncated exploration sample, with an
+            # optional behavior-cloning term (bc_coeff>0 => DDPG+BC; ==0 => plain DDPG).
             mu = self._apply("actor", actor_p, obs, z)
             a = truncated_clamp(mu + jax.lax.stop_gradient(actor_smp - mu))
             qpsis = self._apply("sf_psi", sf_p, obs, z, a)
@@ -124,9 +146,61 @@ class PSMAgent(flax.struct.PyTreeNode):
             qmean, qunc = targets_uncertainty(Qs, P)
             Q = qmean - c["actor_pessimism_penalty"] * qunc
             loss = -Q.mean()
-            return loss, {"actor_loss": loss, "q": Q.mean()}
+            info = {"actor_loss": loss, "q": Q.mean()}
+            if c["bc_coeff"] > 0:
+                bc_error = jnp.mean((a - action) ** 2)
+                # normalize Q by |Q| so the BC term has a stable relative scale (td_jepa/FB).
+                loss = loss / jax.lax.stop_gradient(jnp.abs(Qs).mean()) + c["bc_coeff"] * bc_error
+                info = {"actor_loss": loss, "q": Q.mean(), "bc_error": bc_error}
+            return loss, info
 
         return psm_loss_fn, sf_loss_fn, actor_loss_fn
+
+    def _flow_actor_fn(self, params, batch, inj, off, off_sum):
+        """Flow (FQL-style) actor: a BC flow-matching velocity field v(s, x_t, t) plus a
+        one-step, z-conditioned noise actor distilled from its ODE rollout. Returns a loss
+        closure over (actor_params, actor_vf_params); Q comes from the (fixed) sf_psi."""
+        c = self.config
+        obs, action = batch["observations"], batch["actions"]
+        z = inj["z_cont"]
+        x0, t, noise = inj["flow_x0"], inj["flow_t"], inj["flow_noise"]
+        P = c["num_parallel"]
+        bc_coeff = c["bc_coeff"]
+        steps = c["flow_steps"]
+        sf_p = params["sf_psi"]
+
+        def rollout(vf_p, o, n):
+            a = n
+            for i in range(steps):
+                ti = jnp.full((o.shape[0], 1), i / steps)
+                a = a + self._apply("actor_vf", vf_p, o, a, ti) / steps
+            return jnp.clip(a, -1.0, 1.0)
+
+        def loss_fn(actor_p, vf_p):
+            # BC flow-matching loss (trains the velocity field on dataset actions).
+            x1 = action
+            xt = (1 - t) * x0 + t * x1
+            vel = x1 - x0
+            pred = self._apply("actor_vf", vf_p, obs, xt, t)
+            bc_flow_loss = jnp.mean((pred - vel) ** 2)
+            # One-step z-conditioned actor action (NoiseConditionedActor applies tanh internally).
+            a = self._apply("actor", actor_p, obs, z, noise)
+            qpsis = self._apply("sf_psi", sf_p, obs, z, a)
+            Qs = (qpsis * z).sum(-1)
+            qmean, qunc = targets_uncertainty(Qs, P)
+            Q = qmean - c["actor_pessimism_penalty"] * qunc
+            q_loss = -Q.mean()
+            info = {"q": Q.mean(), "bc_flow_loss": bc_flow_loss}
+            if bc_coeff > 0:
+                target = jax.lax.stop_gradient(rollout(vf_p, obs, noise))
+                distill = jnp.mean((a - target) ** 2)
+                q_loss = q_loss / jax.lax.stop_gradient(jnp.abs(Qs).mean()) + bc_coeff * distill
+                info["bc_error"] = distill
+            loss = q_loss + bc_flow_loss
+            info["actor_loss"] = loss
+            return loss, info
+
+        return loss_fn
 
     def _off(self, B):
         off = 1.0 - jnp.eye(B)
@@ -142,10 +216,16 @@ class PSMAgent(flax.struct.PyTreeNode):
             self.params["phi"], self.params["psm_psi"])
         (sf_l, sf_i), g_sf = jax.value_and_grad(sf_fn, has_aux=True)(
             self.params["sf_psi"], self.params["phi"])
-        (a_l, a_i), g_actor = jax.value_and_grad(actor_fn, has_aux=True)(
-            self.params["actor"], self.params["sf_psi"])
+        if self.config["actor_type"] == "flow":
+            flow_fn = self._flow_actor_fn(self.params, batch, inj, off, off_sum)
+            (a_l, a_i), (g_actor, g_vf) = jax.value_and_grad(flow_fn, argnums=(0, 1), has_aux=True)(
+                self.params["actor"], self.params["actor_vf"])
+            grads = {"phi": g_phi, "psm_psi": g_psm, "sf_psi": g_sf, "actor": g_actor, "actor_vf": g_vf}
+        else:
+            (a_l, a_i), g_actor = jax.value_and_grad(actor_fn, has_aux=True)(
+                self.params["actor"], self.params["sf_psi"])
+            grads = {"phi": g_phi, "psm_psi": g_psm, "sf_psi": g_sf, "actor": g_actor}
         info = {**psm_i, **sf_i, **a_i}
-        grads = {"phi": g_phi, "psm_psi": g_psm, "sf_psi": g_sf, "actor": g_actor}
         return info, grads
 
     def apply_update(self, batch, inj):
@@ -171,10 +251,17 @@ class PSMAgent(flax.struct.PyTreeNode):
         params["sf_psi"], opt["sf_psi"] = _step(self.txs["sf_psi"], g_sf, params["sf_psi"], opt["sf_psi"])
         params["target_sf_psi"] = _soft(params["sf_psi"], params["target_sf_psi"], tau)
 
-        # stage 3: actor (reads updated sf_psi) -> step actor
-        _, _, actor_fn = self._stages(params, batch, inj, off, off_sum)
-        (a_l, a_i), g_actor = jax.value_and_grad(actor_fn, has_aux=True)(params["actor"], params["sf_psi"])
-        params["actor"], opt["actor"] = _step(self.txs["actor"], g_actor, params["actor"], opt["actor"])
+        # stage 3: actor (reads updated sf_psi) -> step actor (+ velocity field for flow)
+        if self.config["actor_type"] == "flow":
+            flow_fn = self._flow_actor_fn(params, batch, inj, off, off_sum)
+            (a_l, a_i), (g_actor, g_vf) = jax.value_and_grad(flow_fn, argnums=(0, 1), has_aux=True)(
+                params["actor"], params["actor_vf"])
+            params["actor"], opt["actor"] = _step(self.txs["actor"], g_actor, params["actor"], opt["actor"])
+            params["actor_vf"], opt["actor_vf"] = _step(self.txs["actor_vf"], g_vf, params["actor_vf"], opt["actor_vf"])
+        else:
+            _, _, actor_fn = self._stages(params, batch, inj, off, off_sum)
+            (a_l, a_i), g_actor = jax.value_and_grad(actor_fn, has_aux=True)(params["actor"], params["sf_psi"])
+            params["actor"], opt["actor"] = _step(self.txs["actor"], g_actor, params["actor"], opt["actor"])
 
         info = {**psm_i, **sf_i, **a_i}
         return self.replace(params=params, opt_states=opt), info
@@ -183,11 +270,12 @@ class PSMAgent(flax.struct.PyTreeNode):
         c = self.config
         B = batch["observations"].shape[0]
         adim = c["action_dim"]
-        r1, r2, r3, r4, r5, rperm = jax.random.split(rng, 6)
+        obs, next_obs = batch["observations"], batch["next_observations"]
+        r1, r2, r5, rperm, rtail = jax.random.split(rng, 5)
         # SF-branch z: Gaussian, with a mix_ratio fraction replaced by project_z(phi(goal[perm]))
         # (reference sample_mixed_z, as a jit-friendly mask instead of dynamic indexing).
         gauss_z = project_z(jax.random.normal(r1, (B, c["z_dim"])), c["norm_z"])
-        goal = batch["next_observations"]
+        goal = next_obs
         perm = jax.random.permutation(rperm, B)
         mixed_z = project_z(self._apply("phi", self.params["phi"], goal)[perm], c["norm_z"])
         mix_mask = (jax.random.uniform(r5, (B,)) < c["mix_ratio"])[:, None]
@@ -195,30 +283,57 @@ class PSMAgent(flax.struct.PyTreeNode):
         zbin = (jax.random.randint(r2, (B,), 0, 2 ** c["max_log_seed"])[:, None]
                 & (1 << jnp.arange(c["max_log_seed"]))) > 0
         z_psm = zbin.astype(jnp.float32)
-        seed_to_action, powers, max_seed = self.proto
-        obs_hash = jnp.arange(B)
+        seed_to_action, powers = self.proto
+        max_seed = c["proto_max_seed"]
+        # Proto behavior policy is keyed on the GLOBAL replay-buffer row index of each
+        # transition (reference next_obs_hash = batch["index"]; see agents/psm/agent.py
+        # and train.py with_index). Falling back to arange(B) (batch position) makes the
+        # proto next-action depend on where a transition lands in the batch — inconsistent
+        # across resamples. Use the injected index when present.
+        obs_hash = batch["index"] if "index" in batch else jnp.arange(B)
         proto_na = proto_sample(seed_to_action, powers, obs_hash, z_psm, max_seed)
-        mu_next = self._apply("actor", self.params["actor"], batch["next_observations"], z_cont)
-        sf_na = truncated_sample(mu_next, c["actor_std"], jax.random.normal(r3, (B, adim)), clip=c["stddev_clip"])
-        mu = self._apply("actor", self.params["actor"], batch["observations"], z_cont)
-        actor_smp = truncated_sample(mu, c["actor_std"], jax.random.normal(r4, (B, adim)), clip=c["stddev_clip"])
-        return dict(z_cont=z_cont, z_psm=z_psm, proto_next_action=proto_na,
-                    actor_next_action=sf_na, actor_sample=actor_smp)
 
+        inj = dict(z_cont=z_cont, z_psm=z_psm, proto_next_action=proto_na)
+        if c["actor_type"] == "flow":
+            r_x0, r_t, r_noise, r_na = jax.random.split(rtail, 4)
+            # SF-branch next action = the one-step flow policy at s' (bootstrap target).
+            na = self._apply("actor", self.params["actor"], next_obs, z_cont,
+                             jax.random.normal(r_na, (B, adim)))
+            inj.update(actor_next_action=jnp.clip(na, -1.0, 1.0),
+                       flow_x0=jax.random.normal(r_x0, (B, adim)),
+                       flow_t=jax.random.uniform(r_t, (B, 1)),
+                       flow_noise=jax.random.normal(r_noise, (B, adim)))
+        else:
+            r3, r4 = jax.random.split(rtail)
+            mu_next = self._apply("actor", self.params["actor"], next_obs, z_cont)
+            sf_na = truncated_sample(mu_next, c["actor_std"], jax.random.normal(r3, (B, adim)), clip=c["stddev_clip"])
+            mu = self._apply("actor", self.params["actor"], obs, z_cont)
+            actor_smp = truncated_sample(mu, c["actor_std"], jax.random.normal(r4, (B, adim)), clip=c["stddev_clip"])
+            inj.update(actor_next_action=sf_na, actor_sample=actor_smp)
+        return inj
+
+    @jax.jit
     def update(self, batch):
-        # NOTE: not @jax.jit yet — nets/txs/proto are dict-valued static fields that
-        # are not hashable for jit's static aux. Functionally correct; jitting (via
-        # a ModuleDict/FrozenDict refactor) is a perf follow-up.
+        # Jitted training step. nets/txs are hashable (_HashableDict) static aux and proto
+        # is a traced pytree leaf, so `self` is a valid jit argument. The equivalence tests
+        # call apply_update/compute_static directly (un-jitted), so their numerics are
+        # unaffected by any op-fusion here.
         new_rng, rng = jax.random.split(self.rng)
         inj = self._draw_injection(batch, rng)
         new_agent, info = self.apply_update(batch, inj)
         return new_agent.replace(rng=new_rng), info
 
+    @jax.jit
     def sample_actions(self, observations, seed=None, temperature=1.0):
-        # PSM acts with the TD3 actor mean, conditioned on the task latent z_eval
-        # (inferred from rewards via infer_eval_z). z_eval defaults to zeros until
-        # inferred; eval should call infer_eval_z on the trained agent first.
+        # PSM acts conditioned on the task latent z_eval (inferred from rewards via
+        # infer_eval_z; defaults to zeros until inferred). DDPGBC returns the TD3 actor
+        # mean; flow runs the one-step, z-conditioned noise actor.
         z = jnp.broadcast_to(self.z_eval, (*observations.shape[:-1], self.config["z_dim"]))
+        if self.config["actor_type"] == "flow":
+            seed = self.rng if seed is None else seed
+            noise = jax.random.normal(seed, (*observations.shape[:-1], self.config["action_dim"]))
+            a = self._apply("actor", self.params["actor"], observations, z, noise)
+            return jnp.clip(a, -1.0, 1.0)
         return self._apply("actor", self.params["actor"], observations, z)
 
     def total_loss(self, batch, grad_params=None, rng=None):
@@ -230,7 +345,11 @@ class PSMAgent(flax.struct.PyTreeNode):
         psm_fn, sf_fn, actor_fn = self._stages(self.params, batch, inj, off, off_sum)
         psm_l, psm_i = psm_fn(self.params["phi"], self.params["psm_psi"])
         sf_l, sf_i = sf_fn(self.params["sf_psi"], self.params["phi"])
-        a_l, a_i = actor_fn(self.params["actor"], self.params["sf_psi"])
+        if self.config["actor_type"] == "flow":
+            a_l, a_i = self._flow_actor_fn(self.params, batch, inj, off, off_sum)(
+                self.params["actor"], self.params["actor_vf"])
+        else:
+            a_l, a_i = actor_fn(self.params["actor"], self.params["sf_psi"])
         return psm_l + sf_l + a_l, {**psm_i, **sf_i, **a_i}
 
     def infer_z(self, next_observations, rewards):
@@ -253,6 +372,9 @@ class PSMAgent(flax.struct.PyTreeNode):
         assert config.get("encoder", None) is None, "PSM does not support visual encoders yet."
         action_dim = ex_actions.shape[-1]
         z_dim = config["z_dim"]
+        actor_cfg = config["actor"]
+        actor_type = actor_cfg["type"] if "type" in actor_cfg else "ddpgbc"
+        assert actor_type in ("ddpgbc", "flow"), f"unknown actor.type {actor_type!r}"
 
         nets = dict(
             phi=PhiMap(z_dim=z_dim, hidden_dim=config["phi"]["hidden_dim"],
@@ -265,9 +387,6 @@ class PSMAgent(flax.struct.PyTreeNode):
                            num_parallel=config["num_parallel"],
                            embedding_layers=config["sf"]["embedding_layers"],
                            hidden_layers=config["sf"]["hidden_layers"]),
-            actor=PSMActor(action_dim=action_dim, hidden_dim=config["actor"]["hidden_dim"],
-                           embedding_layers=config["actor"]["embedding_layers"],
-                           hidden_layers=config["actor"]["hidden_layers"]),
         )
         ex_obs = ex_observations
         ex_z = jnp.zeros((ex_obs.shape[0], z_dim))
@@ -276,30 +395,73 @@ class PSMAgent(flax.struct.PyTreeNode):
             "phi": nets["phi"].init(rphi, ex_obs)["params"],
             "sf_psi": nets["sf_psi"].init(rsf, ex_obs, ex_z, ex_actions)["params"],
             "psm_psi": nets["psm_psi"].init(rpsm, ex_obs, ex_zbin, ex_actions)["params"],
-            "actor": nets["actor"].init(ract, ex_obs, ex_z)["params"],
         }
+
+        actor_keys = ["actor"]
+        if actor_type == "flow":
+            # Flow actor: a faithful NoiseConditionedActor head (a = tanh(net(obs, z, noise))
+            # via dual LayerNorm/Tanh/ReLU embeddings) + an unconditional GELU velocity field
+            # v(s, x_t, t). Ports agents/psm/flow_bc + nn_models.{NoiseConditionedActor,VectorField}.
+            def _acfg(key, default):
+                return actor_cfg[key] if key in actor_cfg else default
+            fa_hidden = int(_acfg("flow_actor_hidden_dim", 512))
+            fa_layers = int(_acfg("flow_actor_hidden_layers", 2))
+            fa_emb = int(_acfg("flow_actor_embedding_layers", 2))
+            vf_hidden = int(_acfg("flow_vf_hidden_dim", 512))
+            vf_layers = int(_acfg("flow_vf_hidden_layers", 4))
+            ract, rvf = jax.random.split(ract)
+            nets["actor"] = NoiseConditionedActor(action_dim=action_dim, hidden_dim=fa_hidden,
+                                                  hidden_layers=fa_layers, embedding_layers=fa_emb)
+            nets["actor_vf"] = FlowVectorField(action_dim=action_dim, hidden_dim=vf_hidden,
+                                               hidden_layers=vf_layers)
+            ex_noise = ex_actions
+            ex_times = ex_actions[..., :1]
+            params["actor"] = nets["actor"].init(ract, ex_obs, ex_z, ex_noise)["params"]
+            params["actor_vf"] = nets["actor_vf"].init(rvf, ex_obs, ex_actions, ex_times)["params"]
+            actor_keys = ["actor", "actor_vf"]
+        else:
+            nets["actor"] = PSMActor(action_dim=action_dim, hidden_dim=actor_cfg["hidden_dim"],
+                                     embedding_layers=actor_cfg["embedding_layers"],
+                                     hidden_layers=actor_cfg["hidden_layers"])
+            params["actor"] = nets["actor"].init(ract, ex_obs, ex_z)["params"]
+
         params["target_phi"] = copy.deepcopy(params["phi"])
         params["target_psm_psi"] = copy.deepcopy(params["psm_psi"])
         params["target_sf_psi"] = copy.deepcopy(params["sf_psi"])
 
+        lr_actor_vf = float(actor_cfg["lr_actor_vf"]) if "lr_actor_vf" in actor_cfg else 3e-4
         txs = dict(
             phi=optax.adam(config["lr_phi"]), psm_psi=optax.adam(config["lr_sf"]),
             sf_psi=optax.adam(config["lr_sf"]), actor=optax.adam(config["lr_actor"]),
         )
-        opt_states = {k: txs[k].init(params[k]) for k in ["phi", "psm_psi", "sf_psi", "actor"]}
+        if actor_type == "flow":
+            txs["actor_vf"] = optax.adam(lr_actor_vf)
+        opt_states = {k: txs[k].init(params[k]) for k in ["phi", "psm_psi", "sf_psi", *actor_keys]}
 
-        # proto table (jax-generated; used only for training — tests inject it)
+        # proto table (jax-generated; used only for training — tests inject it). The table
+        # + powers are a traced pytree leaf (so `update` can be jitted); max_seed is a
+        # static python int kept in config.
         max_seed = 2 ** config["max_log_seed"] + 20000
         table = (jax.random.uniform(rproto, (max_seed, action_dim)) - 1.0) * 2.0
         powers = (2 ** jnp.arange(config["max_log_seed"]))[::-1].astype(jnp.float32)
-        proto = (table.astype(jnp.float32), powers, max_seed)
+        proto = (table.astype(jnp.float32), powers)
 
-        config = dict(config)
+        # Store a fully-plain config (nested ConfigDicts -> dicts, lists -> tuples) so the
+        # FrozenDict is hashable and can serve as the jit static aux for `update`.
+        config = _plain_config(config)
         config["ob_dims"] = tuple(ex_observations.shape[1:])
         config["action_dim"] = action_dim
+        config["proto_max_seed"] = max_seed
+        # Hoist actor-dispatch scalars to the top level so runtime methods read plain
+        # values (equiv-test configs omit these -> ddpgbc with bc_coeff=0 == legacy path).
+        config["actor_type"] = actor_type
+        config["bc_coeff"] = float(actor_cfg["bc_coeff"]) if "bc_coeff" in actor_cfg else 0.0
+        config["flow_steps"] = int(actor_cfg["flow_steps"]) if "flow_steps" in actor_cfg else 10
+        config["lr_actor_vf"] = lr_actor_vf
         return cls(rng=rng, params=params, opt_states=opt_states,
                    z_eval=jnp.zeros((z_dim,), jnp.float32),
-                   config=flax.core.FrozenDict(config), nets=nets, txs=txs, proto=proto)
+                   config=flax.core.FrozenDict(config),
+                   nets=_HashableDict(nets), txs=_HashableDict(txs), proto=proto)
 
 
 def get_config():
@@ -324,17 +486,33 @@ def get_config():
             stddev_clip=0.3,
             norm_z=True,
             phi_input="s",
-            lr_phi=1.0e-4,
+            lr_phi=1.0e-5,  # reference PSM sweep winner (configs/agent/psm.yaml); NOT 1e-4
             lr_sf=1.0e-4,
             lr_actor=1.0e-4,
             phi=dict(hidden_dim=256, hidden_layers=2),
             sf=dict(hidden_dim=1024, hidden_layers=1, embedding_layers=2),
-            actor=dict(hidden_dim=1024, hidden_layers=1, embedding_layers=2),
+            actor=dict(type="ddpgbc", hidden_dim=1024, hidden_layers=1, embedding_layers=2,
+                       bc_coeff=3.0, flow_steps=10, lr_actor_vf=3.0e-4,
+                       # flow actor (NoiseConditionedActor) + velocity field (VectorField) dims,
+                       # matching reference configs/agent/psm_flowbc.yaml.
+                       flow_actor_hidden_dim=512, flow_actor_hidden_layers=2,
+                       flow_actor_embedding_layers=2,
+                       flow_vf_hidden_dim=512, flow_vf_hidden_layers=4),
             ob_dims=ml_collections.config_dict.placeholder(list),
             action_dim=ml_collections.config_dict.placeholder(int),
             encoder=ml_collections.config_dict.placeholder(str),
         )
     )
+
+
+def _plain_config(x):
+    """Recursively convert ConfigDict/dict -> plain dict and list -> tuple, so the
+    resulting FrozenDict is hashable (required for the jitted `update`'s static aux)."""
+    if isinstance(x, (list, tuple)):
+        return tuple(_plain_config(v) for v in x)
+    if hasattr(x, "items"):
+        return {k: _plain_config(v) for k, v in x.items()}
+    return x
 
 
 def _step(tx, grad, params, opt_state):

@@ -6,11 +6,20 @@ activation/norm sequence — `ntanh` (LayerNorm then tanh), `relu`, and a final
 equivalence. flax LayerNorm uses epsilon=1e-5 to match torch's default.
 """
 
+import math
+
 import jax
 import flax.linen as nn
 import jax.numpy as jnp
 
 from utils.networks import ensemblize
+
+# Reference weight_init (agents/psm/psm_nets.py:75-87, nn_models.py:61-77):
+#   nn.Linear      -> orthogonal_(gain=1),                bias 0
+#   DenseParallel  -> parallel_orthogonal_(gain=relu≈√2), bias 0
+# flax Dense bias defaults to zeros already, so we only override kernel_init.
+_ORTH1 = nn.initializers.orthogonal()                       # gain 1 (plain Linear)
+_ORTH_RELU = nn.initializers.orthogonal(scale=math.sqrt(2.0))  # ReLU gain (ensembled towers)
 
 
 def truncated_clamp(x, low=-1.0, high=1.0, eps=1e-6):
@@ -44,13 +53,13 @@ class PhiMap(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        x = nn.Dense(self.hidden_dim)(x)
+        x = nn.Dense(self.hidden_dim, kernel_init=_ORTH1)(x)
         x = nn.LayerNorm(epsilon=1e-5)(x)
         x = jnp.tanh(x)
         for _ in range(self.hidden_layers - 1):
-            x = nn.Dense(self.hidden_dim)(x)
+            x = nn.Dense(self.hidden_dim, kernel_init=_ORTH1)(x)
             x = nn.relu(x)
-        x = nn.Dense(self.z_dim)(x)
+        x = nn.Dense(self.z_dim, kernel_init=_ORTH1)(x)
         if self.norm:
             x = psm_norm(x)
         return x
@@ -73,14 +82,15 @@ class _PsiTower(nn.Module):
         assert self.embedding_layers == 2 and self.hidden_layers == 1, \
             "only embedding_layers=2, hidden_layers=1 supported (reference default)"
         h = self.hidden_dim
-        self.embed_z_0 = nn.Dense(h)
+        # DenseParallel in the reference -> parallel_orthogonal_ with ReLU gain (√2).
+        self.embed_z_0 = nn.Dense(h, kernel_init=_ORTH_RELU)
         self.embed_z_ln = nn.LayerNorm(epsilon=1e-5)
-        self.embed_z_3 = nn.Dense(h // 2)
-        self.embed_sa_0 = nn.Dense(h)
+        self.embed_z_3 = nn.Dense(h // 2, kernel_init=_ORTH_RELU)
+        self.embed_sa_0 = nn.Dense(h, kernel_init=_ORTH_RELU)
         self.embed_sa_ln = nn.LayerNorm(epsilon=1e-5)
-        self.embed_sa_3 = nn.Dense(h // 2)
-        self.fs_0 = nn.Dense(h)
-        self.fs_2 = nn.Dense(self.output_dim)
+        self.embed_sa_3 = nn.Dense(h // 2, kernel_init=_ORTH_RELU)
+        self.fs_0 = nn.Dense(h, kernel_init=_ORTH_RELU)
+        self.fs_2 = nn.Dense(self.output_dim, kernel_init=_ORTH_RELU)
 
     def __call__(self, obs, z, action):
         ze = nn.relu(self.embed_z_3(jnp.tanh(self.embed_z_ln(self.embed_z_0(jnp.concatenate([obs, z], -1))))))
@@ -104,14 +114,14 @@ class PSMActor(nn.Module):
     def setup(self):
         assert self.embedding_layers == 2 and self.hidden_layers == 1
         h = self.hidden_dim
-        self.embed_z_0 = nn.Dense(h)
+        self.embed_z_0 = nn.Dense(h, kernel_init=_ORTH1)
         self.embed_z_ln = nn.LayerNorm(epsilon=1e-5)
-        self.embed_z_3 = nn.Dense(h // 2)
-        self.embed_s_0 = nn.Dense(h)
+        self.embed_z_3 = nn.Dense(h // 2, kernel_init=_ORTH1)
+        self.embed_s_0 = nn.Dense(h, kernel_init=_ORTH1)
         self.embed_s_ln = nn.LayerNorm(epsilon=1e-5)
-        self.embed_s_3 = nn.Dense(h // 2)
-        self.policy_0 = nn.Dense(h)
-        self.policy_2 = nn.Dense(self.action_dim)
+        self.embed_s_3 = nn.Dense(h // 2, kernel_init=_ORTH1)
+        self.policy_0 = nn.Dense(h, kernel_init=_ORTH1)
+        self.policy_2 = nn.Dense(self.action_dim, kernel_init=_ORTH1)
 
     def __call__(self, obs, z):
         ze = nn.relu(self.embed_z_3(jnp.tanh(self.embed_z_ln(self.embed_z_0(jnp.concatenate([obs, z], -1))))))
@@ -137,3 +147,59 @@ class PsiMap(nn.Module):
             name="tower",
         )
         return tower(obs, z, action)
+
+
+def _simple_embedding(x, hidden_dim, embedding_layers):
+    """Reference nn_models.simple_embedding (num_parallel=1): Linear->LayerNorm->Tanh,
+    (embedding_layers-2)x[Linear->ReLU], Linear(hidden//2)->ReLU. Returns hidden//2."""
+    assert embedding_layers >= 2, "must have at least 2 embedding layers"
+    x = jnp.tanh(nn.LayerNorm(epsilon=1e-5)(nn.Dense(hidden_dim, kernel_init=_ORTH1)(x)))
+    for _ in range(embedding_layers - 2):
+        x = nn.relu(nn.Dense(hidden_dim, kernel_init=_ORTH1)(x))
+    return nn.relu(nn.Dense(hidden_dim // 2, kernel_init=_ORTH1)(x))
+
+
+class NoiseConditionedActor(nn.Module):
+    """Faithful port of nn_models.NoiseConditionedActor (the FlowBC one-step actor head).
+
+    a = tanh(policy(concat[ embed_s([obs,noise]), embed_z([obs,z,noise]) ])).
+    Each embedding is Linear->LayerNorm->Tanh->...->Linear(h//2)->ReLU; the policy is
+    `hidden_layers` x [Linear->ReLU] then Linear(action_dim). All-orthogonal init, tanh
+    output. This REPLACES the previous flat GELU ActorVectorField reuse.
+    """
+
+    action_dim: int
+    hidden_dim: int = 512
+    hidden_layers: int = 2
+    embedding_layers: int = 2
+
+    @nn.compact
+    def __call__(self, obs, z, noise):
+        z_embedding = _simple_embedding(jnp.concatenate([obs, z, noise], -1),
+                                        self.hidden_dim, self.embedding_layers)
+        s_embedding = _simple_embedding(jnp.concatenate([obs, noise], -1),
+                                        self.hidden_dim, self.embedding_layers)
+        h = jnp.concatenate([s_embedding, z_embedding], -1)
+        for _ in range(self.hidden_layers):
+            h = nn.relu(nn.Dense(self.hidden_dim, kernel_init=_ORTH1)(h))
+        return jnp.tanh(nn.Dense(self.action_dim, kernel_init=_ORTH1)(h))
+
+
+class FlowVectorField(nn.Module):
+    """Faithful port of nn_models.VectorField (SimpleVectorField): unconditional flow
+    velocity v(obs, x_t, t). Linear->GELU, (hidden_layers-1)x[Linear->GELU], Linear(adim).
+    GELU activations (matches reference), orthogonal init, no LayerNorm.
+    """
+
+    action_dim: int
+    hidden_dim: int = 512
+    hidden_layers: int = 4
+
+    @nn.compact
+    def __call__(self, obs, action, t):
+        x = jnp.concatenate([obs, action, t], -1)
+        # torch nn.GELU() is the exact (erf) gelu; flax nn.gelu defaults to the tanh approx.
+        x = nn.gelu(nn.Dense(self.hidden_dim, kernel_init=_ORTH1)(x), approximate=False)
+        for _ in range(self.hidden_layers - 1):
+            x = nn.gelu(nn.Dense(self.hidden_dim, kernel_init=_ORTH1)(x), approximate=False)
+        return nn.Dense(self.action_dim, kernel_init=_ORTH1)(x)

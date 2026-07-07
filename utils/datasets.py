@@ -69,6 +69,7 @@ class Dataset(FrozenDict):
         self.p_aug = None  # Image augmentation probability; set outside the class.
         self.return_next_actions = False  # Whether to additionally return next actions; set outside the class.
         self.return_preimage_noise = False  # Whether to sample preimage noise from the EM mixture; set outside the class.
+        self.return_index = False  # Whether to emit the global row index as batch['index'] (PSM proto sampler); set outside the class.
 
         # Compute terminal and initial locations.
         self.terminal_locs = np.nonzero(self['terminals'] > 0)[0]
@@ -107,6 +108,11 @@ class Dataset(FrozenDict):
     def get_subset(self, idxs):
         """Return a subset of the dataset given the indices."""
         result = jax.tree_util.tree_map(lambda arr: arr[idxs], self._dict)
+        if self.return_index:
+            # Global replay-buffer row index of each sampled transition. PSM's proto
+            # behavior sampler keys its deterministic next-action on this (reference
+            # train.py with_index -> batch["index"]).
+            result['index'] = np.asarray(idxs)
         if self.return_next_actions:
             # WARNING: This is incorrect at the end of the trajectory. Use with caution.
             result['next_actions'] = self._dict['actions'][np.minimum(idxs + 1, self.size - 1)]

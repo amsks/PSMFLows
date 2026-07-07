@@ -35,7 +35,7 @@ def main(cfg: DictConfig):
     # Set up logger.
     exp_name = get_exp_name(cfg.seed)
     setup_wandb(
-        project='fql', group=cfg.run_group, name=exp_name,
+        entity=cfg.wandb_entity, project=cfg.wandb_project, group=cfg.run_group, name=exp_name,
         config=OmegaConf.to_container(cfg, resolve=True),
     )
 
@@ -77,6 +77,10 @@ def main(cfg: DictConfig):
             dataset.frame_stack = cfg.frame_stack
             if config['agent_name'] == 'rebrac':
                 dataset.return_next_actions = True
+            if config['agent_name'] == 'psm':
+                # PSM's proto behavior sampler keys on the global buffer row index
+                # (reference train.py with_index). Emit it as batch['index'].
+                dataset.return_index = True
 
     # Create agent.
     example_batch = train_dataset.sample(1)
@@ -186,8 +190,14 @@ def main(cfg: DictConfig):
             # without infer_eval_z (they act directly on observations).
             eval_agent = agent
             if hasattr(agent, 'infer_eval_z'):
-                z_batch = train_dataset.sample(min(train_dataset.size, 100000))
-                eval_agent = agent.infer_eval_z(z_batch['next_observations'], z_batch['rewards'])
+                # Match the reference eval z-inference (evals/ogbench.py): sample
+                # `eval_relabel_size` transitions and shift rewards by `eval_reward_shift`
+                # (=1.0) so cube-single's {-1,0} task reward becomes {0,1} => z points at
+                # goal-reaching states. Without the shift z is inverted (round-2 audit #1).
+                n_relabel = min(train_dataset.size, int(cfg.get('eval_relabel_size', 10000)))
+                z_batch = train_dataset.sample(n_relabel)
+                rew = z_batch['rewards'] + float(cfg.get('eval_reward_shift', 1.0))
+                eval_agent = agent.infer_eval_z(z_batch['next_observations'], rew)
             eval_info, trajs, cur_renders = evaluate(
                 agent=eval_agent,
                 env=eval_env,
