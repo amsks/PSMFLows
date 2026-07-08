@@ -442,7 +442,18 @@ class PSMAgent(flax.struct.PyTreeNode):
         # + powers are a traced pytree leaf (so `update` can be jitted); max_seed is a
         # static python int kept in config.
         max_seed = 2 ** config["max_log_seed"] + 20000
-        table = (jax.random.uniform(rproto, (max_seed, action_dim)) - 1.0) * 2.0
+        # Optional: transplant the reference torch proto table (per-row manual_seed(i))
+        # to remove the last cross-framework RNG difference in the behavior policy. Same
+        # distribution as the JAX draw ((rand-1)*2 in [-2,0)); only the exact draws differ.
+        proto_path = config.get("proto_table_path", None)
+        if proto_path:
+            import numpy as _np
+            _t = _np.load(proto_path)
+            assert _t.shape == (max_seed, action_dim), \
+                f"proto table {_t.shape} != expected {(max_seed, action_dim)}"
+            table = jnp.asarray(_t, jnp.float32)
+        else:
+            table = (jax.random.uniform(rproto, (max_seed, action_dim)) - 1.0) * 2.0
         powers = (2 ** jnp.arange(config["max_log_seed"]))[::-1].astype(jnp.float32)
         proto = (table.astype(jnp.float32), powers)
 

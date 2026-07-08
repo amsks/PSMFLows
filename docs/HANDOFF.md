@@ -9,125 +9,187 @@ paginate: true
 
 # PSMFlows — Session Handoff
 
-Integrating the Factored-FB actors into JAX PSM,
-jitting the update, and benchmarking vs the FB+Flow reference.
+Chasing a **real, systematic gap** between our JAX PSM+flow and the
+PyTorch reference — localized to TRAINING, hunt in progress.
 
 Branch: `feat/psm-integration` · Machine: `midi-01` (UT CS)
-Date: 2026-07-06
+Date: 2026-07-07 (evening session)
 
 ---
 
-## What this project is
+## TL;DR — the headline finding
 
-- **Goal:** scale Proto Successor Measures (PSMs) to constrained offline datasets by
-  indexing policies with behavior-flow noise `u₀` (see `PAPER/main.tex`).
-- Built on the **Flow Q-Learning (FQL)** JAX/Hydra codebase.
-- The JAX **PSM agent** lives in `agents/psm.py` (port of a PyTorch reference,
-  verified byte-equivalent via fixtures in `tests/`).
-
----
-
-## Done this session (1/2) — actor integration
-
-Ported both actors from **`/u/amsks/git/Factored-FB`** (PyTorch FB / `td_jepa`) into JAX PSM.
-Selectable via `agent.actor.type`:
-
-- **`ddpgbc`** — TD3 mean + truncated exploration + optional BC term (`bc_coeff`).
-  `bc_coeff=0` ⇒ **byte-identical** to the old PSM actor (equiv tests still pass).
-- **`flow`** — FQL-style: BC flow-matching velocity field `v(s,xₜ,t)` + one-step,
-  z-conditioned distilled actor. Q from PSM's `sf_psi` (`Q=(sf_psi·z)`).
-
-Cube defaults match the reference: `bc_coeff=3`, `flow_steps=10`, `lr_actor_vf=3e-4`.
+- Our JAX PSM+flow **task2 success plateaus at peak ~0.20–0.32** and stays near the floor.
+- The **code-matched reference climbs to 0.30–0.60 by 500k and peaks 0.80–0.90** (at 650k–1350k).
+- This is a **real, systematic difference** (all 3 seeds fail uniformly), **NOT noise**.
+- It is **NOT** in the eval/acting path, the loss math, masks, the proto table, or obs-norm
+  (all audited/matched). **It is in TRAINING/init** — our update yields weaker weights.
+- **CONFIRMED by transplant-eval:** reference weights (seed5 @100k) score **0.58** in OUR eval
+  (task2); our own weights top ~0.25 in the same eval. Our eval is faithful; **training is where
+  our weights end up worse.**
+- **UPDATE (round 9): init scheme ALSO faithful.** After 9 rounds, EVERY code path is faithful
+  (per-step math, training-gen, acting, eval, init scheme, config). **No code bug found.**
+- Remaining diffs are **pure cross-framework RNG** (init draws + minibatch order). The reference
+  is **hugely noisy** (same seed5: 0.20 wandb vs 0.52 fresh @100k). Effect size is uncertain
+  with 3 seeds×1 run — may be a low draw, not a bug.
 
 ---
 
-## Done this session (2/2) — jit + perf
+## How we got here (this session)
 
-- PSM `update()` was **un-jitted** → **1.15 s/step** (GPU 98% idle, dispatch-bound).
-- **Jitted** `update` + `sample_actions` → **~9 ms/step (≈126× faster)**.
-  - `proto` table → traced pytree leaf; `nets`/`txs` → hashable `_HashableDict` static aux.
-  - Equiv tests untouched: they call the **un-jitted** `apply_update`/`compute_static`.
-- **13/13 tests pass** (`tests/test_psm_*`).
-- wandb wired to **`amsks/PSMFLows`** (config `wandb_project`/`wandb_entity`);
-  entity forced to `amsks` to avoid the `al-laq-fb` team default.
-
-500k run now ≈ **76 min solo** (≈ hours under GPU sharing).
-
----
-
-## Environment gotchas (READ before running)
-
-- **`midi-01` = UT CS HTCondor box, NO Slurm/`sbatch`.** Condor is broken on this host
-  (`Can't read config .../etc/local/midi-01`). Run directly (nohup/tmux + `CUDA_VISIBLE_DEVICES`).
-- **Home NFS quota (`/u/amsks`) is tiny (~6 GB).** A `jax[cuda12]` install blows it.
-  Install with `PIP_NO_CACHE_DIR=1 TMPDIR=/var/local pip install --no-cache-dir ...`.
-- **All bulk data → node-local `/var/local/amsks/`** (off quota, ~21 GB free):
-  `~/.ogbench` symlinked there; `WANDB_DIR`, `save_dir`, logs all under `/var/local/amsks`.
-- GPUs shared (hss963, idutta) — check `nvidia-smi` first. We use **GPU 1**,
-  `XLA_PYTHON_CLIENT_PREALLOCATE=false`, `MEM_FRACTION=0.30`.
+1. Started from an "eval@100k red flag". First pass concluded *faithful* — but that was an
+   **improper comparison** (wrong reference algo for s5/10/7 + mid-run vs 1.5M peak).
+2. Corrected: pulled the **code-matched PSM-orthohi** reference curves (wandb
+   `amsks/factored-fb` `psm_state_orthohi__ortho_coef1000__lr_phi1e-5__s{0,5,7}`), aligned
+   step-for-step. At matched steps ≤140k we tracked it — but the reference **blooms late**.
+3. User (correctly) pushed: a faithful port must reproduce the reference's tight 0.8–0.9
+   **peak distribution**. It doesn't.
+4. Transplanted the reference **proto behavior table** to kill the last RNG diff → **gap did
+   NOT close**. Confirmed the difference is real.
 
 ---
 
-## Currently running — the comparison experiment
+## What is RULED OUT (audited faithful / matched)
 
-**wandb group `psm_cube_match_ortho1000_20260706_205705`** on GPU 1:
-
-- Our **PSM**, matched config **`ortho_coef=1000, z_dim=50`**, seeds **5, 10, 7**,
-  actors **flow + ddpgbc**, 500k steps, eval+ckpt @ 100k.
-- Purpose: apples-to-apples vs the reference FB+Flow at the **same seeds / config / task**.
-  Only intended difference = **representation (PSM vs FB)**.
-
-Flow run URLs: `zjglyxq7` (s5), `ikf5dwjq` (s10), `jxxuqorl` (s7) — under `amsks/PSMFLows`.
-
-A background monitor auto-emits the 100k table once all 3 flow seeds eval.
-
----
-
-## Reference targets (FB+Flow, `amsks/factored-fb`)
-
-`cube_single__sN__ortho1000__lrb1e-4` · **task2** (= our `singletask-v0`) success:
-
-| seed | ref @100k | ref peak |
-|------|----------:|---------:|
-| 5    | 0.10 | 1.00 |
-| 10   | 0.10 | 1.00 |
-| 7    | 0.20 | 0.90 |
-
-Full numbers (5-task mean + task2, all seeds) in **`docs/reference_benchmarks.md`**.
-Reference seeds are **late bloomers** — low @100k, peak 0.9–1.0 later.
+- **Per-step update math** — `tests/test_psm_agent_equiv.py` transplants reference weights,
+  runs 10 optimizer steps on injected data, matches to **atol 1e-8**. Network+objective+HPs
+  are bit-identical *given identical inputs*.
+- **Eval z-inference** — formula-identical (`infer_z` == ref `reward_inference`); reward
+  source matches (our dataset 2.08% nonzero == ref relabel ~2%).
+- **Eval task identity** — `cube-single-play-singletask-v0` has `cur_task_id=2`; we compared
+  task2-to-task2 all along.
+- **Acting path** — `sample_actions` + actor nets faithful (one-step flow sample, tanh/clip,
+  z-proj all match; multi-step Euler rollout is only a distill target, never acted).
+- **masks** (always-γ), **obs normalization** (Identity for state, both sides), **proto table
+  distribution** (`(rand-1)*2 ∈ [-2,0)`), now transplanted verbatim.
 
 ---
 
-## How to run
+## KEY INSIGHT — why "losses match" proved nothing
 
-```bash
-# From repo root. GPU-1, online wandb (needs `wandb login` first — entity amsks).
-GROUP=my_group SEEDS="5 10 7" ACTORS="flow ddpgbc" \
-EXTRA="agent.ortho_coef=1000 agent.z_dim=50" EVAL_INT=100000 SAVE_INT=100000 \
-bash scripts/launch_psm_cube.sh 1 500000 online
-
-# single run
-CUDA_VISIBLE_DEVICES=1 XLA_PYTHON_CLIENT_PREALLOCATE=false \
-python main.py agent=psm agent.actor.type=flow \
-  agent.ortho_coef=1000 agent.z_dim=50 \
-  env_name=cube-single-play-singletask-v0 offline_steps=500000 \
-  save_dir=/var/local/amsks/exp run_group=... seed=5
-```
-
-Do **not** `pkill -f "main.py agent=psm"` inline — it matches the launching shell and
-self-kills. Kill by PID or a narrower pattern.
+- `actor_loss ≈ -Q/|Q|` and `train/q` is the **critic's own** estimate — both read ~-0.77 /
+  ~600 **whether or not the policy reaches goals**. `bc_flow_loss` only measures fit to the
+  behavior dist. **None of the scalar losses measure task success.**
+- The equiv test **injects** the batch + all latent/action samples, so it verifies the update
+  *given inputs* but **never how those inputs are GENERATED**.
+- ⇒ The bug must live in **training-signal generation** (batch sampling, `z_cont` mixing,
+  next-action injection, target updates) — invisible to both the losses and the equiv test.
 
 ---
 
-## Next steps / open items
+## Two deep audits — BOTH came back "faithful"
 
-1. **Collect the 100k comparison** (monitor pending) — our PSM+Flow vs ref (0.10/0.10/0.20).
-2. **Peak / 500k comparison** — the fairer picture (ref seeds peak at 0.9–1.0 later).
-3. Consider a **5-task eval** in `main.py` to match the reference's 5-task-mean metric
-   (currently we eval only task2 via `singletask-v0`).
-4. Original seeds-0,1,2 sweep (ortho=1.0, z_dim=128) was **killed/superseded** — relaunch
-   if the un-matched PSM-default numbers are still wanted.
-5. Nothing committed yet — changes are in the working tree on `feat/psm-integration`.
+- **Acting/eval-path audit: FAITHFUL.** `sample_actions` + actor nets match; eval task is
+  task2 both sides; z-inference reward matches.
+- **Training-generation audit: FAITHFUL.** batch sampling, `z_cont` mix, SF/proto next-action,
+  target updates, per-stage optimizers all match. Only nits: `z_cont` mixed half uses
+  pre-proto-step phi (ref uses post-step) — one `lr_phi=1e-5` step, negligible; proto table
+  (now transplantable).
+- **Config verified matching:** our runs used **z_dim=128, ortho_coef=1000, actor=flow**
+  (checked `flags.json`). The audit's `z_dim=50` worry was stale-handoff text, not real.
+
+⇒ **No code/config bug found on either side.** Remaining suspects: **init SCHEME** (orthogonal
+gain/draw — audits didn't deep-check; all 3 seeds fail uniformly = systematic, argues against
+pure basin luck) OR genuine cross-framework init/data-order basin variance (weakened by 3/3
+uniform failure).
+
+## STILL IN FLIGHT — the discriminator
+
+**Torch reference checkpoint dump** — `seed5`, **ortho_coef=1000** (gotcha: psm_flowbc default
+is 1.0!), GPU 1, `/var/local/amsks/exp/ref_ckpt_s5_300k`, saving `step_{100,200,300}k.pt`.
+**Transplant-eval:** load ref weights into our JAX eval →
+- ref-weights score **high** ⇒ bug is in **our training/init** (not eval).
+- score **low** ⇒ bug is in **our eval** (both audits say unlikely).
+To separate init-vs-training: load ref *early* weights into our JAX and TRAIN — climbs ⇒ init.
+
+---
+
+## Transplant-eval — READY to build (checkpoint landed)
+
+`step_100000.pt` (+200k,300k) saved in `/var/local/amsks/exp/ref_ckpt_s5_300k/`. state_dict
+naming **matches the fixture** convention → prefix keys with `w__` and reuse existing loaders.
+
+- **phi / sf_psi / psm_psi:** reuse `load_phi_params` / `load_psi_params` as-is. Keys:
+  `phi.net.{0,1,3,5}`, `{sf,psm}_psi.{embed_z,embed_sa}.{0,1,3}` + `Fs.{0,2}` (ensembled, P=2,
+  shapes `[2,in,out]`). targets present too (`target_*`).
+- **NEW converters needed** (torch_to_flax is ddpgbc-only):
+  - `_actor` = **NoiseConditionedActor** (18 params): `embed_z.{0,1,3}`, `embed_s.{0,1,3}`,
+    + noise/policy layers → our `utils/psm_networks.py:NoiseConditionedActor` tree.
+  - `_actor_vf` = **FlowVectorField** (10 params): `net.{0,2,4,6,8}` (5 Linears, GELU between)
+    → our `FlowVectorField` tree.
+- Harness: build `PSMAgent` with these params (config z_dim=128, ortho1000, actor=flow), run
+  `infer_eval_z` + `evaluate` on task2. **Ref weights should score ~0.20 (100k)** in a faithful
+  eval — matches this run's own eval (seed5 task2 0.08@50k, climbing). Low ⇒ eval bug; ok ⇒
+  training/init bug. **A buggy converter gives a false low — validate by matching phi/Q outputs
+  to the torch model on a shared batch first.**
+
+---
+
+## Code changes this session
+
+- **Committed & pushed** `31ed43d` "PSM: reference-parity fixes (eval z-inference + masks) +
+  audit tooling": masks always-γ (`agents/psm.py`), eval z-shift/relabel (`main.py`,
+  `config.yaml`), `eval_interval 100k→20k`, `docs/`, `scripts/launch_psm_cube.sh`.
+  **NB: commits use NO Claude co-authorship** (user preference).
+- **UNCOMMITTED** (working tree): `proto_table_path` hook — `agents/psm.py` `create()` loads a
+  transplanted table when `agent.proto_table_path` set; `configs/agent/psm.yaml` declares it
+  (`null` default). 15/15 PSM tests still pass.
+
+---
+
+## Runs (this session)
+
+| group / run | what | status |
+|---|---|---|
+| `psm_maskfix_flow_ortho1000_20260707_164832` | s0/5/10/7, 500k, eval+masks fix | **killed** (superseded) |
+| `psm_protoxplant_flow_ortho1000_20260707_184559` | s0/5/7, 500k, +proto transplant | **done** — gap NOT closed |
+| `/var/local/amsks/exp/ref_ckpt_s5_300k` (torch) | ref s5 ortho1000, ckpt dump | **running** (GPU 1) |
+
+Late-window (350–500k) task2 mean, protoxplant: ours s0/5/7 = **.06/.11/.05** vs ref **.08/.35/.33**.
+
+---
+
+## Reference curves (code-matched PSM-orthohi, task2)
+
+Cached: `/var/local/amsks/exp/ref_orthohi_task2_curves.json` (seeds 0/5/7, every 50k to 1.5M).
+
+| seed | @100k | @300k | @500k | peak |
+|------|------:|------:|------:|-----:|
+| 0 | 0.10 | 0.20 | 0.00 | 0.80 @1350k |
+| 5 | 0.20 | 0.60 | 0.30 | 0.90 @650k |
+| 7 | 0.00 | 0.40 | 0.10 | 0.80 @900k |
+
+Reference is **very noisy** but clearly trends up; ours does not. `s10` has **no** code-matched
+reference (orthohi set is seeds 0–9) — dropped it.
+
+---
+
+## Next steps (priority order) — DONE: transplant-eval + init audit (both clean)
+
+All 9 rounds of code audit are clean. The question is no longer "where's the code bug" but
+"is our training genuinely worse, or a low RNG draw." Two ways to settle it:
+
+1. **DECISIVE: continue-training from ref weights in OUR loop.** Load ref 100k weights (score
+   0.58 in our eval) into a trainable `PSMAgent` + fresh opt_states, train 100k more with our
+   `update`, eval. **DEGRADES toward ~0.2 ⇒ our training dynamics actively hurt (real bug);
+   PRESERVES/climbs ⇒ it was init-draw/basin luck.** (Extend `scripts/transplant_eval.py`:
+   add opt_states init + our training loop over the dataset.)
+2. **Characterize distributions:** run s0/5/7 (+more seeds) as **multiple replicates** and
+   compare to the reference's own spread — the reference bounces 0.20–0.52 for the same seed.
+3. Commit the `proto_table_path` hook (+ converter/harness) once settled.
+4. Peak parity ultimately needs **1.5M** runs (user capped at 500k this round).
+
+---
+
+## Environment gotchas (unchanged + new)
+
+- **`python` = system Python 2.7** on this box. ALWAYS use `.venv/bin/python` (ours) or
+  `/var/local/amsks/ffb-venv/bin/python` (torch). The launcher needs `source .venv/bin/activate`.
+- **midi-01 = HTCondor, no Slurm.** Run directly (nohup/tmux + `CUDA_VISIBLE_DEVICES`).
+- Home NFS quota tiny → all bulk data in `/var/local/amsks/`. GPUs shared — check `nvidia-smi`.
+- Torch stdout is **block-buffered** to a file (looks "stuck"; it's flushing in bursts).
+- **Reference ortho_coef override is bare `ortho_coef=1000`** (`@package _global_`), NOT
+  `agent.*`; psm_flowbc default is 1.0. The old repro `ref_psm_cube_s0_100k` was ortho=1.0.
 
 ---
 
@@ -135,9 +197,11 @@ self-kills. Kill by PID or a narrower pattern.
 
 ## Pointers
 
-- Agent: `agents/psm.py` · Networks: `utils/psm_networks.py`, `utils/networks.py`
-- Config: `configs/agent/psm.yaml`, `configs/config.yaml`
-- Launcher: `scripts/launch_psm_cube.sh` · Tests: `tests/test_psm_*.py`
-- Reference numbers: `docs/reference_benchmarks.md`
-- Reference PyTorch impl: `/u/amsks/git/Factored-FB` (`agents/fb`, `agents/fb/flow_bc`)
-- Memory: `cluster-and-quota`, `psm-run-workflow`, `reference-fb-flow-benchmarks`
+- Agent: `agents/psm.py` · Networks: `utils/psm_networks.py` · Converter: `utils/torch_to_flax.py`
+- Config: `configs/agent/psm.yaml`, `configs/config.yaml` · Launcher: `scripts/launch_psm_cube.sh`
+- Reference (PyTorch): `/u/amsks/git/Factored-FB` (`agents/psm/*`, `nn_models.py`), torch venv
+  `/var/local/amsks/ffb-venv`, data `/dev/shm/factored-fb/datasets`
+- Investigation tools (now in repo): `scripts/transplant_eval.py` (load ref torch weights →
+  our JAX eval), `scripts/compare_protoxplant.py` (step-aligned curve vs cached ref)
+- Cached ref curves: `/var/local/amsks/exp/ref_orthohi_task2_curves.json`
+- **Memory: `psm-vs-reference-audit` (rounds 1–6 — the full investigation trail)**

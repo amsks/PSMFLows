@@ -2,6 +2,9 @@ agent_name: psm
 batch_size: 1024
 z_dim: 128
 max_log_seed: 16
+# Optional path to a transplanted reference proto (behavior-policy) table. When set,
+# the agent loads it verbatim instead of drawing its own; null => JAX-drawn table.
+proto_table_path: null
 num_parallel: 2
 discount: 0.98
 tau: 0.01
