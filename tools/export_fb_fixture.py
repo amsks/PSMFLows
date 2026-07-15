@@ -38,12 +38,41 @@ K_STEPS = 10
 
 
 def npy(t):
-    return t.detach().cpu().numpy() if torch.is_tensor(t) else np.asarray(t)
+    # IMPORTANT: .copy() — torch .numpy() aliases the tensor's memory, and the per-step
+    # param snapshots are taken while the SAME tensors keep training in place; without a
+    # copy every step__i would alias the final weights.
+    return t.detach().cpu().numpy().copy() if torch.is_tensor(t) else np.array(t)
+
+
+class _Adam:
+    """Manual per-parameter Adam matching optax.adam (eps=1e-8, eps_root=0). Used for
+    the K-step trace so the fixture is a clean standard-Adam ground truth, independent
+    of the reference torch build's in-place-optimizer first-step quirks."""
+
+    def __init__(self, params, lr, b1=0.9, b2=0.999, eps=1e-8):
+        import torch
+        self.lr, self.b1, self.b2, self.eps, self.t = lr, b1, b2, eps, 0
+        self.m = [torch.zeros_like(p) for p in params]
+        self.v = [torch.zeros_like(p) for p in params]
+
+    def step(self, params, grads):
+        import torch
+        self.t += 1
+        bc1, bc2 = 1 - self.b1 ** self.t, 1 - self.b2 ** self.t
+        with torch.no_grad():
+            for i, (p, g) in enumerate(zip(params, grads)):
+                if g is None:
+                    continue
+                self.m[i].mul_(self.b1).add_(g, alpha=1 - self.b1)
+                self.v[i].mul_(self.b2).addcmul_(g, g, value=1 - self.b2)
+                mh = self.m[i] / bc1
+                vh = self.v[i] / bc2
+                p.add_(mh / (vh.sqrt() + self.eps), alpha=-self.lr)
 
 
 def make_agent(gym, cfgmods):
     from agents.fb.flow_bc.agent import FBFlowBCAgent
-    return FBFlowBCAgent(
+    return (FBFlowBCAgent(
         obs_space=gym.spaces.Box(-1, 1, (D["obs_dim"],)),
         action_dim=D["action_dim"],
         actor_cfg=cfgmods["NoiseConditionedActorArchiConfig"](
@@ -65,7 +94,7 @@ def make_agent(gym, cfgmods):
         actor_pessimism_penalty=HP["actor_pess"], actor_std=HP["actor_std"],
         stddev_clip=HP["stddev_clip"], f_target_tau=HP["f_tau"], b_target_tau=HP["b_tau"],
         bc_coeff=HP["bc_coeff"], q_loss_coef=0.0, onestep=False, goal_cond=False,
-        fixed_b="none", device="cpu")
+        fixed_b="none", device="cpu"))
 
 
 def main(repo, out):
@@ -245,6 +274,14 @@ def main(repo, out):
     torch.manual_seed(0)
     agent2 = make_agent(gym, cfgmods)
     m2 = agent2.model
+    # Per-net manual Adam (matches optax + the JAX agent's per-net optax.adam).
+    fwd_p = list(m2._forward_map.parameters())
+    le_p = list(m2._left_encoder.parameters())
+    bwd_p = list(m2._backward_map.parameters())
+    act_p = list(m2._actor.parameters())
+    vf_p = list(m2._actor_vf.parameters())
+    ad_f = _Adam(fwd_p, HP["lr_f"]); ad_le = _Adam(le_p, HP["lr_f"])
+    ad_b = _Adam(bwd_p, HP["lr_b"]); ad_a = _Adam(act_p, HP["lr_actor"]); ad_vf = _Adam(vf_p, HP["lr_actor_vf"])
     for i in range(K_STEPS):
         inj_i = draw(1000 + i)
         for n, t in inj_i.items():
@@ -254,9 +291,19 @@ def main(repo, out):
             na_i = m2._actor(next_obs, z_i, inj_i["next_actor_noise"])
         fix[f"step_in__{i}__z"] = npy(z_i)
         fix[f"step_in__{i}__next_action"] = npy(na_i)
-        fb_step(m2, agent2, obs, action, next_obs, goal, disc, z_i, na_i, do_step=True)
-        actor_step(m2, agent2, obs.detach(), action, z_i, inj_i["flow_x0"],
-                   inj_i["flow_t"], inj_i["actor_noise"], do_step=True)
+        # stage 1: FB loss -> grads on forward, left_encoder, backward -> manual Adam
+        fb = fb_step(m2, agent2, obs, action, next_obs, goal, disc, z_i, na_i, do_step=False)
+        g = torch.autograd.grad(fb["fb_loss"], fwd_p + le_p + bwd_p, allow_unused=True)
+        ad_f.step(fwd_p, g[:len(fwd_p)])
+        ad_le.step(le_p, g[len(fwd_p):len(fwd_p) + len(le_p)])
+        ad_b.step(bwd_p, g[len(fwd_p) + len(le_p):])
+        # stage 2: actor loss -> grads on actor, actor_vf -> manual Adam (reads updated left_enc)
+        act = actor_step(m2, agent2, obs.detach(), action, z_i, inj_i["flow_x0"],
+                         inj_i["flow_t"], inj_i["actor_noise"], do_step=False)
+        ga = torch.autograd.grad(act["actor_loss"], act_p + vf_p, allow_unused=True)
+        ad_a.step(act_p, ga[:len(act_p)])
+        ad_vf.step(vf_p, ga[len(act_p):])
+        # stage 3: soft-update targets
         soft(agent2)
         for k, v in m2.state_dict().items():
             fix[f"step__{i}__{k}"] = npy(v)
