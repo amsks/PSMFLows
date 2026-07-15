@@ -52,7 +52,11 @@ class FBAgent(flax.struct.PyTreeNode):
         c = self.config
         obs, action, next_obs = batch["observations"], batch["actions"], batch["next_observations"]
         goal = next_obs  # bw_encoder = Identity for state
-        disc = c["discount"] * (1.0 - batch["terminals"]).reshape(-1, 1)  # [B,1] row-wise
+        # Reference forces terminated=False for every cube transition (data/ogbench.py)
+        # => always-gamma bootstrap. OGBench's packaged `terminals`=1 at each episode's
+        # final step would otherwise cut the bootstrap there; force always-gamma to match
+        # the reference (same fix as PSM's masks=always-gamma). Scalar broadcasts over M.
+        disc = c["discount"]
         P = c["num_parallel"]
         z = inj["z"]
         next_action = inj["next_action"]
