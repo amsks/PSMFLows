@@ -13,7 +13,59 @@ Chasing a **real, systematic gap** between our JAX PSM+flow and the
 PyTorch reference — localized to TRAINING, hunt in progress.
 
 Branch: `feat/psm-integration` · Machine: `midi-01` (UT CS)
-Date: 2026-07-07 (evening session)
+Date: **2026-07-13** (latest) · prior investigation: 2026-07-07
+
+---
+
+<!-- _class: lead -->
+
+## 2026-07-13 session — fresh from-scratch parity runs
+
+**Goal:** measure how much our JAX PSM+flow recovers vs the reference on
+from-scratch runs (not transplant), 3 seeds, 500k.
+
+- Launched seeds **0/1/2**, flow, `ortho_coef=1000`, `z_dim=128`, `lr_phi=1e-5`,
+  eval@50k / 50 ep. Group `psm_recover500k_flow_ortho1000_20260713_160709`.
+- **NEW, CONTRASTS with prior finding:** **seed 2 recovers the reference
+  in-window.** seed2 @500k = **0.42** vs ref **0.60** (−0.18); but
+  **mean(0–500k) ours 0.238 vs ref 0.240 — a wash.** We LEAD early (50k/100k the
+  ref is still 0.00), ref leads the 250–300k bump. Peak ours 0.44@350k vs ref's
+  own in-window 0.50. This is NOT the old "plateau at ~0.05–0.11" story.
+- **Seeds 0 & 1 weaker so far** (peaks 0.18 / 0.22 at 450k) — but the reference
+  for THOSE seeds is also weak early (s0 ref 0.30 by 300k). ⇒ **high seed
+  variance dominates**; single-seed reads are noisy.
+- **THE remaining gap is the CEILING, not the trajectory.** The reference keeps
+  climbing past 500k: peaks **0.80 @750k**, holds **0.5–0.8 to 1.5M**. At our
+  500k cap the −0.18 is real but small; the reference's *ceiling* only appears
+  with 2–3× more training we hadn't run.
+- **⇒ Launched seed 2 to 1M** on GPU 1 (solo) to test the ceiling.
+  Group `psm_recover1M_flow_ortho1000_s2_20260713_174415`. **At 250k already
+  0.60** (ref 0.50 @250k). ETA ~2.5–3h from 17:44.
+- **Infra lesson:** 2 seeds sharing one GPU run ~2× slower (seeds 0/1 on GPU3
+  took ~2.5h; seed 2 solo on GPU1 did 500k in ~1h23m). **One seed per GPU** for
+  even wall-clock. `XLA_PYTHON_CLIENT_MEM_FRACTION=0.30` per proc.
+
+### Runs (2026-07-13)
+
+| group | seeds | steps | GPU | status |
+|---|---|---|---|---|
+| `psm_recover500k_flow_ortho1000_20260713_160709` | 0,1 | 500k | 3 (shared) | running (~450k) |
+| ″ | 2 | 500k | 1 | **done** @500k=0.42 |
+| `psm_recover1M_flow_ortho1000_s2_20260713_174415` | 2 | **1M** | 1 (solo) | running (~250k, 0.60) |
+
+Compare: `.venv/bin/python scripts/compare_multiseed.py [GROUP]` (defaults to
+`/var/local/amsks/exp/multiseed_group.txt`; the 1M group is in
+`recover1M_s2_group.txt`). Reference cache has seeds 0,1,2,3,4,5,7.
+
+### Next (2026-07-13 → next session)
+
+1. **Read the 1M seed-2 result** — does it reach the ref's 0.7–0.8 ceiling? If
+   yes ⇒ we DO have parity, just needed budget; the "systematic gap" was a
+   500k-cap artifact + seed variance. If it plateaus ~0.4 ⇒ real ceiling gap.
+2. Let seeds 0/1 finish 500k; re-run `compare_multiseed.py` for the 3-seed table.
+3. If ceiling confirmed, consider 1M runs for seeds 0/1 too (one-per-GPU) to
+   get a real 3-seed peak distribution vs the reference's spread.
+4. GPUs 1 & 3 usable; 0 & 2 were busy/full (other users) this session.
 
 ---
 

@@ -205,6 +205,10 @@ def main(cfg: DictConfig):
                 num_eval_episodes=cfg.eval_episodes,
                 num_video_episodes=cfg.video_episodes,
                 video_frame_skip=cfg.video_frame_skip,
+                # Re-seed the eval env's init-state RNG each eval so success is a
+                # reproducible function of the weights (matches reference
+                # evals/ogbench.py, which re-seeds with cfg.seed every eval).
+                seed=cfg.seed,
             )
             renders.extend(cur_renders)
             for k, v in eval_info.items():
