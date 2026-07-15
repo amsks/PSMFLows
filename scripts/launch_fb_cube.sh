@@ -23,7 +23,7 @@ mkdir -p "$LOCAL/exp" "$LOCAL/wandb" "$LOCAL/logs/$GROUP"
 cd "$REPO"
 export CUDA_VISIBLE_DEVICES="$GPU"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.30   # hard per-process ceiling (one seed per GPU)
+export XLA_PYTHON_CLIENT_MEM_FRACTION="${MEM_FRAC:-0.30}"   # per-proc ceiling; lower when sharing a GPU
 export MUJOCO_GL=egl
 export WANDB_MODE="$WMODE"
 export WANDB_DIR="$LOCAL/wandb"
