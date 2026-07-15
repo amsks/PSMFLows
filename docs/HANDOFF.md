@@ -13,7 +13,41 @@ Chasing a **real, systematic gap** between our JAX PSM+flow and the
 PyTorch reference — localized to TRAINING, hunt in progress.
 
 Branch: `feat/psm-integration` · Machine: `midi-01` (UT CS)
-Date: **2026-07-13** (latest) · prior investigation: 2026-07-07
+Date: **2026-07-15** (latest) · prior investigation: 2026-07-13, 2026-07-07
+
+---
+
+<!-- _class: lead -->
+
+## 2026-07-15 session — FB agent ported to JAX (bit-exact)
+
+Ported the PyTorch **Forward–Backward (FB)** agent (`../Factored-FB` `agents/fb/*`)
+to JAX/Flax, mirroring the PSM port protocol. **Spec** `docs/superpowers/specs/
+2026-07-14-fb-jax-port-design.md`, **plan** `docs/superpowers/plans/2026-07-14-fb-jax-port.md`.
+
+- **Scope:** cube-default `fb_flowbc` path — Forward map `F(left_enc(obs),z,a)`,
+  Backward map `B(next_obs)` (measure basis + z-source), a **left_encoder** trunk
+  (with target), td3/flow actor. Measure `M=F·Bᵀ`, off-diag/diag + ortho loss.
+  2 backward passes (FB, actor); targets on forward/backward/left_encoder, none on
+  actor; taus 0.005. z mixed 50/50 with `B(next_obs[perm])`. **Not** ported:
+  iql critic, traj goal-mode, fixed_b, goal_cond, onestep, reweight.
+- **Files:** `agents/fb.py`, `utils/fb_networks.py` (ForwardMap/BackwardMap/FBTd3Actor;
+  reuses NoiseConditionedActor/FlowVectorField), `configs/agent/fb.yaml`
+  (z_dim=50, batch=256, disc=0.99), registered `fb` in `agents/__init__.py`.
+  `main.py` needs NO FB branch (no `index`; `infer_eval_z` picked up generically;
+  seeded eval applies).
+- **Bit-exact parity (like PSM):** `tools/export_fb_fixture.py` → `tests/fixtures/
+  fb_reference.npz`; `tests/test_fb_{networks,agent,smoke}_equiv.py`. Per-module
+  atol 1e-10, 10-step `apply_update` atol 1e-8. **13/13 FB tests pass.** Also the
+  first bit-exact check of our shared NoiseConditionedActor/FlowVectorField.
+- **Fixture gotchas (cost a long debug):** (1) torch `.numpy()` **aliases** memory —
+  per-step param snapshots must `.copy()` or they all show the final trained weights;
+  (2) the reference torch build's in-place first Adam step lands ~10× too large under
+  some construction orders, so the K-step trace uses a **manual optax-matching Adam**.
+- **Runnable:** `bash scripts/launch_fb_cube.sh [GPU] [STEPS]` (one seed/GPU,
+  save_interval=100k, seeded eval, eval_episodes=10). Verified 3-step end-to-end
+  through `main.py` (exit 0). **NEXT:** cube-single parity run vs the reference FB
+  benchmark (wandb `amsks/factored-fb`; see [[reference-fb-flow-benchmarks]]).
 
 ---
 
