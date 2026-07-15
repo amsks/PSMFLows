@@ -118,11 +118,10 @@ def main(repo, out):
             goals = project_z(m._backward_map(next_obs[inj["perm"]]))
             return torch.where(inj["mix_mask"], goals, inj["z_gauss"])
 
-    def fb_step(m, agent, obs, action, next_obs, goal, disc, z, inj, do_step):
+    def fb_step(m, agent, obs, action, next_obs, goal, disc, z, next_action, do_step):
         with torch.no_grad():
             nle = m._target_left_encoder(next_obs)
-            na = m._actor(next_obs, z, inj["next_actor_noise"])
-            tFs = m._target_forward_map(nle, z, na)
+            tFs = m._target_forward_map(nle, z, next_action)
             tB = m._target_backward_map(goal)
             tMs = torch.matmul(tFs, tB.T)
             _, _, tM = uncert(tMs, HP["fb_pess"])
@@ -145,21 +144,21 @@ def main(repo, out):
             agent.backward_optimizer.step()
         return out
 
-    def actor_step(m, agent, obs, action, z, inj, do_step):
-        x1, x0, t = action, inj["flow_x0"], inj["flow_t"]
+    def actor_step(m, agent, obs, action, z, x0, t, noises, do_step):
+        x1 = action
         xt = (1 - t) * x0 + t * x1
         vel = x1 - x0
         pred = m._actor_vf(obs, xt, t)
         bc_flow = (pred - vel).pow(2).mean()
         with torch.no_grad():
             left_enc = m._left_encoder(obs)
-        aa = m._actor(obs, z, inj["actor_noise"])
+        aa = m._actor(obs, z, noises)
         Fs = m._forward_map(left_enc, z, aa)
         Qs = (Fs * z).sum(-1)
         _, _, Q = uncert(Qs, HP["actor_pess"])
         actor_loss = -Q.mean()
         with torch.no_grad():
-            tfa = flow_actions(m, obs, inj["actor_noise"])
+            tfa = flow_actions(m, obs, noises)
         bc_err = (aa - tfa).pow(2).mean()
         actor_loss = actor_loss / Qs.abs().mean().detach() + HP["bc_coeff"] * bc_err + bc_flow
         out = dict(actor_loss=actor_loss, bc_flow_loss=bc_flow, bc_error=bc_err, q=Q.mean())
@@ -200,7 +199,10 @@ def main(repo, out):
 
     disc = (HP["discount"] * (1.0 - terminals)).reshape(-1, 1)
     z = mixed_z(m, inj, next_obs)
-    fix["in__z_mixed"] = npy(z)
+    with torch.no_grad():
+        next_action = m._actor(next_obs, z, inj["next_actor_noise"])  # flowbc next-action
+    fix["in__z"] = npy(z)                      # final mixed z fed to the loss
+    fix["in__next_action"] = npy(next_action)  # stop-grad bootstrap action
 
     # ---------------- clean per-module outputs (network equiv) ----------------
     with torch.no_grad():
@@ -212,7 +214,7 @@ def main(repo, out):
         fix["out__vf"] = npy(m._actor_vf(obs, action, inj["flow_t"]))
 
     # ---------------- static losses + grads (no optimizer step) ----------------
-    fb = fb_step(m, agent, obs, action, next_obs, goal, disc, z, inj, do_step=False)
+    fb = fb_step(m, agent, obs, action, next_obs, goal, disc, z, next_action, do_step=False)
     g_fb = torch.autograd.grad(
         fb["fb_loss"],
         list(m._forward_map.parameters()) + list(m._left_encoder.parameters())
@@ -226,7 +228,8 @@ def main(repo, out):
     for k, v in fb.items():
         fix[f"out__{k}"] = npy(v)
 
-    act = actor_step(m, agent, obs, action, z, inj, do_step=False)
+    act = actor_step(m, agent, obs, action, z, inj["flow_x0"], inj["flow_t"],
+                     inj["actor_noise"], do_step=False)
     g_a = torch.autograd.grad(
         act["actor_loss"],
         list(m._actor.parameters()) + list(m._actor_vf.parameters()), allow_unused=True)
@@ -247,8 +250,13 @@ def main(repo, out):
         for n, t in inj_i.items():
             fix[f"step_in__{i}__{n}"] = npy(t)
         z_i = mixed_z(m2, inj_i, next_obs)
-        fb_step(m2, agent2, obs, action, next_obs, goal, disc, z_i, inj_i, do_step=True)
-        actor_step(m2, agent2, obs.detach(), action, z_i, inj_i, do_step=True)
+        with torch.no_grad():
+            na_i = m2._actor(next_obs, z_i, inj_i["next_actor_noise"])
+        fix[f"step_in__{i}__z"] = npy(z_i)
+        fix[f"step_in__{i}__next_action"] = npy(na_i)
+        fb_step(m2, agent2, obs, action, next_obs, goal, disc, z_i, na_i, do_step=True)
+        actor_step(m2, agent2, obs.detach(), action, z_i, inj_i["flow_x0"],
+                   inj_i["flow_t"], inj_i["actor_noise"], do_step=True)
         soft(agent2)
         for k, v in m2.state_dict().items():
             fix[f"step__{i}__{k}"] = npy(v)
@@ -258,8 +266,10 @@ def main(repo, out):
 
     # schema sanity
     need = ["in__observations", "in__z_gauss", "in__mix_mask", "in__perm",
+            "in__z", "in__next_action", "in__flow_x0", "in__flow_t", "in__actor_noise",
             "out__F", "out__B", "out__left_enc", "out__fb_loss", "out__actor_loss",
-            "out__actor_mu", "out__vf"]
+            "out__actor_mu", "out__vf",
+            "step_in__0__z", "step_in__0__next_action"]
     for k in need:
         assert k in fix, f"MISSING {k}"
     assert fix["out__F"].ndim == 3 and fix["out__F"].shape[0] == P
