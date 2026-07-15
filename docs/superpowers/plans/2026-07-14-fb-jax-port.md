@@ -20,6 +20,17 @@
 - **Determinism rule (parity):** all stochastic inputs are drawn in `_draw_injection` and passed into the loss as constants — never sampled inside a loss/grad function. This is what makes per-step equivalence testable.
 - **Torch→Flax key convention:** torch `Linear.weight [out,in]` → flax `Dense.kernel [in,out]` (transpose); `DenseParallel.weight [P,in,out]` → flax vmapped kernel `[P,in,out]` (no transpose); torch `LayerNorm.{weight,bias}` → flax `{scale,bias}`.
 
+**Confirmed by source read (2026-07-14, during execution):**
+- `left_encoder` IS a real `BackwardMap` on cube (`train.py:195-198`: `BackwardArchiConfig(hidden_dim=512, hidden_layers=4, norm=True)`); F consumes `left_encoder(obs)` (L2-normed, dim L_dim=50), NOT raw obs. Include it with a target.
+- `_fb_z(z) = z` when `onestep=False` (agent.py:408-412) → **no z-zeroing** in the cube path (F gets the real z). The flow_bc comment about "zero-z" only applies to onestep.
+- `Fs` = `hidden_layers × [Dense→ReLU]` **plus** a final `Dense(z_dim)` (nn_models.py:223-227) → cube `hidden_layers=2` gives **3** trunk linears (`fs_0/fs_2/fs_4`), not 2. Generalize `_ForwardTower` to loop `hidden_layers`+output.
+- Every dense inside `ForwardMap` is a `DenseParallel` → `weight_init` gives it `_ORTH_RELU` (√2); plain `nn.Linear` (BackwardMap/left_encoder/actor/vf) gets `_ORTH1` (gain 1) (nn_models.py:61-77).
+- FB cube penalties are both 0 (`fb_pessimism_penalty=actor_pessimism_penalty=0`) → `get_targets_uncertainty` returns the plain parallel-mean; implement full uncert anyway for faithfulness.
+- Optimizers (setup_training agent.py:305-321): `forward_optimizer=Adam(forward_map+left_encoder+fw_encoder, lr_f)`, `backward_optimizer=Adam(backward_map+bw_encoder, lr_b)`, `actor_optimizer=Adam(actor, lr_actor)`, `actor_vf_optimizer=Adam(actor_vf, lr_actor_vf)`. Encoders are Identity (no params). Per-net JAX adam is identical.
+- Injected randomness set (per update): `z_gauss, mix_mask, perm, next_actor_noise` (update_fb next-action), `flow_x0, flow_t, actor_noise` (update_actor; the flow start = `actor_noise`, reused for compute_flow_actions). No separate `flow_noise`.
+- `goal = bw_encoder(next_obs) = next_obs` (Identity); both online B and target B in the measure loss are on `next_obs` (aligned, not permuted). The perm only affects the mixed z.
+- flowbc `sample_action_from_norm_obs` (flow_bc/agent.py:57-61): `_actor(obs, z, randn)` — used inside update_fb for next_action.
+
 **Reference file:line index (from the codebase map):**
 - FB TD loss `agents/fb/agent.py:566-682`; helpers `fb_successor_terms` `:67-92`, `ortho_cov` `:95-104`, `get_targets_uncertainty` `:730-745`.
 - Actor (TD3) `agent.py:696-728`; (FlowBC) `agents/fb/flow_bc/agent.py:63-131`.
