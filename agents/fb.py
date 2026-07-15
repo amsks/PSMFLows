@@ -20,8 +20,8 @@ import jax.numpy as jnp
 import optax
 
 from utils.flax_utils import nonpytree_field
-from utils.fb_networks import BackwardMap, ForwardMap
-from utils.psm_networks import NoiseConditionedActor, FlowVectorField, PSMActor, truncated_sample
+from utils.fb_networks import BackwardMap, ForwardMap, FBTd3Actor
+from utils.psm_networks import NoiseConditionedActor, FlowVectorField, truncated_sample
 # Reuse PSM's shared helpers verbatim (identical math) to avoid duplication.
 from agents.psm import (
     _HashableDict, _plain_config, _step, _soft, project_z,
@@ -314,9 +314,9 @@ class FBAgent(flax.struct.PyTreeNode):
             params["actor_vf"] = nets["actor_vf"].init(rvf, ex_obs, ex_actions, ex_actions[..., :1])["params"]
             actor_keys = ["actor", "actor_vf"]
         else:
-            nets["actor"] = PSMActor(action_dim=action_dim, hidden_dim=actor_cfg["hidden_dim"],
-                                     embedding_layers=actor_cfg["embedding_layers"],
-                                     hidden_layers=actor_cfg["hidden_layers"])
+            nets["actor"] = FBTd3Actor(action_dim=action_dim, hidden_dim=actor_cfg["hidden_dim"],
+                                       embedding_layers=actor_cfg["embedding_layers"],
+                                       hidden_layers=actor_cfg["hidden_layers"])
             params["actor"] = nets["actor"].init(ract, ex_obs, ex_z)["params"]
 
         params["target_forward"] = copy.deepcopy(params["forward"])

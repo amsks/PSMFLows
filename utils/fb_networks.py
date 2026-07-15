@@ -13,7 +13,7 @@ import flax.linen as nn
 import jax.numpy as jnp
 
 from utils.networks import ensemblize
-from utils.psm_networks import _ORTH_RELU, PhiMap
+from utils.psm_networks import _ORTH1, _ORTH_RELU, PhiMap, _simple_embedding
 
 # B(next_obs) is a PhiMap: Dense->LayerNorm->tanh, (hidden_layers-1)x[Dense->relu],
 # Dense(z_dim), then Norm (sqrt(d) L2) when norm=True. left_encoder is the same module.
@@ -53,6 +53,26 @@ class _ForwardTower(nn.Module):
         for layer in self.fs[:-1]:
             x = nn.relu(layer(x))
         return self.fs[-1](x)
+
+
+class FBTd3Actor(nn.Module):
+    """TD3 actor (reference nn_models.Actor): mu = tanh(policy(concat[embed_s(obs),
+    embed_z([obs,z])])). Generalizes over hidden_layers (cube uses 2), unlike PSM's
+    PSMActor which is fixed at hidden_layers=1."""
+
+    action_dim: int
+    hidden_dim: int
+    hidden_layers: int = 2
+    embedding_layers: int = 2
+
+    @nn.compact
+    def __call__(self, obs, z):
+        ze = _simple_embedding(jnp.concatenate([obs, z], -1), self.hidden_dim, self.embedding_layers)
+        se = _simple_embedding(obs, self.hidden_dim, self.embedding_layers)
+        h = jnp.concatenate([se, ze], -1)
+        for _ in range(self.hidden_layers):
+            h = nn.relu(nn.Dense(self.hidden_dim, kernel_init=_ORTH1)(h))
+        return jnp.tanh(nn.Dense(self.action_dim, kernel_init=_ORTH1)(h))
 
 
 class ForwardMap(nn.Module):
