@@ -42,6 +42,7 @@ def evaluate(
     num_video_episodes=0,
     video_frame_skip=3,
     eval_temperature=0,
+    seed=None,
 ):
     """Evaluate the agent in the environment.
 
@@ -53,6 +54,11 @@ def evaluate(
         num_video_episodes: Number of episodes to render. These episodes are not included in the statistics.
         video_frame_skip: Number of frames to skip between renders.
         eval_temperature: Action sampling temperature.
+        seed: If not None, re-seed the environment's episode-init RNG to this value
+            at the start of every eval so success is a reproducible function of the
+            weights (matches the reference `evals/ogbench.py`, which re-creates and
+            re-seeds the eval env with `cfg.seed` on each eval). When None, the env
+            keeps its own (entropy-seeded) RNG and eval is not reproducible run-to-run.
 
     Returns:
         A tuple containing the statistics, trajectories, and rendered videos.
@@ -60,6 +66,13 @@ def evaluate(
     actor_fn = supply_rng(agent.sample_actions, rng=jax.random.PRNGKey(np.random.randint(0, 2**32)))
     trajs = []
     stats = defaultdict(list)
+
+    # Pin the env's episode-init RNG to `seed` once per eval. The per-episode
+    # resets below stay unseeded so they advance this seeded generator (matches
+    # the reference: create_ogbench_env resets with seed, then rollout resets
+    # unseeded per episode).
+    if seed is not None:
+        env.reset(seed=seed)
 
     renders = []
     for i in trange(num_eval_episodes + num_video_episodes):

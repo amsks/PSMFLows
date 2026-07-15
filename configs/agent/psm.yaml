@@ -1,0 +1,48 @@
+agent_name: psm
+batch_size: 1024
+z_dim: 128
+max_log_seed: 16
+# Optional path to a transplanted reference proto (behavior-policy) table. When set,
+# the agent loads it verbatim instead of drawing its own; null => JAX-drawn table.
+proto_table_path: null
+num_parallel: 2
+discount: 0.98
+tau: 0.01
+ortho_coef: 1.0
+mix_ratio: 0.5
+pessimism_penalty: 0.0
+actor_pessimism_penalty: 0.5
+actor_std: 0.2
+stddev_clip: 0.3
+norm_z: true
+phi_input: s
+
+lr_phi: 1.0e-5           # reference PSM sweep winner (../Factored-FB configs/agent/psm.yaml). NOT 1e-4.
+lr_sf: 1.0e-4
+lr_actor: 1.0e-4
+
+phi:
+  hidden_dim: 256
+  hidden_layers: 2
+sf:
+  hidden_dim: 1024
+  hidden_layers: 1
+  embedding_layers: 2
+actor:
+  type: ddpgbc            # ddpgbc | flow
+  hidden_dim: 1024        # ddpgbc PSMActor width
+  hidden_layers: 1
+  embedding_layers: 2
+  bc_coeff: 3.0           # behavior-cloning weight (ddpgbc: MSE to data action; flow: distillation to ODE rollout). cube default 3.0
+  flow_steps: 10          # Euler steps for the BC-flow ODE rollout
+  lr_actor_vf: 3.0e-4     # LR for the flow velocity field
+  # flow actor = NoiseConditionedActor; flow VF = VectorField (reference psm_flowbc.yaml)
+  flow_actor_hidden_dim: 512
+  flow_actor_hidden_layers: 2
+  flow_actor_embedding_layers: 2
+  flow_vf_hidden_dim: 512
+  flow_vf_hidden_layers: 4
+
+ob_dims: null
+action_dim: null
+encoder: null
