@@ -7,7 +7,7 @@ import numpy as np  # noqa: E402
 
 import flax  # noqa: E402
 
-from agents.psm import PSMAgent, contrastive_loss, ortho_loss, proto_sample  # noqa: E402
+from agents.psm import PSMAgent, StepInputs, contrastive_loss, ortho_loss, proto_sample  # noqa: E402
 from utils.torch_to_flax import (  # noqa: E402
     load_actor_params, load_phi_params, load_psi_params,
 )
@@ -82,8 +82,13 @@ def _batch():
 
 
 def _inj(prefix):
-    return {n: jnp.asarray(FIX[f"{prefix}{n}"], jnp.float64) for n in
-            ["z_psm", "z_cont", "proto_next_action", "actor_next_action", "actor_sample"]}
+    g = lambda n: jnp.asarray(FIX[f"{prefix}{n}"], jnp.float64)
+    return StepInputs(
+        task_z=g("z_cont"), proto_seed=g("z_psm"),
+        proto_next_action=g("proto_next_action"),
+        sf_next_action=g("actor_next_action"),
+        actor_sample=g("actor_sample"),
+    )
 
 
 def test_agent_static_equiv():

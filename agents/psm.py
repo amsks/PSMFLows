@@ -23,6 +23,27 @@ from utils.psm_networks import (
 )
 
 
+@flax.struct.dataclass
+class StepInputs:
+    """The per-step sampled quantities (replaces the old `inj` dict).
+
+    task_z:            continuous task vector w (Gaussian, 50%-mixed with phi(goal))
+    proto_seed:        binary codebook seed z for the proto branch
+    proto_next_action: codebook policy action at s' (proto measure target)
+    sf_next_action:    learned-actor action at s' (sf measure target)
+    actor_sample:      truncated-normal actor sample (ddpgbc only; None for flow)
+    flow_x0/flow_t/flow_noise: flow-BC noise/time/noise (flow only; None for ddpgbc)
+    """
+    task_z: Any
+    proto_seed: Any
+    proto_next_action: Any
+    sf_next_action: Any
+    actor_sample: Any = None
+    flow_x0: Any = None
+    flow_t: Any = None
+    flow_noise: Any = None
+
+
 class _HashableDict(dict):
     """A dict that hashes/compares by identity so it can live in a jit static aux.
 
@@ -105,8 +126,8 @@ class PSMAgent(flax.struct.PyTreeNode):
         seed_to_action, powers = self.proto
         max_seed = c["proto_max_seed"]
 
-        z_psm = inj["z_psm"]
-        proto_na = inj["proto_next_action"]
+        z_psm = inj.proto_seed
+        proto_na = inj.proto_next_action
 
         def psm_loss_fn(phi_p, psm_p):
             phi_g = self._apply("phi", phi_p, goal)
@@ -121,8 +142,8 @@ class PSMAgent(flax.struct.PyTreeNode):
             return loss, {"psm_loss": loss, "psm_diag": cdiag, "psm_offdiag": coff,
                           "orth_loss": ol, "orth_diag": odiag, "orth_offdiag": ooff}
 
-        z = inj["z_cont"]
-        sf_na = inj["actor_next_action"]
+        z = inj.task_z
+        sf_na = inj.sf_next_action
 
         def sf_loss_fn(sf_p, phi_p):
             phi_g = jax.lax.stop_gradient(self._apply("phi", phi_p, goal))
@@ -134,7 +155,7 @@ class PSMAgent(flax.struct.PyTreeNode):
             cl, cdiag, coff = contrastive_loss(M, jax.lax.stop_gradient(target_M), disc, off, off_sum)
             return cl, {"sf_loss": cl, "sf_diag": cdiag, "sf_offdiag": coff}
 
-        actor_smp = inj.get("actor_sample")  # None for the flow actor (uses _flow_actor_fn)
+        actor_smp = inj.actor_sample  # None for the flow actor (uses _flow_actor_fn)
 
         def actor_loss_fn(actor_p, sf_p):
             # DDPGBC actor: TD3 deterministic mean + truncated exploration sample, with an
@@ -162,8 +183,8 @@ class PSMAgent(flax.struct.PyTreeNode):
         closure over (actor_params, actor_vf_params); Q comes from the (fixed) sf_psi."""
         c = self.config
         obs, action = batch["observations"], batch["actions"]
-        z = inj["z_cont"]
-        x0, t, noise = inj["flow_x0"], inj["flow_t"], inj["flow_noise"]
+        z = inj.task_z
+        x0, t, noise = inj.flow_x0, inj.flow_t, inj.flow_noise
         P = c["num_parallel"]
         bc_coeff = c["bc_coeff"]
         steps = c["flow_steps"]
@@ -266,23 +287,26 @@ class PSMAgent(flax.struct.PyTreeNode):
         info = {**psm_i, **sf_i, **a_i}
         return self.replace(params=params, opt_states=opt), info
 
-    def _draw_injection(self, batch, rng):
+    def sample_step_inputs(self, batch, rng):
+        """Sample the per-step quantities (task vector, codebook seed, next actions,
+        flow noise) as a named `StepInputs` (replaces the old `_draw_injection` dict)."""
         c = self.config
         B = batch["observations"].shape[0]
         adim = c["action_dim"]
         obs, next_obs = batch["observations"], batch["next_observations"]
         r1, r2, r5, rperm, rtail = jax.random.split(rng, 5)
-        # SF-branch z: Gaussian, with a mix_ratio fraction replaced by project_z(phi(goal[perm]))
+        # task vector w: Gaussian, with a mix_ratio fraction replaced by project_z(phi(goal[perm]))
         # (reference sample_mixed_z, as a jit-friendly mask instead of dynamic indexing).
         gauss_z = project_z(jax.random.normal(r1, (B, c["z_dim"])), c["norm_z"])
         goal = next_obs
         perm = jax.random.permutation(rperm, B)
         mixed_z = project_z(self._apply("phi", self.params["phi"], goal)[perm], c["norm_z"])
         mix_mask = (jax.random.uniform(r5, (B,)) < c["mix_ratio"])[:, None]
-        z_cont = jnp.where(mix_mask, mixed_z, gauss_z)
+        task_z = jnp.where(mix_mask, mixed_z, gauss_z)
+        # binary codebook seed z for the proto branch.
         zbin = (jax.random.randint(r2, (B,), 0, 2 ** c["max_log_seed"])[:, None]
                 & (1 << jnp.arange(c["max_log_seed"]))) > 0
-        z_psm = zbin.astype(jnp.float32)
+        proto_seed = zbin.astype(jnp.float32)
         seed_to_action, powers = self.proto
         max_seed = c["proto_max_seed"]
         # Proto behavior policy is keyed on the GLOBAL replay-buffer row index of each
@@ -291,26 +315,28 @@ class PSMAgent(flax.struct.PyTreeNode):
         # proto next-action depend on where a transition lands in the batch — inconsistent
         # across resamples. Use the injected index when present.
         obs_hash = batch["index"] if "index" in batch else jnp.arange(B)
-        proto_na = proto_sample(seed_to_action, powers, obs_hash, z_psm, max_seed)
+        proto_next_action = proto_sample(seed_to_action, powers, obs_hash, proto_seed, max_seed)
 
-        inj = dict(z_cont=z_cont, z_psm=z_psm, proto_next_action=proto_na)
         if c["actor_type"] == "flow":
             r_x0, r_t, r_noise, r_na = jax.random.split(rtail, 4)
             # SF-branch next action = the one-step flow policy at s' (bootstrap target).
-            na = self._apply("actor", self.params["actor"], next_obs, z_cont,
+            na = self._apply("actor", self.params["actor"], next_obs, task_z,
                              jax.random.normal(r_na, (B, adim)))
-            inj.update(actor_next_action=jnp.clip(na, -1.0, 1.0),
-                       flow_x0=jax.random.normal(r_x0, (B, adim)),
-                       flow_t=jax.random.uniform(r_t, (B, 1)),
-                       flow_noise=jax.random.normal(r_noise, (B, adim)))
-        else:
-            r3, r4 = jax.random.split(rtail)
-            mu_next = self._apply("actor", self.params["actor"], next_obs, z_cont)
-            sf_na = truncated_sample(mu_next, c["actor_std"], jax.random.normal(r3, (B, adim)), clip=c["stddev_clip"])
-            mu = self._apply("actor", self.params["actor"], obs, z_cont)
-            actor_smp = truncated_sample(mu, c["actor_std"], jax.random.normal(r4, (B, adim)), clip=c["stddev_clip"])
-            inj.update(actor_next_action=sf_na, actor_sample=actor_smp)
-        return inj
+            return StepInputs(
+                task_z=task_z, proto_seed=proto_seed, proto_next_action=proto_next_action,
+                sf_next_action=jnp.clip(na, -1.0, 1.0), actor_sample=None,
+                flow_x0=jax.random.normal(r_x0, (B, adim)),
+                flow_t=jax.random.uniform(r_t, (B, 1)),
+                flow_noise=jax.random.normal(r_noise, (B, adim)))
+        r3, r4 = jax.random.split(rtail)
+        mu_next = self._apply("actor", self.params["actor"], next_obs, task_z)
+        sf_next_action = truncated_sample(mu_next, c["actor_std"], jax.random.normal(r3, (B, adim)), clip=c["stddev_clip"])
+        mu = self._apply("actor", self.params["actor"], obs, task_z)
+        actor_sample = truncated_sample(mu, c["actor_std"], jax.random.normal(r4, (B, adim)), clip=c["stddev_clip"])
+        return StepInputs(
+            task_z=task_z, proto_seed=proto_seed, proto_next_action=proto_next_action,
+            sf_next_action=sf_next_action, actor_sample=actor_sample,
+            flow_x0=None, flow_t=None, flow_noise=None)
 
     @jax.jit
     def update(self, batch):
@@ -319,7 +345,7 @@ class PSMAgent(flax.struct.PyTreeNode):
         # call apply_update/compute_static directly (un-jitted), so their numerics are
         # unaffected by any op-fusion here.
         new_rng, rng = jax.random.split(self.rng)
-        inj = self._draw_injection(batch, rng)
+        inj = self.sample_step_inputs(batch, rng)
         new_agent, info = self.apply_update(batch, inj)
         return new_agent.replace(rng=new_rng), info
 
@@ -339,7 +365,7 @@ class PSMAgent(flax.struct.PyTreeNode):
     def total_loss(self, batch, grad_params=None, rng=None):
         """Validation-logging loss: the three branch losses at current params (no step)."""
         rng = rng if rng is not None else self.rng
-        inj = self._draw_injection(batch, rng)
+        inj = self.sample_step_inputs(batch, rng)
         B = batch["observations"].shape[0]
         off, off_sum = self._off(B)
         psm_fn, sf_fn, actor_fn = self._stages(self.params, batch, inj, off, off_sum)
