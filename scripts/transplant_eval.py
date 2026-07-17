@@ -4,6 +4,16 @@ and eval on task2. Localizes the train/eval gap:
   ref weights score HIGH in our eval -> bug is in our TRAINING/init (not eval)
   ref weights score LOW               -> bug is in our EVAL (both audits say unlikely)
 Guards against a buggy converter with phi-norm / actor-range sanity checks first.
+
+NOTE (2026-07-17): this script targets the PRE-refactor PSMAgent API and must be updated
+before use. The agent no longer has a flat `params` dict / `_apply` helper; params now
+live in per-network TrainStates. Port map:
+  agent.params["phi"]        -> agent.phi.params        (likewise sf_psi/proto_psi/actor/actor_vf)
+  agent.params["psm_psi"]    -> agent.proto_psi.params  ("psm_psi" was renamed to "proto_psi")
+  agent.params["target_*"]   -> agent.target_phi / target_proto_psi / target_sf_psi
+  agent._apply("phi", p, x)  -> agent.phi(x, params=p)
+  agent.replace(params=...)  -> agent.replace(phi=agent.phi.replace(params=...), ...)
+  agent.z_eval               -> agent.task_z
 """
 import os, json, glob
 os.environ.setdefault("OGBENCH_DATASET_DIR", "/var/local/amsks/ogbench")
