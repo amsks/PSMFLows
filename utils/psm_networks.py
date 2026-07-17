@@ -1,5 +1,11 @@
 """Bespoke PSM networks, transcribed from the PyTorch reference psm_nets.py.
 
+Code <-> paper (arXiv 2411.19418):
+  PhiMap   -> phi_s(s+)      basis over future states (the learned proto basis)
+  PsiMap   -> psi^pi(s,a)    successor-feature coefficients (task or codebook head)
+  PSMActor -> pi(a|s,z)      TD3 mean actor conditioned on the task vector w
+  NoiseConditionedActor / FlowVectorField -> flow-BC one-step actor + velocity field
+
 These intentionally do NOT reuse utils/networks.MLP: the reference uses a specific
 activation/norm sequence — `ntanh` (LayerNorm then tanh), `relu`, and a final
 `Norm` = sqrt(d) * x / ||x|| — that must be reproduced exactly for numerical
