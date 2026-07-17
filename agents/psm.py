@@ -1,10 +1,22 @@
 """PSM (Proto Successor Measure) agent — JAX/Flax port of the PyTorch reference.
 
-Math/op-order is transcribed verbatim from the reference
-agents/psm/{agent,model,proto_sampler}.py. The update is a 3-stage SEQUENTIAL
-procedure (proto -> sf -> actor), each stage stepping its own Adam optimizer with
-target soft-updates interleaved; the SF branch reads the phi just updated by the
-proto branch. This differs from FQL's single-optimizer combined loss.
+Code <-> paper (arXiv 2411.19418):
+  phi (PhiMap)          -> phi_s(s+)     basis over future states (the proto basis)
+  sf_psi (PsiMap)       -> psi^pi(s,a)   successor features of the task (continuous-z) policy
+  proto_psi (PsiMap)    -> psi^{pi_z}    successor features of the codebook policies pi_z
+  task_z / StepInputs   -> w             task coordinates (inferred from reward at eval)
+  proto_seed            -> z             binary codebook seed in pi(a|s,z)
+  M = psi . phi^T       -> M^pi(s,a,s+)  the successor measure
+  proto_next_action     -> pi(a|s,z)=UniformSample(z+hash(s))  codebook behavior policy
+  contrastive_loss      -> Eq.7 off-diag (TD residual) + diag (source) terms
+  ortho_loss            -> orthonormality regularizer (phi phi^T -> I)
+  infer_z: w = E[r.phi] -> reward inference (closed form)
+
+The update is a 3-stage SEQUENTIAL procedure (proto -> sf -> actor): each network is
+its own `TrainState` (module + optimizer), stepped in turn with target soft-updates
+interleaved; the SF stage reads the phi the proto stage just updated. This differs from
+FQL's single-optimizer combined loss, so PSM uses one TrainState per network rather than
+a single shared ModuleDict optimizer.
 """
 
 import copy
@@ -13,10 +25,9 @@ from typing import Any
 import flax
 import jax
 import jax.numpy as jnp
-import numpy as np
 import optax
 
-from utils.flax_utils import nonpytree_field
+from utils.flax_utils import TrainState, nonpytree_field
 from utils.psm_networks import (
     FlowVectorField, NoiseConditionedActor, PhiMap, PsiMap, PSMActor,
     truncated_clamp, truncated_sample,
@@ -42,19 +53,6 @@ class StepInputs:
     flow_x0: Any = None
     flow_t: Any = None
     flow_noise: Any = None
-
-
-class _HashableDict(dict):
-    """A dict that hashes/compares by identity so it can live in a jit static aux.
-
-    The nets/txs dicts are static (non-pytree) config for the agent; jitting `update`
-    requires them to be hashable. `.replace()` keeps these fields by reference across
-    steps, so identity hashing gives a stable key and jit cache hits."""
-
-    __hash__ = object.__hash__
-
-    def __eq__(self, other):
-        return self is other
 
 
 # ----------------------------- pure helpers -----------------------------
@@ -94,202 +92,207 @@ def project_z(z, norm_z):
     return jnp.sqrt(d) * z / (jnp.linalg.norm(z, axis=-1, keepdims=True) + 1e-12)
 
 
+def off_diagonal_mask(B):
+    """(1 - I, its sum): selects the s+ != s (off-diagonal) entries of the BxB grid."""
+    off = 1.0 - jnp.eye(B)
+    return off, off.sum()
+
+
+def polyak_update(online, target, tau):
+    """Soft-update a target param tree toward `online` at rate `tau`."""
+    return jax.tree_util.tree_map(lambda p, tp: p * tau + tp * (1 - tau), online, target)
+
+
 # ----------------------------- agent -----------------------------
 
 class PSMAgent(flax.struct.PyTreeNode):
+    """PSM agent: one TrainState per network + plain target param trees.
+
+    Networks: phi (basis), proto_psi (codebook head), sf_psi (task head), actor
+    (+ actor_vf for the flow actor). Targets are held as plain param pytrees and
+    soft-updated during `apply_update`.
+    """
+
     rng: Any
-    params: Any            # dict: phi/psm_psi/sf_psi/actor + target_phi/target_psm_psi/target_sf_psi
-    opt_states: Any        # dict: phi/psm_psi/sf_psi/actor
-    z_eval: Any            # (z_dim,) task latent used by sample_actions; set via infer_eval_z
+    phi: TrainState
+    proto_psi: TrainState
+    sf_psi: TrainState
+    actor: TrainState
+    target_phi: Any
+    target_proto_psi: Any
+    target_sf_psi: Any
+    task_z: Any            # (z_dim,) eval task vector w, set via infer_eval_z
     config: Any = nonpytree_field()
-    nets: Any = nonpytree_field()     # _HashableDict of nn.Module defs (static aux)
-    txs: Any = nonpytree_field()      # _HashableDict of optax GradientTransformation (static aux)
-    proto: Any = None                 # (seed_to_action, powers) — traced pytree; max_seed in config
+    actor_vf: Any = None   # TrainState for the flow actor's velocity field; None for ddpgbc
+    proto: Any = None      # (seed_to_action, powers) — traced pytree; max_seed in config
 
-    # ---- stage loss functions (closures built per-batch in _stage_losses) ----
-    def _apply(self, name, params, *args):
-        return self.nets[name].apply({"params": params}, *args)
-
-    def _stages(self, params, batch, inj, off, off_sum):
-        """Return three loss closures that read `params` (a dict). Each returns
-        (loss, metrics). target nets are read from `params` (stop-grad implicit:
-        only the differentiated subtree flows grad)."""
+    # ---- branch losses ----
+    def proto_loss(self, batch, sampled, phi_params, proto_psi_params):
+        """Proto branch: learn the basis phi from the codebook policies' measure."""
         c = self.config
         obs, action, next_obs = batch["observations"], batch["actions"], batch["next_observations"]
         goal = next_obs  # phi_input='s', Identity normalizer/encoder for state
-        B = obs.shape[0]
-        # Reference forces terminated=False for every transition (data/ogbench.py) => always
-        # bootstrap with full discount. OGBench masks are 0 at ~2% at-goal steps, which would
-        # cut the bootstrap there; force masks=1 to match the reference (round-2/3 audit #2).
-        disc = c["discount"]
+        off, off_sum = off_diagonal_mask(obs.shape[0])
         P = c["num_parallel"]
-        seed_to_action, powers = self.proto
-        max_seed = c["proto_max_seed"]
+        z_psm, proto_na = sampled.proto_seed, sampled.proto_next_action
 
-        z_psm = inj.proto_seed
-        proto_na = inj.proto_next_action
+        phi_g = self.phi(goal, params=phi_params)
+        M = self.proto_psi(obs, z_psm, action, params=proto_psi_params) @ phi_g.T
+        tphi = self.phi(goal, params=self.target_phi)
+        tM = self.proto_psi(next_obs, z_psm, proto_na, params=self.target_proto_psi) @ tphi.T
+        tmean, tunc = targets_uncertainty(tM, P)
+        target_M = tmean - c["pessimism_penalty"] * tunc
+        cl, cdiag, coff = contrastive_loss(M, jax.lax.stop_gradient(target_M), c["discount"], off, off_sum)
+        ol, odiag, ooff = ortho_loss(phi_g, off, off_sum)
+        loss = cl + c["ortho_coef"] * ol
+        return loss, {"psm_loss": loss, "psm_diag": cdiag, "psm_offdiag": coff,
+                      "orth_loss": ol, "orth_diag": odiag, "orth_offdiag": ooff}
 
-        def psm_loss_fn(phi_p, psm_p):
-            phi_g = self._apply("phi", phi_p, goal)
-            M = self._apply("psm_psi", psm_p, obs, z_psm, action) @ phi_g.T
-            tphi = self._apply("phi", params["target_phi"], goal)
-            tM = self._apply("psm_psi", params["target_psm_psi"], next_obs, z_psm, proto_na) @ tphi.T
-            tmean, tunc = targets_uncertainty(tM, P)
-            target_M = tmean - c["pessimism_penalty"] * tunc
-            cl, cdiag, coff = contrastive_loss(M, jax.lax.stop_gradient(target_M), disc, off, off_sum)
-            ol, odiag, ooff = ortho_loss(phi_g, off, off_sum)
-            loss = cl + c["ortho_coef"] * ol
-            return loss, {"psm_loss": loss, "psm_diag": cdiag, "psm_offdiag": coff,
-                          "orth_loss": ol, "orth_diag": odiag, "orth_offdiag": ooff}
+    def sf_loss(self, batch, sampled, sf_params, phi_params):
+        """SF branch: fit the task successor features on the (frozen) basis phi.
 
-        z = inj.task_z
-        sf_na = inj.sf_next_action
+        `phi_params` is the *just-updated* online phi; the target measure uses the same
+        online phi (NOT target_phi, matching the reference) and target_sf_psi.
+        """
+        c = self.config
+        obs, action, next_obs = batch["observations"], batch["actions"], batch["next_observations"]
+        goal = next_obs
+        off, off_sum = off_diagonal_mask(obs.shape[0])
+        P = c["num_parallel"]
+        z, sf_na = sampled.task_z, sampled.sf_next_action
 
-        def sf_loss_fn(sf_p, phi_p):
-            phi_g = jax.lax.stop_gradient(self._apply("phi", phi_p, goal))
-            M = self._apply("sf_psi", sf_p, obs, z, action) @ phi_g.T
-            tphi = self._apply("phi", phi_p, goal)  # self.phi, NOT target_phi
-            tM = self._apply("sf_psi", params["target_sf_psi"], next_obs, z, sf_na) @ tphi.T
-            tmean, tunc = targets_uncertainty(tM, P)
-            target_M = tmean - c["pessimism_penalty"] * tunc
-            cl, cdiag, coff = contrastive_loss(M, jax.lax.stop_gradient(target_M), disc, off, off_sum)
-            return cl, {"sf_loss": cl, "sf_diag": cdiag, "sf_offdiag": coff}
+        phi_g = jax.lax.stop_gradient(self.phi(goal, params=phi_params))  # phi frozen for SF
+        M = self.sf_psi(obs, z, action, params=sf_params) @ phi_g.T
+        tphi = self.phi(goal, params=phi_params)  # online phi, NOT target_phi (reference)
+        tM = self.sf_psi(next_obs, z, sf_na, params=self.target_sf_psi) @ tphi.T
+        tmean, tunc = targets_uncertainty(tM, P)
+        target_M = tmean - c["pessimism_penalty"] * tunc
+        cl, cdiag, coff = contrastive_loss(M, jax.lax.stop_gradient(target_M), c["discount"], off, off_sum)
+        return cl, {"sf_loss": cl, "sf_diag": cdiag, "sf_offdiag": coff}
 
-        actor_smp = inj.actor_sample  # None for the flow actor (uses _flow_actor_fn)
+    def actor_loss(self, batch, sampled, actor_params, sf_params):
+        """DDPGBC actor: TD3 mean + truncated exploration sample, optional BC term.
 
-        def actor_loss_fn(actor_p, sf_p):
-            # DDPGBC actor: TD3 deterministic mean + truncated exploration sample, with an
-            # optional behavior-cloning term (bc_coeff>0 => DDPG+BC; ==0 => plain DDPG).
-            mu = self._apply("actor", actor_p, obs, z)
-            a = truncated_clamp(mu + jax.lax.stop_gradient(actor_smp - mu))
-            qpsis = self._apply("sf_psi", sf_p, obs, z, a)
-            Qs = (qpsis * z).sum(-1)
-            qmean, qunc = targets_uncertainty(Qs, P)
-            Q = qmean - c["actor_pessimism_penalty"] * qunc
-            loss = -Q.mean()
-            info = {"actor_loss": loss, "q": Q.mean()}
-            if c["bc_coeff"] > 0:
-                bc_error = jnp.mean((a - action) ** 2)
-                # normalize Q by |Q| so the BC term has a stable relative scale (td_jepa/FB).
-                loss = loss / jax.lax.stop_gradient(jnp.abs(Qs).mean()) + c["bc_coeff"] * bc_error
-                info = {"actor_loss": loss, "q": Q.mean(), "bc_error": bc_error}
-            return loss, info
-
-        return psm_loss_fn, sf_loss_fn, actor_loss_fn
-
-    def _flow_actor_fn(self, params, batch, inj, off, off_sum):
-        """Flow (FQL-style) actor: a BC flow-matching velocity field v(s, x_t, t) plus a
-        one-step, z-conditioned noise actor distilled from its ODE rollout. Returns a loss
-        closure over (actor_params, actor_vf_params); Q comes from the (fixed) sf_psi."""
+        `sf_params` (the just-updated sf_psi) supplies Q; it is a constant here.
+        """
         c = self.config
         obs, action = batch["observations"], batch["actions"]
-        z = inj.task_z
-        x0, t, noise = inj.flow_x0, inj.flow_t, inj.flow_noise
+        z = sampled.task_z
+        P = c["num_parallel"]
+        mu = self.actor(obs, z, params=actor_params)
+        a = truncated_clamp(mu + jax.lax.stop_gradient(sampled.actor_sample - mu))
+        qpsis = self.sf_psi(obs, z, a, params=sf_params)
+        Qs = (qpsis * z).sum(-1)
+        qmean, qunc = targets_uncertainty(Qs, P)
+        Q = qmean - c["actor_pessimism_penalty"] * qunc
+        loss = -Q.mean()
+        info = {"actor_loss": loss, "q": Q.mean()}
+        if c["bc_coeff"] > 0:
+            bc_error = jnp.mean((a - action) ** 2)
+            # normalize Q by |Q| so the BC term has a stable relative scale (td_jepa/FB).
+            loss = loss / jax.lax.stop_gradient(jnp.abs(Qs).mean()) + c["bc_coeff"] * bc_error
+            info = {"actor_loss": loss, "q": Q.mean(), "bc_error": bc_error}
+        return loss, info
+
+    def flow_actor_loss(self, batch, sampled, actor_params, vf_params, sf_params):
+        """Flow (FQL-style) actor: BC flow-matching velocity field v(s, x_t, t) plus a
+        one-step, z-conditioned noise actor distilled from its ODE rollout. Q comes from
+        the (fixed) sf_psi. Differentiated w.r.t. (actor_params, vf_params)."""
+        c = self.config
+        obs, action = batch["observations"], batch["actions"]
+        z = sampled.task_z
+        x0, t, noise = sampled.flow_x0, sampled.flow_t, sampled.flow_noise
         P = c["num_parallel"]
         bc_coeff = c["bc_coeff"]
         steps = c["flow_steps"]
-        sf_p = params["sf_psi"]
 
         def rollout(vf_p, o, n):
             a = n
             for i in range(steps):
                 ti = jnp.full((o.shape[0], 1), i / steps)
-                a = a + self._apply("actor_vf", vf_p, o, a, ti) / steps
+                a = a + self.actor_vf(o, a, ti, params=vf_p) / steps
             return jnp.clip(a, -1.0, 1.0)
 
-        def loss_fn(actor_p, vf_p):
-            # BC flow-matching loss (trains the velocity field on dataset actions).
-            x1 = action
-            xt = (1 - t) * x0 + t * x1
-            vel = x1 - x0
-            pred = self._apply("actor_vf", vf_p, obs, xt, t)
-            bc_flow_loss = jnp.mean((pred - vel) ** 2)
-            # One-step z-conditioned actor action (NoiseConditionedActor applies tanh internally).
-            a = self._apply("actor", actor_p, obs, z, noise)
-            qpsis = self._apply("sf_psi", sf_p, obs, z, a)
-            Qs = (qpsis * z).sum(-1)
-            qmean, qunc = targets_uncertainty(Qs, P)
-            Q = qmean - c["actor_pessimism_penalty"] * qunc
-            q_loss = -Q.mean()
-            info = {"q": Q.mean(), "bc_flow_loss": bc_flow_loss}
-            if bc_coeff > 0:
-                target = jax.lax.stop_gradient(rollout(vf_p, obs, noise))
-                distill = jnp.mean((a - target) ** 2)
-                q_loss = q_loss / jax.lax.stop_gradient(jnp.abs(Qs).mean()) + bc_coeff * distill
-                info["bc_error"] = distill
-            loss = q_loss + bc_flow_loss
-            info["actor_loss"] = loss
-            return loss, info
+        # BC flow-matching loss (trains the velocity field on dataset actions).
+        x1 = action
+        xt = (1 - t) * x0 + t * x1
+        vel = x1 - x0
+        pred = self.actor_vf(obs, xt, t, params=vf_params)
+        bc_flow_loss = jnp.mean((pred - vel) ** 2)
+        # One-step z-conditioned actor action (NoiseConditionedActor applies tanh internally).
+        a = self.actor(obs, z, noise, params=actor_params)
+        qpsis = self.sf_psi(obs, z, a, params=sf_params)
+        Qs = (qpsis * z).sum(-1)
+        qmean, qunc = targets_uncertainty(Qs, P)
+        Q = qmean - c["actor_pessimism_penalty"] * qunc
+        q_loss = -Q.mean()
+        info = {"q": Q.mean(), "bc_flow_loss": bc_flow_loss}
+        if bc_coeff > 0:
+            target = jax.lax.stop_gradient(rollout(vf_params, obs, noise))
+            distill = jnp.mean((a - target) ** 2)
+            q_loss = q_loss / jax.lax.stop_gradient(jnp.abs(Qs).mean()) + bc_coeff * distill
+            info["bc_error"] = distill
+        loss = q_loss + bc_flow_loss
+        info["actor_loss"] = loss
+        return loss, info
 
-        return loss_fn
-
-    def _off(self, B):
-        off = 1.0 - jnp.eye(B)
-        return off, off.sum()
-
-    def compute_static(self, batch, inj):
-        """Compute the three stage losses + grads at the CURRENT params, with NO
+    # ---- update orchestration ----
+    def losses_and_grads(self, batch, sampled):
+        """Compute the three branch losses + grads at the CURRENT params, with NO
         interleaving (matches the fixture's no-step static export)."""
-        B = batch["observations"].shape[0]
-        off, off_sum = self._off(B)
-        psm_fn, sf_fn, actor_fn = self._stages(self.params, batch, inj, off, off_sum)
-        (psm_l, psm_i), (g_phi, g_psm) = jax.value_and_grad(psm_fn, argnums=(0, 1), has_aux=True)(
-            self.params["phi"], self.params["psm_psi"])
-        (sf_l, sf_i), g_sf = jax.value_and_grad(sf_fn, has_aux=True)(
-            self.params["sf_psi"], self.params["phi"])
+        (_, psm_i), (g_phi, g_proto) = jax.value_and_grad(self.proto_loss, argnums=(2, 3), has_aux=True)(
+            batch, sampled, self.phi.params, self.proto_psi.params)
+        (_, sf_i), g_sf = jax.value_and_grad(self.sf_loss, argnums=2, has_aux=True)(
+            batch, sampled, self.sf_psi.params, self.phi.params)
         if self.config["actor_type"] == "flow":
-            flow_fn = self._flow_actor_fn(self.params, batch, inj, off, off_sum)
-            (a_l, a_i), (g_actor, g_vf) = jax.value_and_grad(flow_fn, argnums=(0, 1), has_aux=True)(
-                self.params["actor"], self.params["actor_vf"])
-            grads = {"phi": g_phi, "psm_psi": g_psm, "sf_psi": g_sf, "actor": g_actor, "actor_vf": g_vf}
+            (_, a_i), (g_actor, g_vf) = jax.value_and_grad(self.flow_actor_loss, argnums=(2, 3), has_aux=True)(
+                batch, sampled, self.actor.params, self.actor_vf.params, self.sf_psi.params)
+            grads = {"phi": g_phi, "proto_psi": g_proto, "sf_psi": g_sf, "actor": g_actor, "actor_vf": g_vf}
         else:
-            (a_l, a_i), g_actor = jax.value_and_grad(actor_fn, has_aux=True)(
-                self.params["actor"], self.params["sf_psi"])
-            grads = {"phi": g_phi, "psm_psi": g_psm, "sf_psi": g_sf, "actor": g_actor}
-        info = {**psm_i, **sf_i, **a_i}
-        return info, grads
+            (_, a_i), g_actor = jax.value_and_grad(self.actor_loss, argnums=2, has_aux=True)(
+                batch, sampled, self.actor.params, self.sf_psi.params)
+            grads = {"phi": g_phi, "proto_psi": g_proto, "sf_psi": g_sf, "actor": g_actor}
+        return {**psm_i, **sf_i, **a_i}, grads
 
-    def apply_update(self, batch, inj):
+    def apply_update(self, batch, sampled):
         """3-stage interleaved update (matches the fixture K-step trace)."""
-        B = batch["observations"].shape[0]
-        off, off_sum = self._off(B)
-        params = dict(self.params)
-        opt = dict(self.opt_states)
         tau = self.config["tau"]
 
-        # stage 1: proto -> step phi + psm_psi, then soft-update their targets
-        psm_fn, _, _ = self._stages(params, batch, inj, off, off_sum)
-        (psm_l, psm_i), (g_phi, g_psm) = jax.value_and_grad(psm_fn, argnums=(0, 1), has_aux=True)(
-            params["phi"], params["psm_psi"])
-        params["phi"], opt["phi"] = _step(self.txs["phi"], g_phi, params["phi"], opt["phi"])
-        params["psm_psi"], opt["psm_psi"] = _step(self.txs["psm_psi"], g_psm, params["psm_psi"], opt["psm_psi"])
-        params["target_phi"] = _soft(params["phi"], params["target_phi"], tau)
-        params["target_psm_psi"] = _soft(params["psm_psi"], params["target_psm_psi"], tau)
+        # stage 1: proto -> step phi + proto_psi, then soft-update their targets
+        (_, psm_i), (g_phi, g_proto) = jax.value_and_grad(self.proto_loss, argnums=(2, 3), has_aux=True)(
+            batch, sampled, self.phi.params, self.proto_psi.params)
+        phi = self.phi.apply_gradients(grads=g_phi)
+        proto_psi = self.proto_psi.apply_gradients(grads=g_proto)
+        target_phi = polyak_update(phi.params, self.target_phi, tau)
+        target_proto_psi = polyak_update(proto_psi.params, self.target_proto_psi, tau)
 
-        # stage 2: sf (reads updated phi) -> step sf_psi, soft-update its target
-        _, sf_fn, _ = self._stages(params, batch, inj, off, off_sum)
-        (sf_l, sf_i), g_sf = jax.value_and_grad(sf_fn, has_aux=True)(params["sf_psi"], params["phi"])
-        params["sf_psi"], opt["sf_psi"] = _step(self.txs["sf_psi"], g_sf, params["sf_psi"], opt["sf_psi"])
-        params["target_sf_psi"] = _soft(params["sf_psi"], params["target_sf_psi"], tau)
+        # stage 2: sf reads the just-updated phi -> step sf_psi, soft-update its target.
+        # sf_loss reads self.target_sf_psi (still the pre-update target) + phi.params (updated).
+        (_, sf_i), g_sf = jax.value_and_grad(self.sf_loss, argnums=2, has_aux=True)(
+            batch, sampled, self.sf_psi.params, phi.params)
+        sf_psi = self.sf_psi.apply_gradients(grads=g_sf)
+        target_sf_psi = polyak_update(sf_psi.params, self.target_sf_psi, tau)
 
-        # stage 3: actor (reads updated sf_psi) -> step actor (+ velocity field for flow)
+        # stage 3: actor reads the just-updated sf_psi
+        actor_vf = self.actor_vf
         if self.config["actor_type"] == "flow":
-            flow_fn = self._flow_actor_fn(params, batch, inj, off, off_sum)
-            (a_l, a_i), (g_actor, g_vf) = jax.value_and_grad(flow_fn, argnums=(0, 1), has_aux=True)(
-                params["actor"], params["actor_vf"])
-            params["actor"], opt["actor"] = _step(self.txs["actor"], g_actor, params["actor"], opt["actor"])
-            params["actor_vf"], opt["actor_vf"] = _step(self.txs["actor_vf"], g_vf, params["actor_vf"], opt["actor_vf"])
+            (_, a_i), (g_actor, g_vf) = jax.value_and_grad(self.flow_actor_loss, argnums=(2, 3), has_aux=True)(
+                batch, sampled, self.actor.params, self.actor_vf.params, sf_psi.params)
+            actor = self.actor.apply_gradients(grads=g_actor)
+            actor_vf = self.actor_vf.apply_gradients(grads=g_vf)
         else:
-            _, _, actor_fn = self._stages(params, batch, inj, off, off_sum)
-            (a_l, a_i), g_actor = jax.value_and_grad(actor_fn, has_aux=True)(params["actor"], params["sf_psi"])
-            params["actor"], opt["actor"] = _step(self.txs["actor"], g_actor, params["actor"], opt["actor"])
+            (_, a_i), g_actor = jax.value_and_grad(self.actor_loss, argnums=2, has_aux=True)(
+                batch, sampled, self.actor.params, sf_psi.params)
+            actor = self.actor.apply_gradients(grads=g_actor)
 
         info = {**psm_i, **sf_i, **a_i}
-        return self.replace(params=params, opt_states=opt), info
+        return self.replace(phi=phi, proto_psi=proto_psi, sf_psi=sf_psi, actor=actor, actor_vf=actor_vf,
+                            target_phi=target_phi, target_proto_psi=target_proto_psi,
+                            target_sf_psi=target_sf_psi), info
 
     def sample_step_inputs(self, batch, rng):
         """Sample the per-step quantities (task vector, codebook seed, next actions,
-        flow noise) as a named `StepInputs` (replaces the old `_draw_injection` dict)."""
+        flow noise) as a named `StepInputs`."""
         c = self.config
         B = batch["observations"].shape[0]
         adim = c["action_dim"]
@@ -300,7 +303,7 @@ class PSMAgent(flax.struct.PyTreeNode):
         gauss_z = project_z(jax.random.normal(r1, (B, c["z_dim"])), c["norm_z"])
         goal = next_obs
         perm = jax.random.permutation(rperm, B)
-        mixed_z = project_z(self._apply("phi", self.params["phi"], goal)[perm], c["norm_z"])
+        mixed_z = project_z(self.phi(goal)[perm], c["norm_z"])
         mix_mask = (jax.random.uniform(r5, (B,)) < c["mix_ratio"])[:, None]
         task_z = jnp.where(mix_mask, mixed_z, gauss_z)
         # binary codebook seed z for the proto branch.
@@ -310,18 +313,16 @@ class PSMAgent(flax.struct.PyTreeNode):
         seed_to_action, powers = self.proto
         max_seed = c["proto_max_seed"]
         # Proto behavior policy is keyed on the GLOBAL replay-buffer row index of each
-        # transition (reference next_obs_hash = batch["index"]; see agents/psm/agent.py
-        # and train.py with_index). Falling back to arange(B) (batch position) makes the
-        # proto next-action depend on where a transition lands in the batch — inconsistent
-        # across resamples. Use the injected index when present.
+        # transition (reference next_obs_hash = batch["index"]). Falling back to arange(B)
+        # (batch position) makes the proto next-action depend on where a transition lands in
+        # the batch — inconsistent across resamples. Use the injected index when present.
         obs_hash = batch["index"] if "index" in batch else jnp.arange(B)
         proto_next_action = proto_sample(seed_to_action, powers, obs_hash, proto_seed, max_seed)
 
         if c["actor_type"] == "flow":
             r_x0, r_t, r_noise, r_na = jax.random.split(rtail, 4)
             # SF-branch next action = the one-step flow policy at s' (bootstrap target).
-            na = self._apply("actor", self.params["actor"], next_obs, task_z,
-                             jax.random.normal(r_na, (B, adim)))
+            na = self.actor(next_obs, task_z, jax.random.normal(r_na, (B, adim)))
             return StepInputs(
                 task_z=task_z, proto_seed=proto_seed, proto_next_action=proto_next_action,
                 sf_next_action=jnp.clip(na, -1.0, 1.0), actor_sample=None,
@@ -329,9 +330,9 @@ class PSMAgent(flax.struct.PyTreeNode):
                 flow_t=jax.random.uniform(r_t, (B, 1)),
                 flow_noise=jax.random.normal(r_noise, (B, adim)))
         r3, r4 = jax.random.split(rtail)
-        mu_next = self._apply("actor", self.params["actor"], next_obs, task_z)
+        mu_next = self.actor(next_obs, task_z)
         sf_next_action = truncated_sample(mu_next, c["actor_std"], jax.random.normal(r3, (B, adim)), clip=c["stddev_clip"])
-        mu = self._apply("actor", self.params["actor"], obs, task_z)
+        mu = self.actor(obs, task_z)
         actor_sample = truncated_sample(mu, c["actor_std"], jax.random.normal(r4, (B, adim)), clip=c["stddev_clip"])
         return StepInputs(
             task_z=task_z, proto_seed=proto_seed, proto_next_action=proto_next_action,
@@ -340,53 +341,49 @@ class PSMAgent(flax.struct.PyTreeNode):
 
     @jax.jit
     def update(self, batch):
-        # Jitted training step. nets/txs are hashable (_HashableDict) static aux and proto
-        # is a traced pytree leaf, so `self` is a valid jit argument. The equivalence tests
-        # call apply_update/compute_static directly (un-jitted), so their numerics are
-        # unaffected by any op-fusion here.
+        # Jitted training step. Each TrainState carries its (nonpytree) module/optimizer as
+        # static aux and its params/opt_state as traced leaves, so `self` is a valid jit
+        # argument. The equivalence tests call apply_update/losses_and_grads directly
+        # (un-jitted), so their numerics are unaffected by any op-fusion here.
         new_rng, rng = jax.random.split(self.rng)
-        inj = self.sample_step_inputs(batch, rng)
-        new_agent, info = self.apply_update(batch, inj)
+        sampled = self.sample_step_inputs(batch, rng)
+        new_agent, info = self.apply_update(batch, sampled)
         return new_agent.replace(rng=new_rng), info
 
     @jax.jit
     def sample_actions(self, observations, seed=None, temperature=1.0):
-        # PSM acts conditioned on the task latent z_eval (inferred from rewards via
+        # PSM acts conditioned on the task latent task_z (inferred from rewards via
         # infer_eval_z; defaults to zeros until inferred). DDPGBC returns the TD3 actor
         # mean; flow runs the one-step, z-conditioned noise actor.
-        z = jnp.broadcast_to(self.z_eval, (*observations.shape[:-1], self.config["z_dim"]))
+        z = jnp.broadcast_to(self.task_z, (*observations.shape[:-1], self.config["z_dim"]))
         if self.config["actor_type"] == "flow":
             seed = self.rng if seed is None else seed
             noise = jax.random.normal(seed, (*observations.shape[:-1], self.config["action_dim"]))
-            a = self._apply("actor", self.params["actor"], observations, z, noise)
+            a = self.actor(observations, z, noise)
             return jnp.clip(a, -1.0, 1.0)
-        return self._apply("actor", self.params["actor"], observations, z)
+        return self.actor(observations, z)
 
     def total_loss(self, batch, grad_params=None, rng=None):
         """Validation-logging loss: the three branch losses at current params (no step)."""
         rng = rng if rng is not None else self.rng
-        inj = self.sample_step_inputs(batch, rng)
-        B = batch["observations"].shape[0]
-        off, off_sum = self._off(B)
-        psm_fn, sf_fn, actor_fn = self._stages(self.params, batch, inj, off, off_sum)
-        psm_l, psm_i = psm_fn(self.params["phi"], self.params["psm_psi"])
-        sf_l, sf_i = sf_fn(self.params["sf_psi"], self.params["phi"])
+        sampled = self.sample_step_inputs(batch, rng)
+        psm_l, psm_i = self.proto_loss(batch, sampled, self.phi.params, self.proto_psi.params)
+        sf_l, sf_i = self.sf_loss(batch, sampled, self.sf_psi.params, self.phi.params)
         if self.config["actor_type"] == "flow":
-            a_l, a_i = self._flow_actor_fn(self.params, batch, inj, off, off_sum)(
-                self.params["actor"], self.params["actor_vf"])
+            a_l, a_i = self.flow_actor_loss(batch, sampled, self.actor.params, self.actor_vf.params, self.sf_psi.params)
         else:
-            a_l, a_i = actor_fn(self.params["actor"], self.params["sf_psi"])
+            a_l, a_i = self.actor_loss(batch, sampled, self.actor.params, self.sf_psi.params)
         return psm_l + sf_l + a_l, {**psm_i, **sf_i, **a_i}
 
     def infer_z(self, next_observations, rewards):
-        phi = self._apply("phi", self.params["phi"], next_observations)
+        phi = self.phi(next_observations)
         z = (rewards.reshape(1, -1) @ phi).reshape(-1) / phi.shape[0]
         return project_z(z, self.config["norm_z"])
 
     def infer_eval_z(self, next_observations, rewards):
-        """Return a copy of this agent with z_eval set to the reward-inferred task
+        """Return a copy of this agent with task_z set to the reward-inferred task
         latent. Call on the TRAINED agent (phi must be trained) before eval acting."""
-        return self.replace(z_eval=self.infer_z(next_observations, rewards))
+        return self.replace(task_z=self.infer_z(next_observations, rewards))
 
     @classmethod
     def create(cls, seed, ex_observations, ex_actions, config):
@@ -402,67 +399,56 @@ class PSMAgent(flax.struct.PyTreeNode):
         actor_type = actor_cfg["type"] if "type" in actor_cfg else "ddpgbc"
         assert actor_type in ("ddpgbc", "flow"), f"unknown actor.type {actor_type!r}"
 
-        nets = dict(
-            phi=PhiMap(z_dim=z_dim, hidden_dim=config["phi"]["hidden_dim"],
-                       hidden_layers=config["phi"]["hidden_layers"], norm=True),
-            sf_psi=PsiMap(output_dim=z_dim, hidden_dim=config["sf"]["hidden_dim"],
-                          num_parallel=config["num_parallel"],
-                          embedding_layers=config["sf"]["embedding_layers"],
-                          hidden_layers=config["sf"]["hidden_layers"]),
-            psm_psi=PsiMap(output_dim=z_dim, hidden_dim=config["sf"]["hidden_dim"],
-                           num_parallel=config["num_parallel"],
-                           embedding_layers=config["sf"]["embedding_layers"],
-                           hidden_layers=config["sf"]["hidden_layers"]),
-        )
         ex_obs = ex_observations
         ex_z = jnp.zeros((ex_obs.shape[0], z_dim))
         ex_zbin = jnp.zeros((ex_obs.shape[0], config["max_log_seed"]))
-        params = {
-            "phi": nets["phi"].init(rphi, ex_obs)["params"],
-            "sf_psi": nets["sf_psi"].init(rsf, ex_obs, ex_z, ex_actions)["params"],
-            "psm_psi": nets["psm_psi"].init(rpsm, ex_obs, ex_zbin, ex_actions)["params"],
-        }
 
-        actor_keys = ["actor"]
+        phi_def = PhiMap(z_dim=z_dim, hidden_dim=config["phi"]["hidden_dim"],
+                         hidden_layers=config["phi"]["hidden_layers"], norm=True)
+        psi_kw = dict(output_dim=z_dim, hidden_dim=config["sf"]["hidden_dim"],
+                      num_parallel=config["num_parallel"],
+                      embedding_layers=config["sf"]["embedding_layers"],
+                      hidden_layers=config["sf"]["hidden_layers"])
+        sf_def, proto_def = PsiMap(**psi_kw), PsiMap(**psi_kw)
+
+        phi = TrainState.create(phi_def, phi_def.init(rphi, ex_obs)["params"],
+                                tx=optax.adam(config["lr_phi"]))
+        sf_psi = TrainState.create(sf_def, sf_def.init(rsf, ex_obs, ex_z, ex_actions)["params"],
+                                   tx=optax.adam(config["lr_sf"]))
+        proto_psi = TrainState.create(proto_def, proto_def.init(rpsm, ex_obs, ex_zbin, ex_actions)["params"],
+                                      tx=optax.adam(config["lr_sf"]))
+
+        lr_actor_vf = float(actor_cfg["lr_actor_vf"]) if "lr_actor_vf" in actor_cfg else 3e-4
+        actor_vf = None
         if actor_type == "flow":
             # Flow actor: a faithful NoiseConditionedActor head (a = tanh(net(obs, z, noise))
             # via dual LayerNorm/Tanh/ReLU embeddings) + an unconditional GELU velocity field
             # v(s, x_t, t). Ports agents/psm/flow_bc + nn_models.{NoiseConditionedActor,VectorField}.
             def _acfg(key, default):
                 return actor_cfg[key] if key in actor_cfg else default
-            fa_hidden = int(_acfg("flow_actor_hidden_dim", 512))
-            fa_layers = int(_acfg("flow_actor_hidden_layers", 2))
-            fa_emb = int(_acfg("flow_actor_embedding_layers", 2))
-            vf_hidden = int(_acfg("flow_vf_hidden_dim", 512))
-            vf_layers = int(_acfg("flow_vf_hidden_layers", 4))
+            actor_def = NoiseConditionedActor(
+                action_dim=action_dim, hidden_dim=int(_acfg("flow_actor_hidden_dim", 512)),
+                hidden_layers=int(_acfg("flow_actor_hidden_layers", 2)),
+                embedding_layers=int(_acfg("flow_actor_embedding_layers", 2)))
+            vf_def = FlowVectorField(action_dim=action_dim, hidden_dim=int(_acfg("flow_vf_hidden_dim", 512)),
+                                     hidden_layers=int(_acfg("flow_vf_hidden_layers", 4)))
             ract, rvf = jax.random.split(ract)
-            nets["actor"] = NoiseConditionedActor(action_dim=action_dim, hidden_dim=fa_hidden,
-                                                  hidden_layers=fa_layers, embedding_layers=fa_emb)
-            nets["actor_vf"] = FlowVectorField(action_dim=action_dim, hidden_dim=vf_hidden,
-                                               hidden_layers=vf_layers)
             ex_noise = ex_actions
             ex_times = ex_actions[..., :1]
-            params["actor"] = nets["actor"].init(ract, ex_obs, ex_z, ex_noise)["params"]
-            params["actor_vf"] = nets["actor_vf"].init(rvf, ex_obs, ex_actions, ex_times)["params"]
-            actor_keys = ["actor", "actor_vf"]
+            actor = TrainState.create(actor_def, actor_def.init(ract, ex_obs, ex_z, ex_noise)["params"],
+                                      tx=optax.adam(config["lr_actor"]))
+            actor_vf = TrainState.create(vf_def, vf_def.init(rvf, ex_obs, ex_actions, ex_times)["params"],
+                                         tx=optax.adam(lr_actor_vf))
         else:
-            nets["actor"] = PSMActor(action_dim=action_dim, hidden_dim=actor_cfg["hidden_dim"],
-                                     embedding_layers=actor_cfg["embedding_layers"],
-                                     hidden_layers=actor_cfg["hidden_layers"])
-            params["actor"] = nets["actor"].init(ract, ex_obs, ex_z)["params"]
+            actor_def = PSMActor(action_dim=action_dim, hidden_dim=actor_cfg["hidden_dim"],
+                                 embedding_layers=actor_cfg["embedding_layers"],
+                                 hidden_layers=actor_cfg["hidden_layers"])
+            actor = TrainState.create(actor_def, actor_def.init(ract, ex_obs, ex_z)["params"],
+                                      tx=optax.adam(config["lr_actor"]))
 
-        params["target_phi"] = copy.deepcopy(params["phi"])
-        params["target_psm_psi"] = copy.deepcopy(params["psm_psi"])
-        params["target_sf_psi"] = copy.deepcopy(params["sf_psi"])
-
-        lr_actor_vf = float(actor_cfg["lr_actor_vf"]) if "lr_actor_vf" in actor_cfg else 3e-4
-        txs = dict(
-            phi=optax.adam(config["lr_phi"]), psm_psi=optax.adam(config["lr_sf"]),
-            sf_psi=optax.adam(config["lr_sf"]), actor=optax.adam(config["lr_actor"]),
-        )
-        if actor_type == "flow":
-            txs["actor_vf"] = optax.adam(lr_actor_vf)
-        opt_states = {k: txs[k].init(params[k]) for k in ["phi", "psm_psi", "sf_psi", *actor_keys]}
+        target_phi = copy.deepcopy(phi.params)
+        target_proto_psi = copy.deepcopy(proto_psi.params)
+        target_sf_psi = copy.deepcopy(sf_psi.params)
 
         # proto table (jax-generated; used only for training — tests inject it). The table
         # + powers are a traced pytree leaf (so `update` can be jitted); max_seed is a
@@ -495,10 +481,9 @@ class PSMAgent(flax.struct.PyTreeNode):
         config["bc_coeff"] = float(actor_cfg["bc_coeff"]) if "bc_coeff" in actor_cfg else 0.0
         config["flow_steps"] = int(actor_cfg["flow_steps"]) if "flow_steps" in actor_cfg else 10
         config["lr_actor_vf"] = lr_actor_vf
-        return cls(rng=rng, params=params, opt_states=opt_states,
-                   z_eval=jnp.zeros((z_dim,), jnp.float32),
-                   config=flax.core.FrozenDict(config),
-                   nets=_HashableDict(nets), txs=_HashableDict(txs), proto=proto)
+        return cls(rng=rng, phi=phi, proto_psi=proto_psi, sf_psi=sf_psi, actor=actor, actor_vf=actor_vf,
+                   target_phi=target_phi, target_proto_psi=target_proto_psi, target_sf_psi=target_sf_psi,
+                   task_z=jnp.zeros((z_dim,), jnp.float32), config=flax.core.FrozenDict(config), proto=proto)
 
 
 def get_config():
@@ -550,6 +535,21 @@ def _plain_config(x):
     if hasattr(x, "items"):
         return {k: _plain_config(v) for k, v in x.items()}
     return x
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers still imported by agents/fb.py (the FB agent has not yet been
+# migrated to the per-network TrainState structure). PSM itself no longer uses
+# these — they will move to a shared module when FB is refactored.
+# ---------------------------------------------------------------------------
+
+class _HashableDict(dict):
+    """A dict that hashes/compares by identity so it can live in a jit static aux."""
+
+    __hash__ = object.__hash__
+
+    def __eq__(self, other):
+        return self is other
 
 
 def _step(tx, grad, params, opt_state):

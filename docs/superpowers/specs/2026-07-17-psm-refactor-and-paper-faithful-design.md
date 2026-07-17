@@ -132,9 +132,15 @@ Two phases; ship and validate Phase 1 before starting Phase 2.
 
 ### 7.2 Network layer
 
-Define all sub-networks in a `ModuleDict` (`phi`, `proto_psi`, `sf_psi`, `actor`, and `actor_vf` for the flow
-variant) so they are declared once and accessed by name via `network.select('phi')(...)`, matching the house
-style. Targets (`target_phi`, `target_proto_psi`, `target_sf_psi`) are held as plain param pytrees.
+**Revised during implementation (2026-07-17):** an empirical probe showed the house `ModuleDict` prefixes its
+param keys (`modules_phi`, …) and requires passing the *full* param tree to `select()`, which forces full-tree
+gradients per stage and awkward subtree bookkeeping for PSM's per-network sequential update. We therefore use
+**one `TrainState` per network** instead — `phi`, `proto_psi`, `sf_psi`, `actor` (+ `actor_vf` for the flow
+variant), each carrying its own module + optimizer. Each stage is `grad → state.apply_gradients(grads=g)` with
+the per-network learning rate built in (the classic jaxrl multi-optimizer pattern). Targets (`target_phi`,
+`target_proto_psi`, `target_sf_psi`) are held as plain param pytrees and soft-updated in `apply_update`. This
+meets every goal of this section (idiomatic `TrainState`, separated networks/losses, clear names, bit-exact)
+while reading more cleanly for a multi-optimizer agent than the single-`ModuleDict` approach originally sketched.
 
 ### 7.3 Update structure (the one real constraint)
 

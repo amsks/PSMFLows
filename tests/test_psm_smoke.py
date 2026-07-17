@@ -60,7 +60,7 @@ def test_flow_actor_trains_and_acts():
     """Flow actor: builds actor_vf, trains (finite bc_flow_loss + actor_loss), and the
     one-step policy produces bounded actions that respond to the inferred z."""
     agent = _make_agent("flow")
-    assert "actor_vf" in agent.params, "flow actor must build a velocity field"
+    assert agent.actor_vf is not None, "flow actor must build a velocity field"
     for _ in range(2):
         agent, info = agent.update(_batch())
     for k in ["psm_loss", "sf_loss", "actor_loss", "bc_flow_loss", "bc_error"]:
@@ -80,7 +80,7 @@ def test_flow_actor_is_noise_conditioned_architecture():
     NoiseConditionedActor (dual embeddings + policy trunk), NOT a flat MLP. We check the
     param tree carries the embedding + policy Dense layers of the reference topology."""
     agent = _make_agent("flow")
-    actor = agent.params["actor"]
+    actor = agent.actor.params
     paths = [".".join(str(getattr(k, "key", k)) for k in path)
              for path, _ in jax.tree_util.tree_flatten_with_path(actor)[0]]
     joined = "\n".join(paths)
@@ -122,5 +122,5 @@ def test_sample_actions_uses_inferred_z():
     agent2 = agent.infer_eval_z(b["next_observations"], rewards)
     a_inferred = np.asarray(agent2.sample_actions(obs))
 
-    assert float(np.linalg.norm(np.asarray(agent2.z_eval))) > 0.0
+    assert float(np.linalg.norm(np.asarray(agent2.task_z))) > 0.0
     assert not np.allclose(a_zero, a_inferred), "sample_actions ignored the inferred z"

@@ -61,15 +61,15 @@ def _mapped_agent():
     agent = PSMAgent.create(0, ex_obs, ex_act, CONFIG)
     phi_p = load_phi_params(FIX)
     sf_p = load_psi_params(FIX, "sf_psi")
-    psm_p = load_psi_params(FIX, "psm_psi")
+    proto_p = load_psi_params(FIX, "psm_psi")   # .npz key stays 'psm_psi'
     act_p = load_actor_params(FIX)
-    params = {
-        "phi": phi_p, "sf_psi": sf_p, "psm_psi": psm_p, "actor": act_p,
-        "target_phi": phi_p, "target_sf_psi": sf_p, "target_psm_psi": psm_p,
-    }
-    # plain dicts throughout (flax 0.8.5 init returns plain dicts); init opt to match.
-    opt = {k: agent.txs[k].init(params[k]) for k in ["phi", "psm_psi", "sf_psi", "actor"]}
-    return agent.replace(params=params, opt_states=opt)
+    return agent.replace(
+        phi=agent.phi.replace(params=phi_p, opt_state=agent.phi.tx.init(phi_p)),
+        sf_psi=agent.sf_psi.replace(params=sf_p, opt_state=agent.sf_psi.tx.init(sf_p)),
+        proto_psi=agent.proto_psi.replace(params=proto_p, opt_state=agent.proto_psi.tx.init(proto_p)),
+        actor=agent.actor.replace(params=act_p, opt_state=agent.actor.tx.init(act_p)),
+        target_phi=phi_p, target_proto_psi=proto_p, target_sf_psi=sf_p,
+    )
 
 
 def _batch():
@@ -93,7 +93,7 @@ def _inj(prefix):
 
 def test_agent_static_equiv():
     agent = _mapped_agent()
-    info, _ = agent.compute_static(_batch(), _inj("in__"))
+    info, _ = agent.losses_and_grads(_batch(), _inj("in__"))
     checks = {
         "psm_diag": "out__psm_diag", "psm_offdiag": "out__psm_offdiag",
         "orth_loss": "out__orth_loss", "orth_diag": "out__orth_diag",
