@@ -59,20 +59,23 @@ Current tool creates a *fresh* FQL agent (docstring admits it's smoke-only). Cha
 - Load the Stage-A checkpoint: build FQLAgent at dataset dims, then
   `utils.flax_utils.restore_agent(agent, cfg.restore_path, cfg.restore_epoch)`.
   Assert `cfg.restore_path` is set unless `inversion.allow_untrained=true` (smoke).
-- Batch/shard the vmapped EM over the full dataset (config `inversion.batch_size`,
-  progress bar, resumable via per-chunk npz then merge) — 1M transitions × implicit
-  Euler inversion is the expensive one-shot; target ≤ a few GPU-hours per env.
-- Output `preimages.npz` schema (per transition, aligned with dataset row order):
-  - `means (N, K, d_a)`, `covs (N, K, d_a, d_a)`, `weights (N, K)` — EM mixture
-    (K = `inversion.num_clusters`),
-  - `point (N, d_a)` — the exact backward-ODE preimage $E_\theta(s,a)$ (cheap, always
-    stored; enables the point-vs-mixture ablation),
-  - `ess (N,)`, `roundtrip (N,)` — health scalars for D3 reporting.
-  - metadata: env_name, flow ckpt path/epoch, flow_steps, inversion config.
-- `utils/datasets.py`: `Dataset` gains `preimage_data` (dict of the arrays above) and
-  flag `return_preimage`; when set, `sample()` attaches per-row
-  `preimage_means/covs/weights/point` to the batch (same pattern as `return_index`).
-  Loader helper `load_augmented_dataset` already exists — extend to the new schema.
+- Batched EM over the full dataset ALREADY EXISTS
+  (`utils/flow_inversion.py:augment_dataset_with_preimage_distribution` — jit+vmap,
+  chunked, tqdm). Keep its `noise_preimage_{mean,cov,weights}` in-dataset schema.
+- Extend the augmented npz with (aligned to dataset row order):
+  - `noise_preimage_point (N, d_a)` — exact backward-ODE preimage $E_\theta(s,a)$
+    (enables the point-vs-mixture ablation),
+  - `preimage_ess (N,)`, `preimage_roundtrip (N,)` — health scalars for D3 reporting
+    (ess is already computed by the EM scan; roundtrip = decode(point) error),
+  - `preimage_meta.json` sidecar: env_name, flow ckpt path/epoch, flow_steps,
+    inversion config.
+- `utils/datasets.py` ALREADY has `return_preimage_noise`: when set, `sample()` draws
+  one latent per row from its mixture (`batch['noise_preimage']`) and the next row's
+  (`batch['next_noise_preimage']`, end-of-trajectory caveat noted in code). Reuse
+  as-is; `u_data := batch['noise_preimage']`. Point-preimage mode: when the agent
+  config sets `use_point_preimage`, the dataset instead copies
+  `noise_preimage_point` into `batch['noise_preimage']` (new flag
+  `preimage_point_mode` on Dataset, set from main.py).
 
 ### 2.3 Stage C — the `psmflow` agent (`agents/psmflow.py`, new)
 
@@ -142,9 +145,11 @@ preimage_path, use_point_preimage=false, index_mix_ratio=0.5, u_clip=3.0,
 gpi_num_u=64, gpi_num_uprime=16, gpi_decode=onestep, flow_steps=10`.
 
 **Wiring**: register in `agents/__init__.py`; `main.py` gets one branch next to the
-PSM one: `if agent_name == 'psmflow': dataset.return_preimage = True` (+ load
-`preimage_path` into the Dataset after `Dataset.create`). Everything else (eval
-z-shift/relabel, seeded eval, save/restore) is inherited.
+PSM one: `if agent_name == 'psmflow':` load the augmented dataset
+(`load_augmented_dataset(config['preimage_path'])` → `Dataset.create`) in place of the
+raw one, set `dataset.return_preimage_noise = True` (and `preimage_point_mode` from the
+agent config). Everything else (eval z-shift/relabel, seeded eval, save/restore) is
+inherited.
 
 ### 2.4 Diagnostics (new tools, each a runnable script + wandb-free stdout report)
 
