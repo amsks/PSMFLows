@@ -259,7 +259,25 @@ class LagrangeNet(nn.Module):
 
     @nn.compact
     def __call__(self, obs, action, x):
-        h = jnp.concatenate([obs, action, x], -1)
-        for _ in range(self.hidden_layers):
+        h = jnp.concatenate([obs, action, x], -1)         # concat the (state, action, measure-arg) inputs
+        for _ in range(self.hidden_layers):               # hidden_layers x [Dense -> ReLU]
             h = nn.relu(nn.Dense(self.hidden_dim, kernel_init=_ORTH_RELU)(h))
-        return nn.softplus(nn.Dense(1, kernel_init=_ORTH1)(h))
+        return nn.softplus(nn.Dense(1, kernel_init=_ORTH1)(h))   # softplus keeps the multiplier >= 0
+
+
+class WNet(nn.Module):
+    """Task-coordinate net: binary codebook code z (max_log_seed bits) -> w in R^d
+    (RLU psm.py `self.w`). During reward-free training every codebook policy pi_z gets a
+    learnable task coordinate w(z), and the affine measure M = Phi·w(z) + b is fit for it.
+    (Default Dense init kept deliberately — matches the trained affine_psm checkpoints.)"""
+
+    d_dim: int
+    hidden_dim: int
+    hidden_layers: int = 3
+
+    @nn.compact
+    def __call__(self, z):
+        h = z
+        for _ in range(self.hidden_layers):               # hidden_layers x [Dense -> ReLU]
+            h = nn.relu(nn.Dense(self.hidden_dim)(h))
+        return nn.Dense(self.d_dim)(h)                     # linear head -> d-dim task coordinate
