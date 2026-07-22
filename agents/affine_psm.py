@@ -189,6 +189,34 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
             w_inf = project_z(w_inf, True)
         return self.replace(w_inf=w_inf)
 
+    def infer_w_zeroshot(self, dataset, goal, num_samples=4096):
+        """Closed-form goal code (no test-time optimization): w = sqrt(d)*normalize(
+        E_{(s,a)~D}[Phi(s,a,goal)]) — the affine-net analogue of FB get_goal_meta."""
+        c = self.config
+        goal = jnp.asarray(goal, jnp.float32)
+        # Deterministic full-array reduction when the dataset exposes its raw arrays
+        # (unit-test _FakeDataset). Production ReplayBuffer has no `.obs`, so it samples.
+        if hasattr(dataset, "obs") and num_samples >= getattr(dataset, "n", 0):
+            obs = jnp.asarray(dataset.obs); act = jnp.asarray(dataset.act)
+        else:
+            b = dataset.sample(num_samples)
+            obs = jnp.asarray(b["observations"]); act = jnp.asarray(b["actions"])
+        goal_rep = jnp.broadcast_to(goal, obs.shape[:-1] + goal.shape)
+        phi, _ = self.measure(obs, act, goal_rep)
+        w = phi.mean(0)
+        if bool(c["inference"]["norm_w"]):
+            w = project_z(w, True)
+        return self.replace(w_inf=w)
+
+    def infer_eval(self, dataset, goal):
+        """Dispatch on config inference.mode: 'full' (constrained) or 'zero_shot'."""
+        mode = self.config["inference"]["mode"]
+        if mode == "zero_shot":
+            return self.infer_w_zeroshot(dataset, goal)
+        if mode == "full":
+            return self.infer_w_goal(dataset, goal)
+        raise ValueError(f"unknown inference.mode {mode!r}")
+
     @classmethod
     def create(cls, seed, ex_observations, ex_actions, config):
         rng = jax.random.PRNGKey(seed)

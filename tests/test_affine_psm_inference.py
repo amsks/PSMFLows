@@ -64,3 +64,16 @@ def test_full_inference_hinge_runs():
     goal = ds.sample(1)["next_observations"][0]
     agent2 = agent.infer_w_goal(ds, goal)
     assert np.all(np.isfinite(np.asarray(agent2.w_inf)))
+
+
+def test_zero_shot_inference_normalized_and_deterministic():
+    agent, config, ds = _trained_agent(["inference.mode=zero_shot"])
+    goal = ds.sample(1)["next_observations"][0]
+    a1 = agent.infer_eval(ds, goal)
+    a2 = agent.infer_eval(ds, goal)
+    w1 = np.asarray(a1.w_inf)
+    assert np.all(np.isfinite(w1))
+    # sqrt(d)-normalized
+    assert abs(np.linalg.norm(w1) - math.sqrt(config["d_dim"])) < 1e-3
+    # deterministic given same goal + dataset (full-array reduction path)
+    assert np.allclose(w1, np.asarray(a2.w_inf), atol=1e-5)
