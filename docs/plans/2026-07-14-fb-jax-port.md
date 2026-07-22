@@ -1,6 +1,6 @@
 # FB (Forward–Backward) Agent JAX Port — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For implementers:** Execute this plan task-by-task; steps use checkbox list syntax for tracking.
 
 **Goal:** Port the PyTorch `Factored-FB` Forward–Backward agent into this JAX/Flax repo with bit-exact torch parity, mirroring the existing PSM port.
 
@@ -16,7 +16,7 @@
 - **Actors:** `actor.type ∈ {td3, flow}`, default `flow`. Bit-exact fixture/equiv tests target the **flow** path; `td3` gets smoke coverage only.
 - **Not ported (must stay absent):** iql critic, traj/HER goal mode (`future_gamma`), `fixed_b`, `goal_cond` (V1), `onestep` SARSA, coverage/interaction reweighting.
 - **Python:** always `.venv/bin/python` (system `python` is 2.7). Torch tool uses `/var/local/amsks/ffb-venv/bin/python`.
-- **Commits:** NO Claude co-authorship trailer (repo convention; matches existing history).
+- **Commits:** follow existing history conventions.
 - **Determinism rule (parity):** all stochastic inputs are drawn in `_draw_injection` and passed into the loss as constants — never sampled inside a loss/grad function. This is what makes per-step equivalence testable.
 - **Torch→Flax key convention:** torch `Linear.weight [out,in]` → flax `Dense.kernel [in,out]` (transpose); `DenseParallel.weight [P,in,out]` → flax vmapped kernel `[P,in,out]` (no transpose); torch `LayerNorm.{weight,bias}` → flax `{scale,bias}`.
 

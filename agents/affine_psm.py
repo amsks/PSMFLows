@@ -3,7 +3,7 @@
 Faithful JAX port of RLU controllable_agent/url_benchmark/agent/psm.py (continuous)
 + discrete_psm.py `_infer_step`. Distinct from the bilinear agents/psm.py: the task
 coordinate w enters LINEARLY, which is what makes the constrained-LP `full` inference
-well-defined. See docs/superpowers/specs/2026-07-22-affine-psm-design.md.
+well-defined. See docs/design/2026-07-22-affine-psm-design.md.
 """
 import copy
 from typing import Any

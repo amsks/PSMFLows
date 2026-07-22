@@ -22,8 +22,8 @@ Date: **2026-07-15** (latest) · prior investigation: 2026-07-13, 2026-07-07
 ## 2026-07-15 session — FB agent ported to JAX (bit-exact)
 
 Ported the PyTorch **Forward–Backward (FB)** agent (`../Factored-FB` `agents/fb/*`)
-to JAX/Flax, mirroring the PSM port protocol. **Spec** `docs/superpowers/specs/
-2026-07-14-fb-jax-port-design.md`, **plan** `docs/superpowers/plans/2026-07-14-fb-jax-port.md`.
+to JAX/Flax, mirroring the PSM port protocol. **Spec** `docs/design/
+2026-07-14-fb-jax-port-design.md`, **plan** `docs/plans/2026-07-14-fb-jax-port.md`.
 
 - **Scope:** cube-default `fb_flowbc` path — Forward map `F(left_enc(obs),z,a)`,
   Backward map `B(next_obs)` (measure basis + z-source), a **left_encoder** trunk
@@ -216,7 +216,7 @@ naming **matches the fixture** convention → prefix keys with `w__` and reuse e
 - **Committed & pushed** `31ed43d` "PSM: reference-parity fixes (eval z-inference + masks) +
   audit tooling": masks always-γ (`agents/psm.py`), eval z-shift/relabel (`main.py`,
   `config.yaml`), `eval_interval 100k→20k`, `docs/`, `scripts/launch_psm_cube.sh`.
-  **NB: commits use NO Claude co-authorship** (user preference).
+  **NB: commits follow existing history conventions.**
 - **UNCOMMITTED** (working tree): `proto_table_path` hook — `agents/psm.py` `create()` loads a
   transplanted table when `agent.proto_table_path` set; `configs/agent/psm.yaml` declares it
   (`null` default). 15/15 PSM tests still pass.

@@ -1,6 +1,6 @@
 # PSM Phase 1 — Idiomatic Refactor Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For implementers:** Execute this plan task-by-task; steps use checkbox list syntax for tracking.
 
 **Goal:** Refactor `agents/psm.py` into idiomatic, readable JAX (ModuleDict/`select`-style network layer, named `*_loss` methods, a named `StepInputs` struct instead of the opaque `inj` dict) with **identical numerics** — the bit-exact equivalence tests stay green.
 
@@ -444,7 +444,7 @@ git commit -m "PSM refactor: module docstring with code<->paper variable map"
 
 - [ ] **Step 4: Update memory pointer**
 
-Append to `/u/amsks/.claude/projects/-u-amsks-git-PSMFLows/memory/psm-vs-reference-audit.md` a line noting: PSM refactored to ModuleDict/TrainState + named losses + `StepInputs` (2026-07-17), bit-exact preserved; `psm_psi`→`proto_psi`, `z_cont/z_psm`→`task_z/proto_seed`. No commit needed (memory dir is outside the repo).
+Append to `the project audit notes` a line noting: PSM refactored to ModuleDict/TrainState + named losses + `StepInputs` (2026-07-17), bit-exact preserved; `psm_psi`→`proto_psi`, `z_cont/z_psm`→`task_z/proto_seed`. No commit needed (memory dir is outside the repo).
 
 ---
 

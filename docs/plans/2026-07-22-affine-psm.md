@@ -1,6 +1,6 @@
 # Affine (full) PSM Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For implementers:** Execute this plan task-by-task; steps use checkbox list syntax for tracking.
 
 **Goal:** Add a faithful *affine* Proto Successor Measure agent (`M = Φ(s,a,x)·w + b`) with `full` (constrained goal inference) and `zero_shot` (closed-form) modes, running on goal-conditioned OGBench, without touching the existing bilinear `agents/psm.py`.
 
@@ -18,7 +18,7 @@
 - **`x` = measure/goal argument** throughout (avoid RLU's `obs`/`goal` naming collision).
 - **`d_dim` == `z_dim` == 50** (RLU defaults); reuse the existing proto-codebook machinery from `agents/psm.py` (`proto_sample`, `project_z`, `off_diagonal_mask`, `polyak_update`) by importing them.
 - Tests live in `tests/`, mirror `tests/test_psm_smoke.py` conventions (synthetic `_batch`, `ml_collections` config via Hydra `compose`).
-- Reference source of truth: `/u/amsks/git/RLU/controllable_agent/url_benchmark/agent/psm.py` (continuous) + `discrete_psm.py` (`_infer_step`), and the spec `docs/superpowers/specs/2026-07-22-affine-psm-design.md`.
+- Reference source of truth: `/u/amsks/git/RLU/controllable_agent/url_benchmark/agent/psm.py` (continuous) + `discrete_psm.py` (`_infer_step`), and the spec `docs/design/2026-07-22-affine-psm-design.md`.
 
 ---
 
@@ -226,7 +226,7 @@ Expected: FAIL with `KeyError: 'affine_psm'`.
 Faithful JAX port of RLU controllable_agent/url_benchmark/agent/psm.py (continuous)
 + discrete_psm.py `_infer_step`. Distinct from the bilinear agents/psm.py: the task
 coordinate w enters LINEARLY, which is what makes the constrained-LP `full` inference
-well-defined. See docs/superpowers/specs/2026-07-22-affine-psm-design.md.
+well-defined. See docs/design/2026-07-22-affine-psm-design.md.
 """
 import copy
 from typing import Any
