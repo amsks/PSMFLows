@@ -1,0 +1,66 @@
+import math
+
+import jax.numpy as jnp
+import ml_collections
+import numpy as np
+from hydra import compose, initialize
+from omegaconf import OmegaConf
+
+from agents import agents
+
+
+def _config(overrides=None):
+    with initialize(version_base="1.3", config_path="../configs/agent"):
+        cfg = compose(config_name="affine_psm", overrides=overrides or [])
+    return ml_collections.ConfigDict(OmegaConf.to_container(cfg, resolve=True))
+
+
+class _FakeDataset:
+    """Minimal replay-buffer stand-in: .sample(n) -> dict of arrays."""
+
+    def __init__(self, n=256, obs=8, act=2, seed=0):
+        rng = np.random.default_rng(seed)
+        self.obs = rng.standard_normal((n, obs)).astype(np.float32)
+        self.act = np.clip(rng.standard_normal((n, act)), -1, 1).astype(np.float32)
+        self.nxt = rng.standard_normal((n, obs)).astype(np.float32)
+        self.n = n
+        self._rng = np.random.default_rng(seed + 1)
+
+    def sample(self, k):
+        idx = self._rng.integers(0, self.n, size=k)
+        return dict(observations=self.obs[idx], actions=self.act[idx],
+                    next_observations=self.nxt[idx], index=idx.astype(np.int64))
+
+
+def _trained_agent(overrides=None):
+    config = _config(overrides)
+    agent = agents["affine_psm"].create(0, np.zeros((1, 8), np.float32),
+                                        np.zeros((1, 2), np.float32), config)
+    ds = _FakeDataset()
+    for _ in range(20):
+        agent, _ = agent.update(ds.sample(config["batch_size"]))
+    return agent, config, ds
+
+
+def _mean_violation(agent, ds, goal, k=128):
+    b = ds.sample(k)
+    phi, bb = agent.measure(b["observations"], b["actions"], b["next_observations"])
+    M = (phi * agent.w_inf).sum(-1, keepdims=True) + bb
+    return float(np.mean(np.minimum(np.asarray(M), 0.0)))
+
+
+def test_full_inference_reduces_constraint_violation_dgd():
+    agent, config, ds = _trained_agent(["inference.use_dgd=true", "inference.num_inference_steps=200"])
+    goal = ds.sample(1)["next_observations"][0]
+    before = _mean_violation(agent, ds, goal)
+    agent2 = agent.infer_w_goal(ds, goal)
+    after = _mean_violation(agent2, ds, goal)
+    assert math.isfinite(after)
+    assert after >= before - 1e-6  # violation (a negative number) moves toward 0
+
+
+def test_full_inference_hinge_runs():
+    agent, config, ds = _trained_agent(["inference.use_dgd=false", "inference.num_inference_steps=100"])
+    goal = ds.sample(1)["next_observations"][0]
+    agent2 = agent.infer_w_goal(ds, goal)
+    assert np.all(np.isfinite(np.asarray(agent2.w_inf)))

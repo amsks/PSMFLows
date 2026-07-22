@@ -119,6 +119,76 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         loss, info = self.measure_loss(batch, sampled, self.measure.params, self.w.params)
         return loss, info
 
+    # ---- inference ----
+    def infer_w_goal(self, dataset, goal, seed=0):
+        """Solve w_inf by constrained optimization (RLU infer_w_goal/_infer_step_gc).
+        Objective: maximize measure at `goal`; constraint: Phi·w+b >= 0 off-goal.
+        Returns a new agent with w_inf set (Python loop; jitted inner step)."""
+        c = self.config
+        ic = c["inference"]
+        d = c["d_dim"]
+        goal = jnp.asarray(goal, jnp.float32)
+
+        w_inf = jnp.ones((d,), jnp.float32)
+        w_opt = optax.adam(c["lr_w"])
+        w_state = w_opt.init(w_inf)
+
+        use_dgd = bool(ic["use_dgd"])
+        inf_coeff = float(ic["inf_coeff"])
+        lam_def = LagrangeNet(hidden_dim=ic["lagrange_hidden_dim"],
+                              hidden_layers=ic["lagrange_hidden_layers"])
+        ex = dataset.sample(c["batch_size"])
+        lam_params = lam_def.init(jax.random.PRNGKey(seed),
+                                  jnp.asarray(ex["observations"]), jnp.asarray(ex["actions"]),
+                                  jnp.asarray(ex["next_observations"]))["params"]
+        lam_opt = optax.adam(c["lr_w"])
+        lam_state = lam_opt.init(lam_params)
+
+        @jax.jit
+        def step(w_inf, w_state, lam_params, lam_state, obs, act, xperm, goal_rep):
+            def primal(w):
+                phi_g, _ = self.measure(obs, act, goal_rep)
+                phi_p, b_p = self.measure(obs, act, xperm)
+                obj = -(phi_g * w).sum(-1).mean()
+                Mp = (phi_p * w).sum(-1, keepdims=True) + b_p
+                if use_dgd:
+                    lam = jax.lax.stop_gradient(lam_def.apply({"params": lam_params}, obs, act, xperm))
+                    con = -(Mp * lam).mean()
+                else:
+                    con = -(jnp.minimum(Mp, 0.0) * inf_coeff).mean()
+                return obj + con, (obj, con)
+
+            (_, (obj, con)), gw = jax.value_and_grad(primal, has_aux=True)(w_inf)
+            upd, w_state = w_opt.update(gw, w_state, w_inf)
+            w_inf = optax.apply_updates(w_inf, upd)
+            if use_dgd:
+                def dual(lp):
+                    phi_p, b_p = self.measure(obs, act, xperm)
+                    Mp = (phi_p * jax.lax.stop_gradient(w_inf)).sum(-1, keepdims=True) + b_p
+                    lam = lam_def.apply({"params": lp}, obs, act, xperm)
+                    return (Mp * lam).mean()   # ascent on multipliers
+
+                gl = jax.grad(dual)(lam_params)
+                # gradient ASCENT: negate for optax (which minimizes).
+                gl = jax.tree_util.tree_map(lambda g: -g, gl)
+                ul, lam_state = lam_opt.update(gl, lam_state, lam_params)
+                lam_params = optax.apply_updates(lam_params, ul)
+            return w_inf, w_state, lam_params, lam_state, obj, con
+
+        for _ in range(int(ic["num_inference_steps"])):
+            b = dataset.sample(c["batch_size"])
+            obs = jnp.asarray(b["observations"]); act = jnp.asarray(b["actions"])
+            xb = jnp.asarray(b["next_observations"])
+            perm = np.random.default_rng().permutation(obs.shape[0])
+            xperm = xb[perm]
+            goal_rep = jnp.broadcast_to(goal, obs.shape[:-1] + goal.shape)
+            w_inf, w_state, lam_params, lam_state, _, _ = step(
+                w_inf, w_state, lam_params, lam_state, obs, act, xperm, goal_rep)
+
+        if bool(ic["norm_w"]):
+            w_inf = project_z(w_inf, True)
+        return self.replace(w_inf=w_inf)
+
     @classmethod
     def create(cls, seed, ex_observations, ex_actions, config):
         rng = jax.random.PRNGKey(seed)
