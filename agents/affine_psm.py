@@ -55,7 +55,8 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         c = self.config
         B = batch["observations"].shape[0]
         r_seed = jax.random.fold_in(rng, 0)
-        # ONE binary codebook code per batch (RLU samples one z and repeats it).
+        # ONE binary codebook code per batch (a simplification; RLU-continuous samples B
+        # distinct codes per batch — a known reduction in codebook diversity, not fidelity).
         w = c["max_log_seed"]
         code = jax.random.randint(r_seed, (), 0, 2 ** w)
         bits = ((code >> jnp.arange(w)) & 1).astype(jnp.float32)
@@ -80,13 +81,16 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         m_next_obs, m_next_act = next_obs[i_idx], proto_na[i_idx]
         m_x = x[j_idx]
 
-        wz = self.w(z, params=w_params)          # (B, d) — identical rows
+        # Normalize w to the sqrt(d)-sphere (project_z), matching the bilinear task-vector
+        # normalization. With ||phi||=sqrt(d) too, the measure Phi·w+b is bounded, so the
+        # TD bootstrap target cannot diverge (the 108-spike-then-collapse failure).
+        wz = project_z(self.w(z, params=w_params), True)   # (B, d) — identical rows
         wz_i = wz[i_idx]
         phi, b = self.measure(m_obs, m_act, m_x, params=measure_params)
         M = ((phi * wz_i).sum(-1, keepdims=True) + b).reshape(B, B)
 
         tphi, tb = self.measure(m_next_obs, m_next_act, m_x, params=self.target_measure)
-        twz = self.w(z, params=self.target_w)[i_idx]
+        twz = project_z(self.w(z, params=self.target_w), True)[i_idx]
         target_M = ((tphi * twz).sum(-1, keepdims=True) + tb).reshape(B, B)
         target_M = jax.lax.stop_gradient(target_M)
 
@@ -176,11 +180,12 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
                     phi_p, b_p = self.measure(obs, act, xperm)
                     Mp = (phi_p * jax.lax.stop_gradient(w_inf)).sum(-1, keepdims=True) + b_p
                     lam = lam_def.apply({"params": lp}, obs, act, xperm)
-                    return (Mp * lam).mean()   # ascent on multipliers
+                    return (Mp * lam).mean()
 
+                # RLU minimizes (M*lam) w.r.t. lam (psm.py:559-565): with the primal penalty
+                # -(M*lam), this GROWS lam where M<0 (violated). optax minimizes, so feed the
+                # raw grad — the prior negation inverted constraint enforcement (audit bug 5b).
                 gl = jax.grad(dual)(lam_params)
-                # gradient ASCENT: negate for optax (which minimizes).
-                gl = jax.tree_util.tree_map(lambda g: -g, gl)
                 ul, lam_state = lam_opt.update(gl, lam_state, lam_params)
                 lam_params = optax.apply_updates(lam_params, ul)
             return w_inf, w_state, lam_params, lam_state, obj, con

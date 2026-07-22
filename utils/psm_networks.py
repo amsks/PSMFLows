@@ -218,11 +218,19 @@ class FlowVectorField(nn.Module):
 
 class AffineMeasureNet(nn.Module):
     """Affine successor-measure net (RLU psm.py PSM). Shared trunk on concat[obs,action,x]
-    with two heads: phi (basis, R^d) and b (offset, R^1). M(s,a,x) = phi(s,a,x)·w + b."""
+    with two heads: phi (basis, R^d) and b (offset, R^1). M(s,a,x) = phi(s,a,x)·w + b.
+
+    `norm=True` L2-normalizes phi to ||phi||=sqrt(d) (like PhiMap / Factored-FB). RLU's
+    affine PSM leaves phi RAW, which lets the measure/TD-target diverge and then collapse
+    (basis->0, M->b) on long runs; normalization bounds the measure and makes a high ortho
+    coef behave as a pure decorrelator (the proven bilinear-cube recipe). Normalization
+    keeps M linear in w, so the constrained-LP inference is unaffected.
+    """
 
     d_dim: int
     hidden_dim: int
     hidden_layers: int = 2
+    norm: bool = True
 
     @nn.compact
     def __call__(self, obs, action, x):
@@ -230,6 +238,8 @@ class AffineMeasureNet(nn.Module):
         for _ in range(self.hidden_layers):
             h = nn.relu(nn.Dense(self.hidden_dim, kernel_init=_ORTH_RELU)(h))
         phi = nn.Dense(self.d_dim, kernel_init=_ORTH1)(h)
+        if self.norm:
+            phi = psm_norm(phi)
         b = nn.Dense(1, kernel_init=_ORTH1)(h)
         return phi, b
 

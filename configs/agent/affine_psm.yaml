@@ -8,8 +8,9 @@ discount: 0.98
 tau: 0.01                 # target soft-update rate (RLU fb_target_tau)
 lr: 1.0e-4
 lr_w: 1.0e-4
-ortho_coef: 1.0           # basis orthonormality; stabilizes the TD residual ~4x (sweep
-                          # 2026-07-22). RLU leaves it off, but our setup needs it (as psm.py does).
+ortho_coef: 1000.0        # proven Factored-FB cube recipe (run_psm_orthohi1000). Valid only
+                          # because phi is now sqrt(d)-normalized: on normed phi the ortho
+                          # diagonal term is inert and coef=1000 is a pure strong decorrelator.
 measure:
   hidden_dim: 1024
   hidden_layers: 3
