@@ -5,6 +5,13 @@ import numpy as np
 from tqdm import trange
 
 
+def extract_goal(env):
+    """Return the goal observation for a goal-conditioned OGBench env, or None.
+    OGBench exposes info['goal'] on reset (see envs/env_utils.py frame-stack wrapper)."""
+    _, info = env.reset()
+    return info.get('goal', None)
+
+
 def supply_rng(f, rng=jax.random.PRNGKey(0)):
     """Helper function to split the random number generator key before each call to the function."""
 

@@ -189,7 +189,15 @@ def main(cfg: DictConfig):
             # agent over a dataset sample so eval is goal-directed. No-op for agents
             # without infer_eval_z (they act directly on observations).
             eval_agent = agent
-            if hasattr(agent, 'infer_eval_z'):
+            if hasattr(agent, 'infer_w_goal'):
+                # Affine (full) PSM: goal-conditioned eval. Solve w_inf for the env goal,
+                # then distill the actor against Q = Phi·w_inf + b (both modes via infer_eval).
+                from utils.evaluation import extract_goal
+                goal = extract_goal(eval_env)
+                assert goal is not None, "affine_psm eval needs a goal-conditioned env (info['goal'])."
+                eval_agent = agent.infer_eval(train_dataset, goal)
+                eval_agent = eval_agent.distill_actor(train_dataset)
+            elif hasattr(agent, 'infer_eval_z'):
                 # Match the reference eval z-inference (evals/ogbench.py): sample
                 # `eval_relabel_size` transitions and shift rewards by `eval_reward_shift`
                 # (=1.0) so cube-single's {-1,0} task reward becomes {0,1} => z points at

@@ -99,3 +99,16 @@ def test_distill_actor_increases_q_and_bounds_actions():
     assert q1 >= q0 - 1e-4
     a = np.asarray(agent2.sample_actions(ds.sample(16)["observations"]))
     assert np.all(np.abs(a) <= 1.0 + 1e-5)
+
+
+def test_end_to_end_infer_distill_act():
+    agent, config, ds = _trained_agent(["inference.mode=full",
+                                         "inference.num_inference_steps=50",
+                                         "inference.num_actor_inference_steps=50"])
+    goal = ds.sample(1)["next_observations"][0]
+    agent = agent.infer_eval(ds, goal)
+    agent = agent.distill_actor(ds)
+    obs = ds.sample(10)["observations"]
+    a = np.asarray(agent.sample_actions(obs))
+    assert a.shape == (10, 2)
+    assert np.all(np.isfinite(a)) and np.all(np.abs(a) <= 1.0 + 1e-5)
