@@ -46,9 +46,10 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
     target_measure: Any
     target_w: Any
     w_inf: Any                 # (d_dim,) inference task coordinate, solved at eval
-    actor: TrainState          # PSMActor distilled against Q = Phi·w_inf + b
+    actor: TrainState          # PSMActor distilled against Q = Phi(s,a,goal)·w_inf + b
     config: Any = nonpytree_field()
     proto: Any = None          # (seed_to_action, powers)
+    task_goal: Any = None      # (ob_dim,) goal state fixed at inference; the measure arg x
 
     def sample_step_inputs(self, batch, rng):
         c = self.config
@@ -187,7 +188,7 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
 
         if bool(ic["norm_w"]):
             w_inf = project_z(w_inf, True)
-        return self.replace(w_inf=w_inf)
+        return self.replace(w_inf=w_inf, task_goal=goal)
 
     def infer_w_zeroshot(self, dataset, goal, num_samples=4096):
         """Closed-form goal code (no test-time optimization): w = sqrt(d)*normalize(
@@ -206,7 +207,7 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         w = phi.mean(0)
         if bool(c["inference"]["norm_w"]):
             w = project_z(w, True)
-        return self.replace(w_inf=w)
+        return self.replace(w_inf=w, task_goal=goal)
 
     def infer_eval(self, dataset, goal):
         """Dispatch on config inference.mode: 'full' (constrained) or 'zero_shot'."""
@@ -218,21 +219,25 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         raise ValueError(f"unknown inference.mode {mode!r}")
 
     def distill_actor(self, dataset, seed=0):
-        """Train the PSMActor to maximize Q(s,a)=Phi(s,a,s)·w_inf + b(s,a,s) (RLU
-        distill_actor_ddpg, self-measure form: x=obs, the continuous analogue of the
-        state-only act(obs)). Returns a new agent with the distilled actor."""
+        """Train the PSMActor to maximize Q(s,a)=Phi(s,a,goal)·w_inf + b(s,a,goal) — the
+        occupancy of the GOAL state from (s,a), i.e. RLU q_function(obs, goal). The goal
+        (fixed at inference) is the measure argument x; the deployed actor stays
+        state-only (goal baked into w_inf + this distillation)."""
         c = self.config
         z0_dim = c["z_dim"]
+        assert self.task_goal is not None, "call infer_eval/infer_w_goal before distill_actor"
         actor = self.actor
         w_inf = self.w_inf
+        goal = jnp.asarray(self.task_goal, jnp.float32)
 
         @jax.jit
         def step(actor, obs):
             zc = jnp.zeros((obs.shape[0], z0_dim))
+            goal_rep = jnp.broadcast_to(goal, obs.shape[:-1] + goal.shape)
 
             def loss_fn(params):
                 a = actor.apply_fn({"params": params}, obs, zc)
-                phi, b = self.measure(obs, a, obs)
+                phi, b = self.measure(obs, a, goal_rep)   # measure toward the GOAL
                 Q = (phi * w_inf).sum(-1, keepdims=True) + b
                 return -Q.mean()
 

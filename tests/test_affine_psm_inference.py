@@ -90,7 +90,8 @@ def test_distill_actor_increases_q_and_bounds_actions():
         b = ds.sample(128)
         obs = jnp.asarray(b["observations"])
         a = ag.actor(obs, jnp.zeros((obs.shape[0], config["z_dim"])))
-        phi, bb = ag.measure(obs, a, obs)
+        goal_rep = jnp.broadcast_to(jnp.asarray(ag.task_goal), obs.shape[:-1] + (obs.shape[-1],))
+        phi, bb = ag.measure(obs, a, goal_rep)
         return float(np.mean(np.asarray((phi * ag.w_inf).sum(-1, keepdims=True) + bb)))
 
     q0 = mean_q(agent)
