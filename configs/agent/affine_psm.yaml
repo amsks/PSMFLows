@@ -1,0 +1,30 @@
+agent_name: affine_psm
+batch_size: 32            # B^2 mesh over (s_i,a_i,x_j): keep small (RLU default)
+d_dim: 50
+z_dim: 50
+max_log_seed: 12          # binary codebook width for the proto policy
+proto_table_path: null
+discount: 0.98
+tau: 0.01                 # target soft-update rate (RLU fb_target_tau)
+lr: 1.0e-4
+lr_w: 1.0e-4
+ortho_coef: 0.0           # RLU comments the ortho term out; off by default
+measure:
+  hidden_dim: 1024
+  hidden_layers: 3
+actor:
+  hidden_dim: 1024
+  hidden_layers: 1
+  embedding_layers: 2
+inference:
+  mode: full              # full | zero_shot
+  use_dgd: true
+  inf_coeff: 5.0          # hinge weight when use_dgd=false
+  num_inference_steps: 512
+  lagrange_hidden_dim: 256
+  lagrange_hidden_layers: 2
+  norm_w: true
+  num_actor_inference_steps: 512
+ob_dims: null
+action_dim: null
+encoder: null
