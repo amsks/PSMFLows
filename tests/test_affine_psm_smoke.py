@@ -48,12 +48,16 @@ def test_update_runs_and_is_finite():
 
 
 def test_training_decreases_loss():
+    # The objective is stochastic per step (a fresh codebook code z is sampled each
+    # update, so the target shifts), so compare windowed averages rather than single
+    # steps. Training over ~80 steps must reduce the mean contrastive loss.
     agent = _agent()
     b = _batch()
-    first = float(agent.update(b)[1]["psm_loss"])
-    for _ in range(30):
+    losses = []
+    for _ in range(80):
         agent, info = agent.update(b)
-    assert float(info["psm_loss"]) < first
+        losses.append(float(info["psm_loss"]))
+    assert np.mean(losses[-15:]) < np.mean(losses[:15])
 
 
 def test_measure_and_w_receive_gradient():
