@@ -209,3 +209,41 @@ class FlowVectorField(nn.Module):
         for _ in range(self.hidden_layers - 1):
             x = nn.gelu(nn.Dense(self.hidden_dim, kernel_init=_ORTH1)(x), approximate=False)
         return nn.Dense(self.action_dim, kernel_init=_ORTH1)(x)
+
+
+# ---------------------------------------------------------------------------
+# Affine (full) PSM networks — the M = Phi(s,a,x)·w + b factorization.
+# Distinct from the bilinear PhiMap/PsiMap above; see agents/affine_psm.py.
+# ---------------------------------------------------------------------------
+
+class AffineMeasureNet(nn.Module):
+    """Affine successor-measure net (RLU psm.py PSM). Shared trunk on concat[obs,action,x]
+    with two heads: phi (basis, R^d) and b (offset, R^1). M(s,a,x) = phi(s,a,x)·w + b."""
+
+    d_dim: int
+    hidden_dim: int
+    hidden_layers: int = 2
+
+    @nn.compact
+    def __call__(self, obs, action, x):
+        h = jnp.concatenate([obs, action, x], -1)
+        for _ in range(self.hidden_layers):
+            h = nn.relu(nn.Dense(self.hidden_dim, kernel_init=_ORTH_RELU)(h))
+        phi = nn.Dense(self.d_dim, kernel_init=_ORTH1)(h)
+        b = nn.Dense(1, kernel_init=_ORTH1)(h)
+        return phi, b
+
+
+class LagrangeNet(nn.Module):
+    """Learned Lagrange multiplier lam(s,a,x) >= 0 for dual gradient descent
+    (RLU psm.py `lmult`, softplus head)."""
+
+    hidden_dim: int
+    hidden_layers: int = 2
+
+    @nn.compact
+    def __call__(self, obs, action, x):
+        h = jnp.concatenate([obs, action, x], -1)
+        for _ in range(self.hidden_layers):
+            h = nn.relu(nn.Dense(self.hidden_dim, kernel_init=_ORTH_RELU)(h))
+        return nn.softplus(nn.Dense(1, kernel_init=_ORTH1)(h))
