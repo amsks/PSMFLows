@@ -8,7 +8,8 @@ discount: 0.98
 tau: 0.01                 # target soft-update rate (RLU fb_target_tau)
 lr: 1.0e-4
 lr_w: 1.0e-4
-ortho_coef: 0.0           # RLU comments the ortho term out; off by default
+ortho_coef: 1.0           # basis orthonormality; stabilizes the TD residual ~4x (sweep
+                          # 2026-07-22). RLU leaves it off, but our setup needs it (as psm.py does).
 measure:
   hidden_dim: 1024
   hidden_layers: 3

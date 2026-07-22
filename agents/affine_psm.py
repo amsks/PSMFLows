@@ -17,7 +17,7 @@ import optax
 
 from utils.flax_utils import TrainState, nonpytree_field
 from utils.psm_networks import AffineMeasureNet, LagrangeNet, PSMActor
-from agents.psm import proto_sample, project_z, off_diagonal_mask, polyak_update, _plain_config
+from agents.psm import proto_sample, project_z, off_diagonal_mask, polyak_update, ortho_loss, _plain_config
 
 
 class _WNet(fnn.Module):
@@ -95,7 +95,16 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         # RLU psm.py:352 diagonal source term: -(1-gamma)*mean(diag(M)).
         diag = -((1 - c["discount"]) * jnp.diagonal(M)).mean()
         loss = offdiag + diag
-        return loss, {"psm_loss": loss, "psm_diag": diag, "psm_offdiag": offdiag}
+        info = {"psm_loss": loss, "psm_diag": diag, "psm_offdiag": offdiag}
+        # Optional orthonormality regularizer on the basis Phi(s,a,x) evaluated at the
+        # batch's own transitions (B,d) — pushes Phi Phi^T -> I, preventing the basis from
+        # collapsing/exploding (the main stability lever in PSM; RLU leaves it off).
+        if c["ortho_coef"] > 0:
+            phi_batch, _ = self.measure(obs, action, x, params=measure_params)
+            ol, oldiag, oloff = ortho_loss(phi_batch, off, off_sum)
+            loss = loss + c["ortho_coef"] * ol
+            info.update({"psm_loss": loss, "orth_loss": ol, "orth_diag": oldiag, "orth_offdiag": oloff})
+        return loss, info
 
     def apply_update(self, batch, sampled):
         tau = self.config["tau"]
