@@ -77,3 +77,25 @@ def test_zero_shot_inference_normalized_and_deterministic():
     assert abs(np.linalg.norm(w1) - math.sqrt(config["d_dim"])) < 1e-3
     # deterministic given same goal + dataset (full-array reduction path)
     assert np.allclose(w1, np.asarray(a2.w_inf), atol=1e-5)
+
+
+def test_distill_actor_increases_q_and_bounds_actions():
+    agent, config, ds = _trained_agent(["inference.mode=full",
+                                         "inference.num_inference_steps=100",
+                                         "inference.num_actor_inference_steps=200"])
+    goal = ds.sample(1)["next_observations"][0]
+    agent = agent.infer_eval(ds, goal)
+
+    def mean_q(ag):
+        b = ds.sample(128)
+        obs = jnp.asarray(b["observations"])
+        a = ag.actor(obs, jnp.zeros((obs.shape[0], config["z_dim"])))
+        phi, bb = ag.measure(obs, a, obs)
+        return float(np.mean(np.asarray((phi * ag.w_inf).sum(-1, keepdims=True) + bb)))
+
+    q0 = mean_q(agent)
+    agent2 = agent.distill_actor(ds)
+    q1 = mean_q(agent2)
+    assert q1 >= q0 - 1e-4
+    a = np.asarray(agent2.sample_actions(ds.sample(16)["observations"]))
+    assert np.all(np.abs(a) <= 1.0 + 1e-5)

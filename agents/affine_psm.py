@@ -217,6 +217,39 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
             return self.infer_w_goal(dataset, goal)
         raise ValueError(f"unknown inference.mode {mode!r}")
 
+    def distill_actor(self, dataset, seed=0):
+        """Train the PSMActor to maximize Q(s,a)=Phi(s,a,s)·w_inf + b(s,a,s) (RLU
+        distill_actor_ddpg, self-measure form: x=obs, the continuous analogue of the
+        state-only act(obs)). Returns a new agent with the distilled actor."""
+        c = self.config
+        z0_dim = c["z_dim"]
+        actor = self.actor
+        w_inf = self.w_inf
+
+        @jax.jit
+        def step(actor, obs):
+            zc = jnp.zeros((obs.shape[0], z0_dim))
+
+            def loss_fn(params):
+                a = actor.apply_fn({"params": params}, obs, zc)
+                phi, b = self.measure(obs, a, obs)
+                Q = (phi * w_inf).sum(-1, keepdims=True) + b
+                return -Q.mean()
+
+            g = jax.grad(loss_fn)(actor.params)
+            return actor.apply_gradients(grads=g)
+
+        for _ in range(int(c["inference"]["num_actor_inference_steps"])):
+            b = dataset.sample(c["batch_size"])
+            actor = step(actor, jnp.asarray(b["observations"]))
+        return self.replace(actor=actor)
+
+    @jax.jit
+    def sample_actions(self, observations, seed=None, temperature=1.0):
+        # The goal is baked into w_inf + the distilled actor, so act is state-only.
+        zc = jnp.zeros((*observations.shape[:-1], self.config["z_dim"]))
+        return self.actor(observations, zc)
+
     @classmethod
     def create(cls, seed, ex_observations, ex_actions, config):
         rng = jax.random.PRNGKey(seed)
