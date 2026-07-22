@@ -282,7 +282,8 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         ex_zbin = jnp.zeros((ex_obs.shape[0], config["max_log_seed"]))  # binary codebook code -> w
 
         measure_def = AffineMeasureNet(d_dim=d_dim, hidden_dim=config["measure"]["hidden_dim"],
-                                       hidden_layers=config["measure"]["hidden_layers"])
+                                       hidden_layers=config["measure"]["hidden_layers"],
+                                       b_scale=float(config["measure"].get("b_scale", 10.0)))
         measure = TrainState.create(measure_def, measure_def.init(rm, ex_obs, ex_act, ex_x)["params"],
                                     tx=optax.adam(config["lr"]))
 

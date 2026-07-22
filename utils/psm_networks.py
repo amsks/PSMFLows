@@ -231,6 +231,7 @@ class AffineMeasureNet(nn.Module):
     hidden_dim: int
     hidden_layers: int = 2
     norm: bool = True
+    b_scale: float = 10.0   # tanh-bound on the affine offset b; <=0 disables (raw b)
 
     @nn.compact
     def __call__(self, obs, action, x):
@@ -241,6 +242,11 @@ class AffineMeasureNet(nn.Module):
         if self.norm:
             phi = psm_norm(phi)
         b = nn.Dense(1, kernel_init=_ORTH1)(h)
+        if self.b_scale > 0:
+            # Hard-bound the bias: raw b is an unconstrained degeneracy sink that explodes
+            # (~+-3000) once phi is normalized. Bounding it to +-b_scale keeps M finite while
+            # phi*w (in +-d) carries the informative part.
+            b = self.b_scale * jnp.tanh(b)
         return phi, b
 
 

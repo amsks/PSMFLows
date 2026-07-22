@@ -14,6 +14,7 @@ ortho_coef: 1000.0        # proven Factored-FB cube recipe (run_psm_orthohi1000)
 measure:
   hidden_dim: 1024
   hidden_layers: 3
+  b_scale: 10.0           # tanh-bound on the affine offset b (prevents the b-explosion)
 actor:
   hidden_dim: 1024
   hidden_layers: 1
