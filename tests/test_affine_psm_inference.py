@@ -79,36 +79,33 @@ def test_zero_shot_inference_normalized_and_deterministic():
     assert np.allclose(w1, np.asarray(a2.w_inf), atol=1e-5)
 
 
-def test_distill_actor_increases_q_and_bounds_actions():
+def test_amortized_actor_trains_in_loop():
+    # The actor is trained IN the main update loop (no eval-time distillation): update()
+    # must produce a finite actor_loss, and the amortized actor must be w-conditioned
+    # (different task coords -> different actions) and action-bounded.
+    config = _config()
+    agent = agents["affine_psm"].create(0, np.zeros((1, 8), np.float32),
+                                        np.zeros((1, 2), np.float32), config)
+    ds = _FakeDataset()
+    for _ in range(40):
+        agent, info = agent.update(ds.sample(config["batch_size"]))
+    assert math.isfinite(float(info["actor_loss"])), info["actor_loss"]
+    assert math.isfinite(float(info["actor_q"]))
+
+    obs = jnp.asarray(ds.sample(16)["observations"])
+    d = config["d_dim"]
+    w1 = jnp.broadcast_to(jnp.ones((d,)), (16, d))
+    w2 = jnp.broadcast_to(-jnp.ones((d,)), (16, d))
+    a1, a2 = np.asarray(agent.actor(obs, w1)), np.asarray(agent.actor(obs, w2))
+    assert np.all(np.abs(a1) <= 1.0 + 1e-5)               # tanh-bounded
+    assert not np.allclose(a1, a2), "actor ignores its task coord w"
+
+
+def test_end_to_end_infer_and_act():
     agent, config, ds = _trained_agent(["inference.mode=full",
-                                         "inference.num_inference_steps=100",
-                                         "inference.num_actor_inference_steps=200"])
+                                         "inference.num_inference_steps=50"])
     goal = ds.sample(1)["next_observations"][0]
-    agent = agent.infer_eval(ds, goal)
-
-    def mean_q(ag):
-        b = ds.sample(128)
-        obs = jnp.asarray(b["observations"])
-        a = ag.actor(obs, jnp.zeros((obs.shape[0], config["z_dim"])))
-        goal_rep = jnp.broadcast_to(jnp.asarray(ag.task_goal), obs.shape[:-1] + (obs.shape[-1],))
-        phi, bb = ag.measure(obs, a, goal_rep)
-        return float(np.mean(np.asarray((phi * ag.w_inf).sum(-1, keepdims=True) + bb)))
-
-    q0 = mean_q(agent)
-    agent2 = agent.distill_actor(ds)
-    q1 = mean_q(agent2)
-    assert q1 >= q0 - 1e-4
-    a = np.asarray(agent2.sample_actions(ds.sample(16)["observations"]))
-    assert np.all(np.abs(a) <= 1.0 + 1e-5)
-
-
-def test_end_to_end_infer_distill_act():
-    agent, config, ds = _trained_agent(["inference.mode=full",
-                                         "inference.num_inference_steps=50",
-                                         "inference.num_actor_inference_steps=50"])
-    goal = ds.sample(1)["next_observations"][0]
-    agent = agent.infer_eval(ds, goal)
-    agent = agent.distill_actor(ds)
+    agent = agent.infer_eval(ds, goal)          # sets w_inf; amortized actor acts on it
     obs = ds.sample(10)["observations"]
     a = np.asarray(agent.sample_actions(obs))
     assert a.shape == (10, 2)

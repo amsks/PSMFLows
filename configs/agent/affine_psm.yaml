@@ -19,6 +19,7 @@ actor:
   hidden_dim: 1024
   hidden_layers: 1
   embedding_layers: 2
+  bc_coeff: 1.0           # behavior-cloning weight keeping the amortized actor in-support
 inference:
   mode: full              # full | zero_shot
   use_dgd: true

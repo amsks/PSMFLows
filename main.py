@@ -190,13 +190,13 @@ def main(cfg: DictConfig):
             # without infer_eval_z (they act directly on observations).
             eval_agent = agent
             if hasattr(agent, 'infer_w_goal'):
-                # Affine (full) PSM: goal-conditioned eval. Solve w_inf for the env goal,
-                # then distill the actor against Q = Phi·w_inf + b (both modes via infer_eval).
+                # Affine (full) PSM: goal-conditioned eval. Solve w_inf for the env goal
+                # (LP or closed-form via infer_eval); the amortized w-conditioned actor
+                # (trained in-loop) then acts on w_inf — no per-eval distillation needed.
                 from utils.evaluation import extract_goal
                 goal = extract_goal(eval_env)
                 assert goal is not None, "affine_psm eval needs a goal-conditioned env (info['goal'])."
                 eval_agent = agent.infer_eval(train_dataset, goal)
-                eval_agent = eval_agent.distill_actor(train_dataset)
             elif hasattr(agent, 'infer_eval_z'):
                 # Match the reference eval z-inference (evals/ogbench.py): sample
                 # `eval_relabel_size` transitions and shift rewards by `eval_reward_shift`

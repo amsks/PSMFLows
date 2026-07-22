@@ -37,6 +37,7 @@ class _WNet(fnn.Module):
 class StepInputs:
     proto_seed: Any
     proto_next_action: Any
+    actor_goal: Any = None      # a future state used as the goal for the amortized actor stage
 
 
 class AffinePSMAgent(flax.struct.PyTreeNode):
@@ -54,7 +55,7 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
     def sample_step_inputs(self, batch, rng):
         c = self.config
         B = batch["observations"].shape[0]
-        r_seed = jax.random.fold_in(rng, 0)
+        r_seed, r_goal = jax.random.split(rng)
         # ONE binary codebook code per batch (a simplification; RLU-continuous samples B
         # distinct codes per batch — a known reduction in codebook diversity, not fidelity).
         w = c["max_log_seed"]
@@ -64,7 +65,11 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         seed_to_action, powers = self.proto
         obs_hash = batch["index"] if "index" in batch else jnp.arange(B)
         proto_next_action = proto_sample(seed_to_action, powers, obs_hash, proto_seed, c["proto_max_seed"])
-        return StepInputs(proto_seed=proto_seed, proto_next_action=proto_next_action)
+        # Amortized-actor goal: a random future state from the batch. Over training this
+        # covers the goal distribution, so the w-conditioned actor learns to reach any goal.
+        gidx = jax.random.randint(r_goal, (), 0, B)
+        actor_goal = batch["next_observations"][gidx]
+        return StepInputs(proto_seed=proto_seed, proto_next_action=proto_next_action, actor_goal=actor_goal)
 
     def measure_loss(self, batch, sampled, measure_params, w_params):
         c = self.config
@@ -110,6 +115,34 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
             info.update({"psm_loss": loss, "orth_loss": ol, "orth_diag": oldiag, "orth_offdiag": oloff})
         return loss, info
 
+    def actor_loss(self, batch, sampled, actor_params):
+        """Amortized (in-loop) w-conditioned actor, FB-style. For a sampled goal g, form
+        its closed-form task coord w_g from the (frozen) measure, and train pi(s, w_g) to
+        maximize the measure's Q = Phi(s,a,g)·w_g + b(s,a,g). Over training this amortizes
+        goal-reaching across the whole goal/w distribution (vs the paper's from-scratch
+        eval-time distillation). The measure is a stop-gradient constant here."""
+        c = self.config
+        obs, action = batch["observations"], batch["actions"]
+        B = obs.shape[0]
+        g = sampled.actor_goal
+        g_rep = jnp.broadcast_to(g, (B,) + g.shape)
+        # closed-form w_g for this goal from the frozen measure (dataset actions toward g).
+        phi_toward_g, _ = self.measure(obs, action, g_rep)
+        w_g = project_z(phi_toward_g.mean(0), True)          # (d,)
+        w_rep = jnp.broadcast_to(w_g, (B, c["d_dim"]))
+        a = self.actor(obs, w_rep, params=actor_params)      # PSMActor: tanh mean in [-1,1]
+        phi_a, b_a = self.measure(obs, a, g_rep)
+        Q = (phi_a * w_g).sum(-1) + b_a.squeeze(-1)
+        loss = -Q.mean()
+        info = {"actor_loss": loss, "actor_q": Q.mean()}
+        bc_coeff = c["actor"].get("bc_coeff", 0.0) if hasattr(c["actor"], "get") else c["actor"]["bc_coeff"]
+        if bc_coeff > 0:
+            bc = jnp.mean((a - action) ** 2)
+            # normalize the Q term by |Q| so the BC weight has a stable relative scale (FB/psm).
+            loss = loss / jax.lax.stop_gradient(jnp.abs(Q).mean() + 1e-6) + bc_coeff * bc
+            info = {"actor_loss": loss, "actor_q": Q.mean(), "actor_bc": bc}
+        return loss, info
+
     def apply_update(self, batch, sampled):
         tau = self.config["tau"]
         (_, info), (g_m, g_w) = jax.value_and_grad(self.measure_loss, argnums=(2, 3), has_aux=True)(
@@ -118,7 +151,12 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         w = self.w.apply_gradients(grads=g_w)
         target_measure = polyak_update(measure.params, self.target_measure, tau)
         target_w = polyak_update(w.params, self.target_w, tau)
-        return self.replace(measure=measure, w=w, target_measure=target_measure, target_w=target_w), info
+        # amortized actor stage: train the w-conditioned actor against the measure's Q.
+        (_, a_info), g_actor = jax.value_and_grad(self.actor_loss, argnums=2, has_aux=True)(
+            batch, sampled, self.actor.params)
+        actor = self.actor.apply_gradients(grads=g_actor)
+        return self.replace(measure=measure, w=w, actor=actor, target_measure=target_measure,
+                            target_w=target_w), {**info, **a_info}
 
     @jax.jit
     def update(self, batch):
@@ -131,7 +169,8 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         rng = rng if rng is not None else self.rng
         sampled = self.sample_step_inputs(batch, rng)
         loss, info = self.measure_loss(batch, sampled, self.measure.params, self.w.params)
-        return loss, info
+        _, a_info = self.actor_loss(batch, sampled, self.actor.params)
+        return loss, {**info, **a_info}
 
     # ---- inference ----
     def infer_w_goal(self, dataset, goal, seed=0):
@@ -232,42 +271,12 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
             return self.infer_w_goal(dataset, goal)
         raise ValueError(f"unknown inference.mode {mode!r}")
 
-    def distill_actor(self, dataset, seed=0):
-        """Train the PSMActor to maximize Q(s,a)=Phi(s,a,goal)·w_inf + b(s,a,goal) — the
-        occupancy of the GOAL state from (s,a), i.e. RLU q_function(obs, goal). The goal
-        (fixed at inference) is the measure argument x; the deployed actor stays
-        state-only (goal baked into w_inf + this distillation)."""
-        c = self.config
-        z0_dim = c["z_dim"]
-        assert self.task_goal is not None, "call infer_eval/infer_w_goal before distill_actor"
-        actor = self.actor
-        w_inf = self.w_inf
-        goal = jnp.asarray(self.task_goal, jnp.float32)
-
-        @jax.jit
-        def step(actor, obs):
-            zc = jnp.zeros((obs.shape[0], z0_dim))
-            goal_rep = jnp.broadcast_to(goal, obs.shape[:-1] + goal.shape)
-
-            def loss_fn(params):
-                a = actor.apply_fn({"params": params}, obs, zc)
-                phi, b = self.measure(obs, a, goal_rep)   # measure toward the GOAL
-                Q = (phi * w_inf).sum(-1, keepdims=True) + b
-                return -Q.mean()
-
-            g = jax.grad(loss_fn)(actor.params)
-            return actor.apply_gradients(grads=g)
-
-        for _ in range(int(c["inference"]["num_actor_inference_steps"])):
-            b = dataset.sample(c["batch_size"])
-            actor = step(actor, jnp.asarray(b["observations"]))
-        return self.replace(actor=actor)
-
     @jax.jit
     def sample_actions(self, observations, seed=None, temperature=1.0):
-        # The goal is baked into w_inf + the distilled actor, so act is state-only.
-        zc = jnp.zeros((*observations.shape[:-1], self.config["z_dim"]))
-        return self.actor(observations, zc)
+        # The actor is amortized (trained in-loop) and conditioned on the task coord w.
+        # infer_eval sets w_inf (LP or closed-form); the actor acts greedily for it.
+        w = jnp.broadcast_to(self.w_inf, (*observations.shape[:-1], self.config["d_dim"]))
+        return self.actor(observations, w)
 
     @classmethod
     def create(cls, seed, ex_observations, ex_actions, config):
