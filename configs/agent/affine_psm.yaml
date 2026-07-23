@@ -6,8 +6,9 @@ max_log_seed: 12          # binary codebook width for the proto policy
 proto_table_path: null
 discount: 0.98
 tau: 0.01                 # target soft-update rate (RLU fb_target_tau)
-lr: 1.0e-4
-lr_w: 1.0e-4
+lr: 1.0e-4                # measure (Phi, b) learning rate
+lr_w: 1.0e-4              # task-coordinate net (WNet) learning rate
+lr_actor: 1.0e-4         # amortized actor LR; set below the measure LR for two-timescale (e.g. 3e-5)
 ortho_coef: 1000.0        # proven Factored-FB cube recipe (run_psm_orthohi1000). Valid only
                           # because phi is now sqrt(d)-normalized: on normed phi the ortho
                           # diagonal term is inert and coef=1000 is a pure strong decorrelator.

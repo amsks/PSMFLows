@@ -327,8 +327,11 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         actor_def = PSMActor(action_dim=action_dim, hidden_dim=actor_cfg["hidden_dim"],
                              embedding_layers=actor_cfg["embedding_layers"],
                              hidden_layers=actor_cfg["hidden_layers"])
+        # actor LR defaults to the measure LR; set below it (config lr_actor) for a
+        # two-timescale scheme (slow actor tracking a quasi-static measure/Q).
+        lr_actor = float(config.get("lr_actor", config["lr"]))
         actor = TrainState.create(actor_def, actor_def.init(ract, ex_obs, ex_z)["params"],
-                                  tx=optax.adam(config["lr"]))
+                                  tx=optax.adam(lr_actor))
 
         # hash-codebook table: max_seed rows of actions in [-2, 0); pi_z looks one up per (z, s).
         max_seed = 2 ** config["max_log_seed"] + 20000
