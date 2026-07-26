@@ -9,11 +9,125 @@ paginate: true
 
 # PSMFlows — Session Handoff
 
-Chasing a **real, systematic gap** between our JAX PSM+flow and the
-PyTorch reference — localized to TRAINING, hunt in progress.
+Current work: making **affine PSM** perform on cube. The older bilinear-PSM
+parity hunt (2026-07-07 → 07-15, below) is **CLOSED** — see the 07-13 entry and
+`PAPER/RESEARCH_NOTE.md` §4: no code bug, the gap was seed variance + a
+training-budget ceiling.
 
 Branch: `feat/psm-integration` · Machine: `midi-01` (UT CS)
-Date: **2026-07-15** (latest) · prior investigation: 2026-07-13, 2026-07-07
+Date: **2026-07-26** (latest) · prior: 2026-07-15, 07-13, 07-07
+
+---
+
+<!-- _class: lead -->
+
+## 2026-07-26 session — flowBC actor for affine PSM; reference-HP audit
+
+**Question:** affine PSM sits at floor on `cube-single-play-singletask-v0`. Are we
+using the flowBC actor the reference uses for cube?
+
+### Finding 1 — we were not (now fixed)
+
+`../Factored-FB` README is explicit: `fb_flowbc` (flow-matching VF + distilled noise
+actor) for **cube/scene/puzzle**; the deterministic actor only for antmaze/locomotion.
+The proven cube recipe whose `ortho_coef=1000` our config copied
+(`psm_state_orthohi__ortho_coef1000`) launches with `agent=psm_flowbc`. We had inherited
+the hyperparameter and dropped the actor it was tuned around. Mechanism: cube actions are
+multimodal, and a tanh mean fit by MSE-to-data regresses to the **mean of the modes**,
+which is not a valid action.
+
+- **Ported** the flow path into `agents/affine_psm.py` behind `actor.type: ddpgbc | flow`
+  (mirrors `agents/psm.py`): `flow_actor_loss` = CFM velocity field `v(s,x_t,t)` + one-step
+  `NoiseConditionedActor` distilled from its 10-step Euler rollout; new `actor_vf`
+  TrainState; dispatch in `apply_update`/`total_loss`/`sample_actions`. Q is unchanged —
+  still the frozen-measure goal Q `Φ(s,a,g)·w_g + b(s,a,g)`, factored into `_goal_task_coord`
+  / `_goal_q` so both actor branches share it.
+- Config defaults from the reference `psm_flowbc.yaml` (512×2 actor, 512×4 VF,
+  `flow_steps=10`, `lr_actor_vf=3e-4`, `bc_coeff` 1.0 → **3.0** = the cube value).
+- `tests/test_affine_psm_flow.py` (9 tests) + one pre-existing test rerouted through
+  `sample_actions` (it called `agent.actor(obs, w)` with the ddpgbc arity). **27/27 green.**
+
+**Result: the actor was NOT the binding constraint.** 3 seeds × 500k, 50 eval episodes
+(`affine_flow_500k_20260726_022644`): peaks **0.08 / 0.10 / 0.04**, no trend. At a matched
+500k the ddpgbc baselines were 0.00–0.10, so flow is **not worse** — but it does not fix it.
+
+### Finding 2 — affine PSM is running RLU's DMC-scale HPs, not the cube recipe
+
+`batch_size=32`, `d_dim=z_dim=50`, `lr=1e-4` all come verbatim from
+`RLU/controllable_agent/url_benchmark/agent/psm.py` (a DMC/gridworld codebase), not from
+anything tuned on OGBench cube. Deviation table vs `../Factored-FB/configs/agent/psm.yaml`:
+
+| HP | reference (cube) | affine_psm | matchable? |
+|---|---|---|---|
+| `batch_size` | 1024 | 32 | **NO — see Finding 3** |
+| basis dim | 128 | 50 | free |
+| basis LR | **1e-5** (sweep winner; `psm.yaml` says "NOT 1e-4") | 1e-4 | **NO — see Finding 4** |
+| `max_log_seed` | 16 | 12 | free |
+| `target_tau` / `discount` / `ortho_coef` / `lr_actor` | 0.01 / 0.98 / 1000 / 1e-4 | same | already matched |
+
+### Finding 3 — batch_size=1024 is architecturally blocked (measured)
+
+The bilinear PSM gets B² free: `M = ψ(s,z,a) @ φ(g)ᵀ` is an outer product of two `B×d`
+matrices, so B=1024 costs **1024 network evals**. The affine net takes `x` *inside* the
+network, so B=1024 costs **1024² = 1,048,576 evals** of the 1024×3 measure MLP.
+**Probed on GPU: it OOMs** — a single backward fusion alone requested 4.02 GiB and failed
+at `XLA_PYTHON_CLIENT_MEM_FRACTION=0.45`. This is the architecture, not a missing knob.
+
+*Options if we want the reference's effective batch:* a **rectangular mesh** — decouple
+source rows from measure-argument columns (`B_src=1024 × B_x=64` ≈ 65k pairs, feasible)
+so the source-side gradient noise and the contrastive negative count are restored
+independently; or a square B=256 (same 65k pairs). Both need a change to `measure_loss`,
+which currently builds `i_idx=repeat(arange(B),B)` / `j_idx=tile(arange(B),B)`.
+
+### Finding 4 — the reference's two-timescale split has no landing spot in affine PSM
+
+The reference does **not** run actor-vs-critic two-timescale: `lr_sf = lr_actor = 1e-4`.
+Its split is **basis vs everything else** — `lr_phi=1e-5`, 10× slower, marked the sweep
+winner. We already match on the actor axis (`lr_actor == lr == 1e-4`; the `lr_actor` knob
+from `0a82050` defaults to equal, and the one probe — `affine_tt_1e4` vs `affine_tt_3e5` —
+was inconclusive at 10 eval episodes).
+
+But `AffineMeasureNet` (`utils/psm_networks.py:236`) is a **single trunk on
+`concat[obs,action,x]`** with φ/b heads: the basis shares every weight with the successor
+side, so **there is no parameter group to slow down**. Restoring the reference's structure
+means splitting it into separate x- and (s,a)-branches so the x-branch carries its own
+optimizer.
+
+### IN FLIGHT (launched 03:41, ~45 min, 2 seeds/GPU on 0,1,3)
+
+| group | vs the 500k flow runs |
+|---|---|
+| `affine_refdims_20260726_034122` | `d_dim`/`z_dim` 50→**128**, `max_log_seed` 12→**16** |
+| `affine_refdims_slowbasis_20260726_034122` | same + `lr` 1e-4→**1e-5** |
+
+Both flow actor, `zero_shot` inference, 3 seeds, 500k, 50 eval episodes. refdims vs the
+flow runs isolates the dims; slowbasis vs refdims isolates the representation timescale.
+**Caveat on slowbasis:** `lr=1e-5` slows the *whole* measure net (basis + offset +
+successor side), whereas the reference keeps ψ at 1e-4. If it helps ⇒ the Finding-4
+refactor is worth doing properly. If it hurts, suspect plain underfitting at 500k before
+concluding the timescale idea is wrong.
+
+### Corrections to earlier reads (don't re-derive these)
+
+- The ddpgbc baselines do **not** top out at 0.2 once. Reading only the last CSV rows is
+  misleading — `affine_psm_amortized` hits 0.20 @200k, 0.20 @600k, **0.30 @800k**; the good
+  numbers all sit **past 500k**. Those were 10-episode evals (each 0.1 = one episode).
+- Reported `psm_loss` for affine PSM is dominated by a constant: with sqrt(d)-normalized Φ
+  the ortho diagonal term is inert at ≈ −d, so `ortho_coef=1000` contributes a ≈ −50000
+  offset. **Read `orth_offdiag` (decorrelation) and `psm_offdiag`, not `psm_loss`.**
+
+### Known issue, NOT fixed (flagged, outside this session's scope)
+
+`main.py:80` sets `dataset.return_index = True` only for `agent_name == 'psm'`, so
+`affine_psm` falls back to `jnp.arange(B)` for the codebook hash — a transition's proto
+action changes with **where it lands in the batch**. `agents/psm.py:315-319` documents this
+as incorrect. Worth fixing before trusting any conclusion about the measure.
+
+### Runnable
+
+`bash scripts/launch_affine_psm_cube.sh [GPUS] [STEPS] [WANDB_MODE]` (new) — comma-separated
+GPUs, **one seed per GPU**, `SEEDS=`/`ACTOR=`/`EXTRA=`/`EVAL_INT=` env overrides, uses
+`.venv/bin/python` explicitly. Call it twice with different `GROUP` to stack 2 configs/GPU.
 
 ---
 
