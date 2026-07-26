@@ -17,3 +17,12 @@ exp/
 outputs/
 multirun/
 wandb/
+
+# LaTeX build artifacts
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.toc
+*.synctex.gz
