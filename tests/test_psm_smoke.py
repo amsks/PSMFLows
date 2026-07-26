@@ -100,8 +100,10 @@ def test_proto_branch_consumes_batch_index():
     a1, i1 = agent.update(dict(b))          # arange(B) fallback
     a2, i2 = agent.update(b_idx)            # global-index keyed
     assert math.isfinite(float(i2["psm_loss"]))
-    # Different proto keys -> different proto targets -> different psm loss.
-    assert not np.isclose(float(i1["psm_loss"]), float(i2["psm_loss"]))
+    # Different proto keys -> different proto targets -> different contrastive term.
+    # Compare `psm_diag`, not the `psm_loss` total: the total is dominated by
+    # ortho_coef * ortho_loss (index-independent), which swamps the difference.
+    assert not np.isclose(float(i1["psm_diag"]), float(i2["psm_diag"]))
 
 
 def test_sample_actions_uses_inferred_z():

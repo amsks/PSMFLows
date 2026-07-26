@@ -500,7 +500,7 @@ def get_config():
             num_parallel=2,
             discount=0.98,
             tau=0.01,
-            ortho_coef=1.0,
+            ortho_coef=1000.0,  # reference-matched cube run; see configs/agent/psm.yaml
             mix_ratio=0.5,
             pessimism_penalty=0.0,
             actor_pessimism_penalty=0.5,
