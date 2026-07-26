@@ -17,10 +17,25 @@ measure:
   hidden_layers: 3
   b_scale: 10.0           # tanh-bound on the affine offset b (prevents the b-explosion)
 actor:
-  hidden_dim: 1024
+  type: flow              # ddpgbc | flow. Cube/manipulation wants `flow`: the reference
+                          # (../Factored-FB) uses psm_flowbc for cube/scene/puzzle and the
+                          # deterministic actor only for antmaze/locomotion. A tanh-mean actor
+                          # trained with MSE-to-data regresses to the MEAN of multimodal cube
+                          # actions, which is not a valid action.
+  hidden_dim: 1024        # ddpgbc PSMActor width
   hidden_layers: 1
   embedding_layers: 2
-  bc_coeff: 1.0           # behavior-cloning weight keeping the amortized actor in-support
+  bc_coeff: 3.0           # ddpgbc: MSE to the data action; flow: distillation to the ODE rollout.
+                          # 3.0 is the reference cube/manipulation value (psm_flowbc.yaml; antmaze
+                          # uses 0.3). The pre-flow ddpgbc runs used 1.0 — override to compare.
+  # --- flow actor (actor.type=flow); defaults mirror ../Factored-FB configs/agent/psm_flowbc.yaml
+  flow_steps: 10          # Euler steps for the BC-flow ODE rollout
+  lr_actor_vf: 3.0e-4     # LR for the flow velocity field
+  flow_actor_hidden_dim: 512
+  flow_actor_hidden_layers: 2
+  flow_actor_embedding_layers: 2
+  flow_vf_hidden_dim: 512
+  flow_vf_hidden_layers: 4
 inference:
   mode: full              # full | zero_shot
   use_dgd: true

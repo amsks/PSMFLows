@@ -1,5 +1,6 @@
 import math
 
+import jax
 import jax.numpy as jnp
 import ml_collections
 import numpy as np
@@ -92,11 +93,14 @@ def test_amortized_actor_trains_in_loop():
     assert math.isfinite(float(info["actor_loss"])), info["actor_loss"]
     assert math.isfinite(float(info["actor_q"]))
 
+    # Go through sample_actions (not the raw module) so this covers whichever actor.type
+    # is configured; the flow actor takes an extra noise argument. A fixed seed holds the
+    # flow noise constant, so any difference is attributable to the task coord w.
     obs = jnp.asarray(ds.sample(16)["observations"])
     d = config["d_dim"]
-    w1 = jnp.broadcast_to(jnp.ones((d,)), (16, d))
-    w2 = jnp.broadcast_to(-jnp.ones((d,)), (16, d))
-    a1, a2 = np.asarray(agent.actor(obs, w1)), np.asarray(agent.actor(obs, w2))
+    seed = jax.random.PRNGKey(0)
+    a1 = np.asarray(agent.replace(w_inf=jnp.ones((d,))).sample_actions(obs, seed=seed))
+    a2 = np.asarray(agent.replace(w_inf=-jnp.ones((d,))).sample_actions(obs, seed=seed))
     assert np.all(np.abs(a1) <= 1.0 + 1e-5)               # tanh-bounded
     assert not np.allclose(a1, a2), "actor ignores its task coord w"
 

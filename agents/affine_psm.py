@@ -25,7 +25,8 @@ import numpy as np
 import optax
 
 from utils.flax_utils import TrainState, nonpytree_field
-from utils.psm_networks import AffineMeasureNet, LagrangeNet, PSMActor, WNet
+from utils.psm_networks import (AffineMeasureNet, FlowVectorField, LagrangeNet,
+                                NoiseConditionedActor, PSMActor, WNet)
 from agents.psm import proto_sample, project_z, off_diagonal_mask, polyak_update, ortho_loss, _plain_config
 
 
@@ -35,6 +36,9 @@ class StepInputs:
     proto_seed: Any             # (B, max_log_seed) binary codebook code z for the proto branch
     proto_next_action: Any      # (B, action_dim) codebook policy action pi_z(s') at s'
     actor_goal: Any = None      # (ob_dim,) a future state used as the goal for the amortized actor stage
+    flow_x0: Any = None         # (B, action_dim) flow-matching source sample u0 ~ N(0,I)   [actor.type=flow]
+    flow_t: Any = None          # (B, 1) flow-matching time t ~ U[0,1)                     [actor.type=flow]
+    flow_noise: Any = None      # (B, action_dim) noise fed to the one-step noise actor     [actor.type=flow]
 
 
 class AffinePSMAgent(flax.struct.PyTreeNode):
@@ -51,8 +55,9 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
     target_measure: Any        # soft-updated copy of measure.params (TD bootstrap target)
     target_w: Any              # soft-updated copy of w.params
     w_inf: Any                 # (d_dim,) task coordinate solved at eval (LP or closed-form)
-    actor: TrainState          # PSMActor pi(s, w): AMORTIZED in-loop (see actor_loss), not distilled
+    actor: TrainState          # pi(s, w): AMORTIZED in-loop (see actor_loss), not distilled
     config: Any = nonpytree_field()   # plain hashable config (jit static aux)
+    actor_vf: Any = None       # TrainState for the flow actor's velocity field; None for ddpgbc
     proto: Any = None          # (seed_to_action table, bit powers) for the hash codebook policy
     task_goal: Any = None      # (ob_dim,) goal fixed at inference; retained for diagnostics
 
@@ -60,7 +65,7 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         """Sample the per-step quantities (codebook code, its next-action, actor goal)."""
         c = self.config
         B = batch["observations"].shape[0]
-        r_seed, r_goal = jax.random.split(rng)                 # one key for the code, one for the goal
+        r_seed, r_goal, r_flow = jax.random.split(rng, 3)      # keys: codebook code, goal, flow draws
         # --- codebook code z (one per batch; RLU-continuous samples B distinct codes, a
         # deliberate diversity simplification, not a fidelity gap) ---
         n_bits = c["max_log_seed"]                             # binary code width
@@ -75,7 +80,18 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         # covers the goal distribution, so the w-conditioned actor learns to reach any goal. ---
         gidx = jax.random.randint(r_goal, (), 0, B)
         actor_goal = batch["next_observations"][gidx]
-        return StepInputs(proto_seed=proto_seed, proto_next_action=proto_next_action, actor_goal=actor_goal)
+        if c["actor_type"] != "flow":
+            return StepInputs(proto_seed=proto_seed, proto_next_action=proto_next_action,
+                              actor_goal=actor_goal)
+        # --- flow-actor draws: the conditional-flow-matching pair (u0, t) for the velocity
+        # field, and the noise fed to the one-step noise actor (mirrors agents/psm.py). ---
+        adim = c["action_dim"]
+        r_x0, r_t, r_noise = jax.random.split(r_flow, 3)
+        return StepInputs(proto_seed=proto_seed, proto_next_action=proto_next_action,
+                          actor_goal=actor_goal,
+                          flow_x0=jax.random.normal(r_x0, (B, adim)),
+                          flow_t=jax.random.uniform(r_t, (B, 1)),
+                          flow_noise=jax.random.normal(r_noise, (B, adim)))
 
     def measure_loss(self, batch, sampled, measure_params, w_params):
         """PSM contrastive TD loss on the affine measure M(s,a,x) = Phi(s,a,x)·w(z) + b.
@@ -129,34 +145,94 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
             info.update({"psm_loss": loss, "orth_loss": ol, "orth_diag": oldiag, "orth_offdiag": oloff})
         return loss, info
 
-    def actor_loss(self, batch, sampled, actor_params):
-        """Amortized (in-loop) w-conditioned actor, FB-style. For a sampled goal g, form
-        its closed-form task coord w_g from the (frozen) measure, and train pi(s, w_g) to
-        maximize the measure's Q = Phi(s,a,g)·w_g + b(s,a,g). Over training this amortizes
-        goal-reaching across the whole goal/w distribution (vs the paper's from-scratch
-        eval-time distillation). The measure is a stop-gradient constant here."""
-        c = self.config
+    def _goal_task_coord(self, batch, sampled):
+        """(g_rep, w_g) for this step's actor goal: the closed-form task coordinate w_g for
+        goal g is the mean basis response over dataset (s,a) toward g, sqrt(d)-normalized —
+        i.e. the zero_shot inference, batch-estimated. The measure is frozen here (no grad
+        flows to it from the actor stage), so both actor branches share this."""
         obs, action = batch["observations"], batch["actions"]
         B = obs.shape[0]
         g = sampled.actor_goal                               # this step's goal (a future state)
         g_rep = jnp.broadcast_to(g, (B,) + g.shape)          # (B, ob_dim) broadcast to the batch
-        # closed-form task coord w_g for goal g: mean basis response over dataset (s,a) toward g,
-        # sqrt(d)-normalized (the zero_shot inference, batch-estimated). Frozen measure -> no grad.
         phi_toward_g, _ = self.measure(obs, action, g_rep)   # (B, d)
-        w_g = project_z(phi_toward_g.mean(0), True)          # (d,)
+        return g_rep, project_z(phi_toward_g.mean(0), True)  # (B, ob_dim), (d,)
+
+    def _goal_q(self, obs, a, g_rep, w_g):
+        """Q(s,a) for reaching g under the frozen measure: Phi(s,a,g)·w_g + b(s,a,g)."""
+        phi_a, b_a = self.measure(obs, a, g_rep)
+        return (phi_a * w_g).sum(-1) + b_a.squeeze(-1)
+
+    def _bc_coeff(self):
+        c = self.config["actor"]
+        return c.get("bc_coeff", 0.0) if hasattr(c, "get") else c["bc_coeff"]
+
+    def actor_loss(self, batch, sampled, actor_params):
+        """Amortized (in-loop) w-conditioned DDPGBC actor, FB-style. For a sampled goal g,
+        form its closed-form task coord w_g and train pi(s, w_g) to maximize the measure's
+        Q = Phi(s,a,g)·w_g + b(s,a,g). Over training this amortizes goal-reaching across the
+        whole goal/w distribution (vs the paper's from-scratch eval-time distillation)."""
+        c = self.config
+        obs, action = batch["observations"], batch["actions"]
+        B = obs.shape[0]
+        g_rep, w_g = self._goal_task_coord(batch, sampled)
         w_rep = jnp.broadcast_to(w_g, (B, c["d_dim"]))       # condition the actor on w_g
         a = self.actor(obs, w_rep, params=actor_params)      # pi(s, w_g): tanh mean in [-1,1]
-        # Q(s,a) for reaching g = measure at the goal, Phi(s,a,g)·w_g + b(s,a,g) (frozen measure).
-        phi_a, b_a = self.measure(obs, a, g_rep)
-        Q = (phi_a * w_g).sum(-1) + b_a.squeeze(-1)
+        Q = self._goal_q(obs, a, g_rep, w_g)
         loss = -Q.mean()                                     # maximize Q -> deterministic policy gradient
         info = {"actor_loss": loss, "actor_q": Q.mean()}
-        bc_coeff = c["actor"].get("bc_coeff", 0.0) if hasattr(c["actor"], "get") else c["actor"]["bc_coeff"]
+        bc_coeff = self._bc_coeff()
         if bc_coeff > 0:
             bc = jnp.mean((a - action) ** 2)                 # keep the actor near dataset actions (in-support)
             # normalize the Q term by |Q| so the BC weight has a stable relative scale (FB/psm).
             loss = loss / jax.lax.stop_gradient(jnp.abs(Q).mean() + 1e-6) + bc_coeff * bc
             info = {"actor_loss": loss, "actor_q": Q.mean(), "actor_bc": bc}
+        return loss, info
+
+    def flow_actor_loss(self, batch, sampled, actor_params, vf_params):
+        """Flow (FQL-style) actor, the reference's cube/manipulation recipe (Factored-FB
+        psm_flowbc): a BC flow-matching velocity field v(s, x_t, t) trained on dataset
+        actions, plus a one-step w-conditioned noise actor distilled from its ODE rollout.
+
+        The distillation target is a SAMPLE from the behavior flow rather than the dataset
+        action's conditional mean, which is why this is the right actor on multimodal
+        manipulation data: a tanh mean fit by MSE regresses to the average of the modes.
+        Q is the same frozen-measure goal Q as `actor_loss`. Differentiated w.r.t.
+        (actor_params, vf_params)."""
+        c = self.config
+        obs, action = batch["observations"], batch["actions"]
+        B = obs.shape[0]
+        x0, t, noise = sampled.flow_x0, sampled.flow_t, sampled.flow_noise
+        bc_coeff, steps = self._bc_coeff(), c["flow_steps"]
+
+        def rollout(vf_p, o, n):
+            """Euler-integrate the velocity field from noise n to an action (t: 0 -> 1)."""
+            a = n
+            for i in range(steps):
+                ti = jnp.full((o.shape[0], 1), i / steps)
+                a = a + self.actor_vf(o, a, ti, params=vf_p) / steps
+            return jnp.clip(a, -1.0, 1.0)
+
+        # --- conditional flow matching: regress v(s, x_t, t) onto the straight-line velocity ---
+        xt = (1 - t) * x0 + t * action                       # interpolant between noise and data action
+        pred = self.actor_vf(obs, xt, t, params=vf_params)
+        bc_flow_loss = jnp.mean((pred - (action - x0)) ** 2)
+
+        # --- one-step w-conditioned noise actor, scored by the frozen measure's goal Q ---
+        g_rep, w_g = self._goal_task_coord(batch, sampled)
+        w_rep = jnp.broadcast_to(w_g, (B, c["d_dim"]))
+        a = self.actor(obs, w_rep, noise, params=actor_params)   # NoiseConditionedActor applies tanh
+        Q = self._goal_q(obs, a, g_rep, w_g)
+        q_loss = -Q.mean()
+        info = {"actor_q": Q.mean(), "bc_flow_loss": bc_flow_loss}
+        if bc_coeff > 0:
+            # Distill the (stop-gradient) ODE rollout: same noise in, so the one-step actor
+            # learns the flow's own noise->action map, then bends it toward high Q.
+            target = jax.lax.stop_gradient(rollout(vf_params, obs, noise))
+            distill = jnp.mean((a - target) ** 2)
+            q_loss = q_loss / jax.lax.stop_gradient(jnp.abs(Q).mean() + 1e-6) + bc_coeff * distill
+            info["actor_bc"] = distill
+        loss = q_loss + bc_flow_loss
+        info["actor_loss"] = loss
         return loss, info
 
     def apply_update(self, batch, sampled):
@@ -170,10 +246,19 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         target_measure = polyak_update(measure.params, self.target_measure, tau)   # soft-update targets
         target_w = polyak_update(w.params, self.target_w, tau)
         # --- stage 2: amortized actor (trained against the measure's Q; measure is frozen inside) ---
-        (_, a_info), g_actor = jax.value_and_grad(self.actor_loss, argnums=2, has_aux=True)(
-            batch, sampled, self.actor.params)
-        actor = self.actor.apply_gradients(grads=g_actor)
-        return self.replace(measure=measure, w=w, actor=actor, target_measure=target_measure,
+        actor_vf = self.actor_vf
+        if self.config["actor_type"] == "flow":
+            (_, a_info), (g_actor, g_vf) = jax.value_and_grad(
+                self.flow_actor_loss, argnums=(2, 3), has_aux=True)(
+                batch, sampled, self.actor.params, self.actor_vf.params)
+            actor = self.actor.apply_gradients(grads=g_actor)
+            actor_vf = self.actor_vf.apply_gradients(grads=g_vf)
+        else:
+            (_, a_info), g_actor = jax.value_and_grad(self.actor_loss, argnums=2, has_aux=True)(
+                batch, sampled, self.actor.params)
+            actor = self.actor.apply_gradients(grads=g_actor)
+        return self.replace(measure=measure, w=w, actor=actor, actor_vf=actor_vf,
+                            target_measure=target_measure,
                             target_w=target_w), {**info, **a_info}
 
     @jax.jit
@@ -188,7 +273,10 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         rng = rng if rng is not None else self.rng
         sampled = self.sample_step_inputs(batch, rng)
         loss, info = self.measure_loss(batch, sampled, self.measure.params, self.w.params)
-        _, a_info = self.actor_loss(batch, sampled, self.actor.params)
+        if self.config["actor_type"] == "flow":
+            _, a_info = self.flow_actor_loss(batch, sampled, self.actor.params, self.actor_vf.params)
+        else:
+            _, a_info = self.actor_loss(batch, sampled, self.actor.params)
         return loss, {**info, **a_info}
 
     # ---- inference ----
@@ -295,6 +383,11 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         # The actor is amortized (trained in-loop) and conditioned on the task coord w.
         # infer_eval sets w_inf (LP or closed-form); the actor acts greedily for it.
         w = jnp.broadcast_to(self.w_inf, (*observations.shape[:-1], self.config["d_dim"]))
+        if self.config["actor_type"] == "flow":
+            # One-step noise actor: draw the flow latent, decode, clip (mirrors agents/psm.py).
+            seed = self.rng if seed is None else seed
+            noise = jax.random.normal(seed, (*observations.shape[:-1], self.config["action_dim"]))
+            return jnp.clip(self.actor(observations, w, noise), -1.0, 1.0)
         return self.actor(observations, w)
 
     @classmethod
@@ -324,14 +417,38 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
 
         # actor net: pi(s, w) -> action; amortized in the main loop (see actor_loss).
         actor_cfg = config["actor"]
-        actor_def = PSMActor(action_dim=action_dim, hidden_dim=actor_cfg["hidden_dim"],
-                             embedding_layers=actor_cfg["embedding_layers"],
-                             hidden_layers=actor_cfg["hidden_layers"])
+        actor_type = actor_cfg["type"] if "type" in actor_cfg else "ddpgbc"
+        assert actor_type in ("ddpgbc", "flow"), f"unknown actor.type {actor_type!r}"
         # actor LR defaults to the measure LR; set below it (config lr_actor) for a
         # two-timescale scheme (slow actor tracking a quasi-static measure/Q).
         lr_actor = float(config.get("lr_actor", config["lr"]))
-        actor = TrainState.create(actor_def, actor_def.init(ract, ex_obs, ex_z)["params"],
-                                  tx=optax.adam(lr_actor))
+        actor_vf = None
+        if actor_type == "flow":
+            # Flow actor (reference cube recipe, ../Factored-FB psm_flowbc): a one-step
+            # NoiseConditionedActor a = tanh(net(s, w, noise)) distilled from an
+            # unconditional GELU velocity field v(s, x_t, t) trained by flow matching.
+            def _acfg(key, default):
+                return actor_cfg[key] if key in actor_cfg else default
+            actor_def = NoiseConditionedActor(
+                action_dim=action_dim, hidden_dim=int(_acfg("flow_actor_hidden_dim", 512)),
+                hidden_layers=int(_acfg("flow_actor_hidden_layers", 2)),
+                embedding_layers=int(_acfg("flow_actor_embedding_layers", 2)))
+            vf_def = FlowVectorField(action_dim=action_dim,
+                                     hidden_dim=int(_acfg("flow_vf_hidden_dim", 512)),
+                                     hidden_layers=int(_acfg("flow_vf_hidden_layers", 4)))
+            ract, rvf = jax.random.split(ract)
+            ex_noise = ex_act
+            ex_times = ex_act[..., :1]
+            actor = TrainState.create(actor_def, actor_def.init(ract, ex_obs, ex_z, ex_noise)["params"],
+                                      tx=optax.adam(lr_actor))
+            actor_vf = TrainState.create(vf_def, vf_def.init(rvf, ex_obs, ex_act, ex_times)["params"],
+                                         tx=optax.adam(float(_acfg("lr_actor_vf", 3e-4))))
+        else:
+            actor_def = PSMActor(action_dim=action_dim, hidden_dim=actor_cfg["hidden_dim"],
+                                 embedding_layers=actor_cfg["embedding_layers"],
+                                 hidden_layers=actor_cfg["hidden_layers"])
+            actor = TrainState.create(actor_def, actor_def.init(ract, ex_obs, ex_z)["params"],
+                                      tx=optax.adam(lr_actor))
 
         # hash-codebook table: max_seed rows of actions in [-2, 0); pi_z looks one up per (z, s).
         max_seed = 2 ** config["max_log_seed"] + 20000
@@ -344,8 +461,10 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         config["ob_dims"] = tuple(ex_observations.shape[1:])
         config["action_dim"] = action_dim
         config["proto_max_seed"] = max_seed
+        config["actor_type"] = actor_type
+        config["flow_steps"] = int(actor_cfg["flow_steps"]) if "flow_steps" in actor_cfg else 10
         return cls(rng=rng, measure=measure, w=w,
                    target_measure=copy.deepcopy(measure.params),   # targets start equal to online params
                    target_w=copy.deepcopy(w.params),
-                   w_inf=jnp.ones((d_dim,), jnp.float32), actor=actor,
+                   w_inf=jnp.ones((d_dim,), jnp.float32), actor=actor, actor_vf=actor_vf,
                    config=flax.core.FrozenDict(config), proto=proto)
