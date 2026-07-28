@@ -17,6 +17,7 @@ live in per-network TrainStates. Port map:
 """
 import os, json, glob
 os.environ.setdefault("OGBENCH_DATASET_DIR", "/var/local/amsks/ogbench")
+import utils.xla_guard  # noqa: F401  -- MUST precede jax (see module docstring)
 import numpy as np
 import jax, jax.numpy as jnp
 import ogbench

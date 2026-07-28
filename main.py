@@ -4,6 +4,8 @@ import json
 import random
 import time
 
+import utils.xla_guard  # noqa: F401  -- MUST precede jax: disables the miscompiling XLA:GPU autotuner
+
 import hydra
 import jax
 import ml_collections

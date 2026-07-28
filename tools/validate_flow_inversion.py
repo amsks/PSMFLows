@@ -29,6 +29,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import utils.xla_guard  # noqa: F401  -- MUST precede jax (see module docstring)
+
 import hydra
 import jax
 import jax.numpy as jnp
