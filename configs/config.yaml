@@ -13,6 +13,11 @@ save_dir: exp/
 restore_path: null
 restore_epoch: null
 
+# tools/precompute_preimages.py (Stage B). `preimage_limit` slices the dataset for
+# plumbing smokes; null means the whole thing (~1M transitions on OGBench).
+preimage_out: preimages.npz
+preimage_limit: null
+
 offline_steps: 1000000
 online_steps: 0
 buffer_size: 2000000

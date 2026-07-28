@@ -70,6 +70,7 @@ class Dataset(FrozenDict):
         self.return_next_actions = False  # Whether to additionally return next actions; set outside the class.
         self.return_preimage_noise = False  # Whether to sample preimage noise from the EM mixture; set outside the class.
         self.return_index = False  # Whether to emit the global row index as batch['index'] (PSM proto sampler); set outside the class.
+        self.preimage_point_mode = False  # Serve the stored point preimage instead of mixture draws; set outside the class.
 
         # Compute terminal and initial locations.
         self.terminal_locs = np.nonzero(self['terminals'] > 0)[0]
@@ -117,21 +118,27 @@ class Dataset(FrozenDict):
             # WARNING: This is incorrect at the end of the trajectory. Use with caution.
             result['next_actions'] = self._dict['actions'][np.minimum(idxs + 1, self.size - 1)]
         if self.return_preimage_noise:
-            # Sample a latent noise per transition from its precomputed EM mixture.
-            from utils.flow_inversion import sample_preimage_noise  # local import to avoid a cycle
-            result['noise_preimage'] = sample_preimage_noise(
-                result['noise_preimage_mean'],
-                result['noise_preimage_cov'],
-                result['noise_preimage_weights'],
-            )
-            # Also sample the NEXT transition's preimage (u_0', the future-rollout policy index).
-            # WARNING: This is incorrect at the end of the trajectory. Use with caution.
+            # u_0 for this transition, plus u_0' for the NEXT one (the future-rollout
+            # policy index).
+            # WARNING: the "next" slot is incorrect at the end of a trajectory. Use with caution.
             nxt = np.minimum(idxs + 1, self.size - 1)
-            result['next_noise_preimage'] = sample_preimage_noise(
-                self._dict['noise_preimage_mean'][nxt],
-                self._dict['noise_preimage_cov'][nxt],
-                self._dict['noise_preimage_weights'][nxt],
-            )
+            if self.preimage_point_mode:
+                # Exact backward-ODE preimages (point-vs-mixture ablation).
+                result['noise_preimage'] = self._dict['noise_preimage_point'][idxs]
+                result['next_noise_preimage'] = self._dict['noise_preimage_point'][nxt]
+            else:
+                # Sample a latent noise per transition from its precomputed EM mixture.
+                from utils.flow_inversion import sample_preimage_noise  # local import to avoid a cycle
+                result['noise_preimage'] = sample_preimage_noise(
+                    result['noise_preimage_mean'],
+                    result['noise_preimage_cov'],
+                    result['noise_preimage_weights'],
+                )
+                result['next_noise_preimage'] = sample_preimage_noise(
+                    self._dict['noise_preimage_mean'][nxt],
+                    self._dict['noise_preimage_cov'][nxt],
+                    self._dict['noise_preimage_weights'][nxt],
+                )
         return result
 
     def augment(self, batch, keys):
