@@ -9,13 +9,104 @@ paginate: true
 
 # PSMFlows — Session Handoff
 
-Current work: making **affine PSM** perform on cube. The older bilinear-PSM
-parity hunt (2026-07-07 → 07-15, below) is **CLOSED** — see the 07-13 entry and
-`PAPER/RESEARCH_NOTE.md` §4: no code bug, the gap was seed variance + a
-training-budget ceiling.
+Current work: **PSMFlow v1** (`docs/plans/2026-07-20-psmflow-v1.md`) — Tasks 1 and 2.
+The **affine PSM** cube push (07-22 → 07-26, below) is **PARKED**, not closed: the
+07-26 entry's Findings 3 and 4 (rectangular measure mesh, split x-/(s,a)-branch) are
+still the open leads if we return to it. The older bilinear-PSM parity hunt
+(2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RESEARCH_NOTE.md`
+§4: no code bug, the gap was seed variance + a training-budget ceiling.
 
 Branch: `feat/psm-integration` · Machine: `midi-01` (UT CS)
-Date: **2026-07-26** (latest) · prior: 2026-07-15, 07-13, 07-07
+Date: **2026-07-28** (latest) · prior: 2026-07-26, 07-15, 07-13, 07-07
+
+---
+
+<!-- _class: lead -->
+
+## 2026-07-28 session — PSMFlow v1 Tasks 1–2; two numerics bugs cleared
+
+Workstream switched to the **PSMFlow v1 plan**. Execution order is 1→2→…→8; GPU work
+(Stage A → D1/D3 gates → preimages → psmflow 3 seeds → D4 → zero-shot vs PSM/FB) is
+operator-driven after Task 8.
+
+### Task 1 — DONE (`290b951`)
+
+FQL `bc_only`: reward-free behaviour-flow pretraining. Strips the reward terms from the
+actor loss, leaving `bc_flow_loss + alpha*distill_loss`; the critic branch is skipped and
+`rewards`/`masks` are never read (the pretraining dataset has neither). Param tree is
+unchanged so checkpoints restore into a default-shaped FQL agent in Tasks 2/3.
+**Stage-A cube checkpoint landed at 500k:**
+`/var/local/amsks/exp/PSMFLows/bcflow_cube_single_20260726_135032/sd000_20260726_135037`.
+
+### The XLA autotuner miscompiles the flow integration (`d2b3ec1`)
+
+D3's round-trip of 2.26 and NaN ESS were **both artifacts**. Past a threshold unroll
+length, XLA:GPU's autotuner picks a wrong kernel for `compute_flow_actions`: 84.5% of
+outputs pinned at the ±1 clip jitted vs 4.5% un-jitted, reproducibly, across processes;
+CPU correct in every form. Onset is between `flow_steps` 30 and 100, so **training at
+`flow_steps=10` was never affected and the Stage-A checkpoint is sound** — but the plan's
+Stage-A launcher specifies `flow_steps=100` and WOULD have trained on a corrupted
+distillation target. Fix: `utils/xla_guard.py` sets `--xla_gpu_autotune_level=0` **before
+jax initialises** (it is read at XLA init; setting it later is a silent no-op), imported
+ahead of jax by `main.py`, the GPU tools, and `tests/conftest.py`.
+**The trigger needs TRAINED weights** — random weights agree to 3.5e-5, which is why a
+self-contained numerics test would pass vacuously (it is opt-in behind `PSMFLOWS_FLOW_CKPT`;
+the committed test pins the import ORDER instead).
+
+### The residual NaN ESS — fixed this session
+
+Not "the EM proposal is broken at `flow_steps>=100`". One unguarded NaN with a wide blast
+radius, from two compounding causes:
+
+1. **The BC flow genuinely diverges from tail proposal samples.**
+   `_get_predistribution_proposal` clips the Laplace cov eigenvalues to `[0.01, 1.0]` and
+   on cube it **saturates at the upper bound**, so the EM effectively samples `~N(x_0, I)`
+   — as wide as the prior. ~0.02% land at `||u||~6.8` (mean 3.1) and integrate
+   `6.5 -> 2.3e10 -> inf -> NaN` by step ~95. **`flow_steps` 10 and 30 under-resolve the
+   blow-up and stay finite** — that, not any instability of fine discretization, is why it
+   only appeared at >=100.
+2. **One NaN killed the whole row.** The 07-28 guards floored `log_q` but never checked
+   `log_energy`, and softmax over a vector containing one NaN is NaN in EVERY position.
+   Cascade: 17% of rows NaN at EM step 0 -> 69% at step 1 -> **100% by step 5**.
+
+Fix: mask on both grounds (`ok = q_ok & isfinite(log_energy)`) -> logit `-inf` (weight
+exactly 0), uniform fallback if nothing survives. Masked samples keep responsibility
+`1/K` so `gamma = resp * weight` stays finite — **`0 * NaN` would not**. Same guard applied
+to the non-EM `compute_full_proposal_distribution`, which had identical exposure.
+`test_em_ess_survives_a_diverging_flow_sample` injects one NaN action (random weights do
+not diverge on their own) and asserts the sample is EXCLUDED, not merely tolerated
+(`ESS <= 23` of 24). **77 passed, 1 skipped.**
+
+### D3 gate — Stage-A cube checkpoint, 1024 transitions, guard active
+
+| `flow_steps` | roundtrip | KS (p) | mean ESS | min ESS |
+|---|---|---|---|---|
+| 10 | **NaN** | 0.51 (0) | 6.88 | 1.0 |
+| 30 | 3.4e-4 | 0.217 (6e-43) | 6.96 | 1.0 |
+| 100 | 1.2e-4 | 0.061 (9e-4) | 7.13 | 1.0 |
+| 200 | 7.6e-5 | 0.039 (**0.087**) | 7.13 | 1.0 |
+
+- **Preimage precompute must run at `flow_steps>=100`.** At 10 the implicit-Euler fixed
+  point (5 sweeps) diverges outright; 10 is the *training* default and is NOT safe for
+  inversion.
+- **mean ESS ~7/100 at EVERY step count**, including the regimes that never NaN'd ⇒ that is
+  the EM's normal operating value, not damage from the divergence and not something the fix
+  changed. Low, and `min_ess=1.0` means some rows put all mass on one sample — a
+  proposal-quality question worth a threshold on the Task-2 `preimage_ess` health scalar,
+  but not a blocker.
+- **CAUTION — D3 is unseeded.** `Dataset.sample` draws from global `np.random`, so
+  typicality moves batch-to-batch: these numbers differ from `d2b3ec1`'s (KS 0.095->0.061
+  @100, 0.068->0.039 @200) because it is a **different batch**, NOT because anything
+  improved. A2 is not rejected at 5% @200 *on this batch only* — do not read that as A2
+  now holding until D3 takes a seed. Worth fixing before D3 is used as a gate.
+
+### NEXT — Task 2 (preimage pipeline hardening)
+
+The ESS blocker is cleared, so Task 2 is unblocked. Per the plan: checkpoint restore +
+Hydra agent cfg + meta sidecar in `tools/precompute_preimages.py`; `noise_preimage_point`,
+`preimage_roundtrip`, `preimage_ess` npz keys; `preimage_point_mode` on `Dataset`;
+`allow_untrained: false` in `configs/inversion/default.yaml`; `tests/test_preimage_pipeline.py`.
+**No preimage `.npz` exists yet.** Run the precompute at `flow_steps>=100`.
 
 ---
 

@@ -155,3 +155,55 @@ def test_em_posterior_ess_is_finite():
     # every component covariance stays PSD (the property the floor enforces)
     eigs = np.linalg.eigvalsh(np.asarray(covs))
     assert np.all(eigs > -1e-8), f"non-PSD covariance: min eig {eigs.min()}"
+
+
+def test_em_ess_survives_a_diverging_flow_sample(monkeypatch):
+    """One proposal sample whose forward flow diverges must not poison its whole row.
+
+    At flow_steps>=100 the BC flow genuinely blows up for proposal noises in the tail.
+    Measured on the cube Stage-A checkpoint (flow_steps=100, EM step 0): the proposal
+    covariance saturates at the 1.0 clip in `_get_predistribution_proposal`, so samples
+    are drawn ~N(x_0, I) and a ~0.02% minority land at ||u||~6.8 (vs a mean of 3.1).
+    From there the integrated trajectory runs 6.5 -> 2.3e10 -> inf -> NaN by step 95.
+    Coarser discretizations under-resolve the blow-up and stay finite, which is why
+    flow_steps 10 and 30 never showed it.
+
+    The EM's guards floored log_q but never masked log_energy, and softmax over a vector
+    containing a single NaN is NaN in EVERY position: one diverged sample turned the whole
+    row's sample_weights NaN -> NaN ESS and NaN means/covs, which then fed the next
+    iteration. Measured cascade: 17% of rows NaN at EM step 0, 69% at step 1, 100% by
+    step 5.
+
+    A diverged sample is simply a bad preimage candidate and must take weight zero.
+    """
+    cfg = get_config()
+    cfg["flow_steps"] = 10
+    rng = np.random.default_rng(0)
+    obs = jnp.asarray(rng.standard_normal((8, 19)), jnp.float32)
+    act = jnp.asarray(np.clip(rng.standard_normal((8, 5)), -1, 1), jnp.float32)
+    agent = FQLAgent.create(0, obs[:1], act[:1], cfg)
+
+    # Random weights do not diverge, so inject the failure the trained flow produces:
+    # one sample of the proposal batch integrates to a non-finite action.
+    real_compute_flow_actions = FQLAgent.compute_flow_actions
+
+    def diverging(self, observations, noises):
+        actions = real_compute_flow_actions(self, observations, noises)
+        return actions.at[0].set(jnp.nan)
+
+    monkeypatch.setattr(FQLAgent, "compute_flow_actions", diverging)
+
+    keys = jax.random.split(jax.random.PRNGKey(0), obs.shape[0])
+    means, covs, weights, ess = jax.vmap(
+        lambda s, a, k: agent.compute_full_proposal_distribution_em(
+            s, a, k, num_samples=24, n_steps=6, n_initial_steps=10, alpha=1.0, n_components=3
+        )
+    )(obs, act, keys)
+
+    assert np.all(np.isfinite(np.asarray(ess))), "a single diverged sample poisoned the ESS"
+    assert np.all(np.isfinite(np.asarray(means))), "a single diverged sample poisoned the means"
+    assert np.all(np.isfinite(np.asarray(covs))), "a single diverged sample poisoned the covs"
+    assert np.all(np.isfinite(np.asarray(weights))), "a single diverged sample poisoned the weights"
+    # The diverged sample must be EXCLUDED, not merely tolerated: with 24 samples and one
+    # dropped, ESS can never exceed the 23 that remain.
+    assert np.all(np.asarray(ess) <= 23.0 + 1e-4), "diverged sample still carries weight"

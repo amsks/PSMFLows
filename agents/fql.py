@@ -82,7 +82,14 @@ class FQLAgent(flax.struct.PyTreeNode):
             samples, log_prob = prop_dist.sample_and_log_prob(seed=sample_rng, sample_shape=(num_samples,))
             actions = self.compute_flow_actions(state_b, noises=samples)
             dist = alpha * jnp.linalg.norm(actions - action[None], axis=-1)
-            weights = jax.nn.softmax(-dist - log_prob, axis=0)
+            # Same exposure as the EM variant: the flow diverges to NaN when integrated
+            # from a tail sample at flow_steps>=100, and one NaN makes the whole softmax
+            # NaN. Give such samples weight zero; uniform if none survive.
+            logits = -dist - log_prob
+            ok = jnp.isfinite(logits)
+            logits = jnp.where(ok, logits, -jnp.inf)
+            logits = jnp.where(jnp.any(ok), logits, jnp.zeros_like(logits))
+            weights = jax.nn.softmax(logits, axis=0)
             ess = 1.0 / jnp.sum(weights ** 2)
             new_x_0 = jnp.sum(weights[..., None] * samples, axis=0)
             diff = samples - new_x_0[None, :]
@@ -133,15 +140,31 @@ class FQLAgent(flax.struct.PyTreeNode):
             safe_weights = jnp.maximum(weights, 1e-12)
             log_joint = jnp.log(safe_weights[..., None]) + log_likelihoods
             log_q = jax.scipy.special.logsumexp(log_joint, axis=0)
-            # A sample far from EVERY component has log_q = -inf, which poisons both the
-            # responsibilities and the importance weights. Fall back to uniform
-            # responsibility and a floored log_q for such samples rather than emitting NaN.
+            # Drop samples we cannot score, for either of two reasons:
+            #   log_q  -- a sample far from EVERY component has log_q = -inf, which poisons
+            #             both the responsibilities and the importance weights.
+            #   energy -- the BC flow itself DIVERGES when integrated from a proposal noise
+            #             in the tail. The Laplace covariance saturates at the 1.0 clip in
+            #             _get_predistribution_proposal, so samples are effectively drawn
+            #             ~N(x_0, I); measured on the cube Stage-A checkpoint, ~0.02% land
+            #             at ||u||~6.8 (mean 3.1) and their trajectory runs 6.5 -> 2.3e10
+            #             -> inf -> NaN. flow_steps 10 and 30 under-resolve the blow-up and
+            #             stay finite, which is why this only appeared at >=100.
+            # Masking matters because softmax over a vector containing a single NaN is NaN
+            # in EVERY position: one diverged sample took out its whole row (measured
+            # cascade: 17% of rows at EM step 0, 69% at step 1, 100% by step 5). A diverged
+            # sample is just a bad preimage candidate, so it takes weight zero.
             q_ok = jnp.isfinite(log_q)
             log_q = jnp.where(q_ok, log_q, 0.0)
+            ok = q_ok & jnp.isfinite(log_energy)
             responsibilities = jnp.where(
-                q_ok[None, :], jnp.exp(log_joint - log_q[None, :]), 1.0 / n_components)
-            sample_weights = jax.nn.softmax(
-                jnp.where(q_ok, log_energy - log_q, -jnp.inf), axis=0)
+                ok[None, :], jnp.exp(log_joint - log_q[None, :]), 1.0 / n_components)
+            logits = jnp.where(ok, log_energy - log_q, -jnp.inf)
+            # If NOTHING is usable, softmax over all -inf is NaN; fall back to uniform.
+            logits = jnp.where(jnp.any(ok), logits, jnp.zeros_like(logits))
+            sample_weights = jax.nn.softmax(logits, axis=0)
+            # Masked samples get sample_weights exactly 0, and their responsibilities are
+            # finite by construction above, so gamma stays finite (0 * NaN would not).
             gamma = responsibilities * sample_weights[None, :]
 
             n_k = jnp.sum(gamma, axis=1)
