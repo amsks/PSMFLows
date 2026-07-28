@@ -1,8 +1,11 @@
 agent_name: affine_psm
-batch_size: 32            # B^2 mesh over (s_i,a_i,x_j): keep small (RLU default)
-d_dim: 50
-z_dim: 50
-max_log_seed: 12          # binary codebook width for the proto policy
+batch_size: 1024          # REFERENCE cube value (../Factored-FB configs/agent/psm.yaml).
+                          # Affordable only because measure.factored=true turns the B^2 mesh
+                          # into B evals + two matmuls: 6.2 ms/step vs ~1.1 s unfactored.
+                          # The old 32 was an RLU (DMC/gridworld) default — do not restore it.
+d_dim: 128                # reference z_dim (was 50, an RLU default)
+z_dim: 128                # must equal d_dim (the actor's task-coord width)
+max_log_seed: 16          # reference proto codebook width (was 12, an RLU default)
 proto_table_path: null
 discount: 0.98
 tau: 0.01                 # target soft-update rate (RLU fb_target_tau)
@@ -13,6 +16,16 @@ ortho_coef: 1000.0        # proven Factored-FB cube recipe (run_psm_orthohi1000)
                           # because phi is now sqrt(d)-normalized: on normed phi the ortho
                           # diagonal term is inert and coef=1000 is a pure strong decorrelator.
 measure:
+  factored: true          # Phi(s,a,x) = A(s,a) phi_x(x) — write-up Prop. 4.3 under A5.
+                          # The unfactored trunk takes x INSIDE the net, so the B^2 mesh costs
+                          # B^2 network evals: measured 274 ms/step at B=512, ~1.1 s at B=1024
+                          # (~6 days per 500k seed). Factored it is B evals + two matmuls,
+                          # exactly like the reference's psi(s,z,a) @ phi(g)^T — which is what
+                          # makes batch_size=1024 affordable. M stays LINEAR in w, so the
+                          # constrained-LP `full` inference is unaffected.
+  k_dim: 32               # factorization rank. MUST stay well below d_dim: the A head emits
+                          # d_dim*k_dim values, so k_dim=d_dim=128 is a 1024x16384 layer
+                          # (16.8M params, 79% of the net) vs the reference psi head's 1024x128.
   hidden_dim: 1024
   hidden_layers: 3
   b_scale: 10.0           # tanh-bound on the affine offset b (prevents the b-explosion)
@@ -40,11 +53,13 @@ inference:
   mode: full              # full | zero_shot
   use_dgd: true
   inf_coeff: 5.0          # hinge weight when use_dgd=false
-  num_inference_steps: 512
+  num_inference_steps: 5120   # RLU default (was 512). The factored measure needs the
+                              # full budget: its Phi is unnormalized, so w_inf moves slower.
   lagrange_hidden_dim: 256
   lagrange_hidden_layers: 2
   norm_w: true
-  num_actor_inference_steps: 512
+  num_actor_inference_steps: 512   # `full` mode re-distills the amortized actor against the
+                              # SOLVED w_inf (it was trained on the closed-form w_g). 0 disables.
 ob_dims: null
 action_dim: null
 encoder: null

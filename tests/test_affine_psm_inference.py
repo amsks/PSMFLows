@@ -50,8 +50,12 @@ def _mean_violation(agent, ds, goal, k=128):
     return float(np.mean(np.minimum(np.asarray(M), 0.0)))
 
 
+# NB 2000 steps, not 200: with the FACTORED measure, Phi is no longer sqrt(d)-normalized
+# (only phi_x is), so the gradient scale w.r.t. w_inf is smaller and 200 steps at lr_w=1e-4
+# no longer move the violation. RLU's own default is 5120. This is a rate change, not a
+# logic change: at 2000 steps the factored path converges further than the unfactored one.
 def test_full_inference_reduces_constraint_violation_dgd():
-    agent, config, ds = _trained_agent(["inference.use_dgd=true", "inference.num_inference_steps=200"])
+    agent, config, ds = _trained_agent(["inference.use_dgd=true", "inference.num_inference_steps=2000"])
     goal = ds.sample(1)["next_observations"][0]
     before = _mean_violation(agent, ds, goal)
     agent2 = agent.infer_w_goal(ds, goal)

@@ -235,19 +235,140 @@ class AffineMeasureNet(nn.Module):
 
     @nn.compact
     def __call__(self, obs, action, x):
-        h = jnp.concatenate([obs, action, x], -1)
-        for _ in range(self.hidden_layers):
-            h = nn.relu(nn.Dense(self.hidden_dim, kernel_init=_ORTH_RELU)(h))
-        phi = nn.Dense(self.d_dim, kernel_init=_ORTH1)(h)
+        inp = jnp.concatenate([obs, action, x], -1)
+
+        def path(out_dim, name):
+            # RLU builds mlp_phi and mlp_b as two SEPARATE trunks over the same input
+            # (psm.py:174-187) — no shared features — each 5 Linear deep (3 trunk + 2 head).
+            h = inp
+            for i in range(self.hidden_layers):
+                h = nn.relu(nn.Dense(self.hidden_dim, kernel_init=_ORTH_RELU,
+                                     name=f"{name}_trunk_{i}")(h))
+            h = nn.relu(nn.Dense(self.hidden_dim, kernel_init=_ORTH_RELU, name=f"{name}_head_h")(h))
+            return nn.Dense(out_dim, kernel_init=_ORTH1, name=f"{name}_out")(h)
+
+        phi = path(self.d_dim, "phi")
         if self.norm:
             phi = psm_norm(phi)
-        b = nn.Dense(1, kernel_init=_ORTH1)(h)
+        b = path(1, "b")
         if self.b_scale > 0:
             # Hard-bound the bias: raw b is an unconstrained degeneracy sink that explodes
             # (~+-3000) once phi is normalized. Bounding it to +-b_scale keeps M finite while
             # phi*w (in +-d) carries the informative part.
             b = self.b_scale * jnp.tanh(b)
         return phi, b
+
+
+class FactoredAffineMeasureNet(nn.Module):
+    """Affine measure with a FACTORIZED basis: Phi(s,a,x) = A(s,a) phi_x(x).
+
+    This is Prop. 4.3 of the write-up (assumption A5): factorizing the basis reduces the
+    general affine form to a bilinear one that is STILL LINEAR in w, so the constrained-LP
+    `full` inference is unaffected. (Remark 4.4's warning applies to *free*-psi
+    implementations, which drop affineness in w; this is not one — A and beta are network
+    outputs, w is not.)
+
+    Why it exists: the unfactorized AffineMeasureNet takes x INSIDE the trunk, so the B^2
+    contrastive mesh costs B^2 network evaluations — measured 274 ms/step at B=512 and
+    ~1.1 s at B=1024, i.e. ~6 days per 500k-step seed. Factorized, the mesh costs B evals
+    per tower plus two matmuls, exactly like the reference's psi(s,z,a) @ phi(g)^T. That is
+    what makes batch_size=1024 (the reference cube value) affordable.
+
+        M(s,a,x) = Phi(s,a,x)·w + b(s,a,x)
+                 = phi_x(x)·(A(s,a)^T w)  +  b_scale*tanh(beta(s,a)·phi_x(x))
+
+    `mesh_terms` returns the per-side factors so the agent can build the (B,B) mesh with
+    two matmuls; `__call__` gives the elementwise value for the actor / inference paths.
+    Both compute the SAME function — the mesh form is an algebraic regrouping, not an
+    approximation.
+
+    Normalization follows the reference rather than the unfactored net: PhiMap normalizes
+    the x-side basis phi(g) and leaves psi free, so here psm_norm is applied to phi_x (the
+    measure-argument basis) and NOT to the product Phi. That is what keeps the mesh cheap
+    (normalizing Phi would force materializing the (B,B,d) product) and it keeps the ortho
+    regularizer's diagonal term inert, so ortho_coef=1000 stays a pure decorrelator —
+    the property configs/agent/affine_psm.yaml relies on. Apply ortho to phi_x, not Phi.
+    """
+
+    d_dim: int
+    hidden_dim: int
+    k_dim: int = 0          # factorization rank; 0 => d_dim. Keep it WELL BELOW d_dim: the A
+                            # head emits d_dim*k_dim values, so k_dim=d_dim=128 makes it a
+                            # 1024x16384 layer (16.8M params, 79% of the net) against the
+                            # reference psi head's 1024x128.
+    hidden_layers: int = 3
+    norm: bool = True
+    b_scale: float = 10.0   # tanh-bound on the affine offset b; <=0 disables (raw b)
+
+    @property
+    def _k(self):
+        return self.k_dim if self.k_dim > 0 else self.d_dim
+
+    def _tower(self, name):
+        """RLU's shape: `hidden_layers` trunk layers, then a head of (hidden, out).
+
+        RLU builds mlp_phi and mlp_b as two COMPLETELY SEPARATE trunks over the same input
+        (psm.py:174-187) — it does not share features between the measure and the offset.
+        Each path is 5 Linear layers deep (3 trunk + 2 head), so the head carries one
+        hidden layer of its own. We mirror both properties.
+        """
+        return ([nn.Dense(self.hidden_dim, kernel_init=_ORTH_RELU, name=f"{name}_trunk_{i}")
+                 for i in range(self.hidden_layers)],
+                nn.Dense(self.hidden_dim, kernel_init=_ORTH_RELU, name=f"{name}_head_h"))
+
+    def setup(self):
+        k = self._k
+        # Four independent towers: {phi, b} x {(s,a) side, x side}. The phi/b separation is
+        # RLU's; the (s,a)/x separation is what makes the B^2 mesh cost B evals.
+        self.a_trunk, self.a_head_h = self._tower("a")
+        self.a_out = nn.Dense(self.d_dim * k, kernel_init=_ORTH1, name="a_out")
+        self.beta_trunk, self.beta_head_h = self._tower("beta")
+        self.beta_out = nn.Dense(k, kernel_init=_ORTH1, name="beta_out")
+        self.xphi_trunk, self.xphi_head_h = self._tower("xphi")
+        self.xphi_out = nn.Dense(k, kernel_init=_ORTH1, name="xphi_out")
+        self.xb_trunk, self.xb_head_h = self._tower("xb")
+        self.xb_out = nn.Dense(k, kernel_init=_ORTH1, name="xb_out")
+
+    @staticmethod
+    def _run(trunk, head_h, out, h):
+        for layer in trunk:
+            h = nn.relu(layer(h))
+        return out(nn.relu(head_h(h)))
+
+    def sa(self, obs, action):
+        """(s,a) side: A with shape (B, d, k) and beta with shape (B, k)."""
+        h = jnp.concatenate([obs, action], -1)
+        A = self._run(self.a_trunk, self.a_head_h, self.a_out, h)
+        A = A.reshape(*h.shape[:-1], self.d_dim, self._k)
+        beta = self._run(self.beta_trunk, self.beta_head_h, self.beta_out, h)
+        return A, beta
+
+    def x(self, x):
+        """Measure-argument bases: phi_x(x) (sqrt(k)-normalized, cf. PhiMap) and phi_b(x).
+
+        phi_b is a SEPARATE basis for the offset, mirroring RLU's independent b path; it is
+        left unnormalized because b is tanh-bounded downstream instead.
+        """
+        px = self._run(self.xphi_trunk, self.xphi_head_h, self.xphi_out, x)
+        if self.norm:
+            px = psm_norm(px)
+        pb = self._run(self.xb_trunk, self.xb_head_h, self.xb_out, x)
+        return px, pb
+
+    def mesh_terms(self, obs, action, x):
+        """Factors for the (B,B) mesh: (A, beta) on the source side, (phi_x, phi_b) on the
+        measure-argument side. M = phi_x·(A^T w) + bound(beta·phi_b)."""
+        A, beta = self.sa(obs, action)
+        px, pb = self.x(x)
+        return A, beta, px, pb
+
+    def _bound_b(self, raw):
+        return self.b_scale * jnp.tanh(raw) if self.b_scale > 0 else raw
+
+    def __call__(self, obs, action, x):
+        A, beta, px, pb = self.mesh_terms(obs, action, x)
+        phi = jnp.einsum("...dk,...k->...d", A, px)
+        return phi, self._bound_b(jnp.sum(beta * pb, axis=-1, keepdims=True))
 
 
 class LagrangeNet(nn.Module):

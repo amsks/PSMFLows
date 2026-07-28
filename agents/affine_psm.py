@@ -25,8 +25,8 @@ import numpy as np
 import optax
 
 from utils.flax_utils import TrainState, nonpytree_field
-from utils.psm_networks import (AffineMeasureNet, FlowVectorField, LagrangeNet,
-                                NoiseConditionedActor, PSMActor, WNet)
+from utils.psm_networks import (AffineMeasureNet, FactoredAffineMeasureNet, FlowVectorField,
+                                LagrangeNet, NoiseConditionedActor, PSMActor, WNet)
 from agents.psm import proto_sample, project_z, off_diagonal_mask, polyak_update, ortho_loss, _plain_config
 
 
@@ -66,12 +66,16 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         c = self.config
         B = batch["observations"].shape[0]
         r_seed, r_goal, r_flow = jax.random.split(rng, 3)      # keys: codebook code, goal, flow draws
-        # --- codebook code z (one per batch; RLU-continuous samples B distinct codes, a
-        # deliberate diversity simplification, not a fidelity gap) ---
+        # --- codebook codes z: B DISTINCT codes, one per row (RLU sample_z(batch_size),
+        # psm.py:431). We previously drew a single code for the whole batch, which trained
+        # the basis on one proto-policy per step instead of B. The code is tied to the
+        # SOURCE/row index i (so row i's target uses pi_{z_i}(s'_i)) — the alignment
+        # discrete_psm.py:596 gets right via repeat_interleave, and which psm.py:432 gets
+        # wrong by tying z to the goal/column instead. ---
         n_bits = c["max_log_seed"]                             # binary code width
-        code = jax.random.randint(r_seed, (), 0, 2 ** n_bits)  # a single integer seed in [0, 2^bits)
-        bits = ((code >> jnp.arange(n_bits)) & 1).astype(jnp.float32)   # unpack it to a bit vector
-        proto_seed = jnp.broadcast_to(bits, (B, n_bits))       # same code for every row of the batch
+        codes = jax.random.randint(r_seed, (B,), 0, 2 ** n_bits)         # B integer seeds
+        bits = ((codes[:, None] >> jnp.arange(n_bits)) & 1).astype(jnp.float32)  # LSB-first
+        proto_seed = bits                                      # (B, n_bits), row-aligned
         seed_to_action, powers = self.proto                    # the frozen hash-codebook lookup table
         obs_hash = batch["index"] if "index" in batch else jnp.arange(B)   # key on global row index if present
         # pi_z(s') = table[(z·powers + hash(s')) mod max_seed]: the codebook action at each s'.
@@ -107,25 +111,39 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         off, off_sum = off_diagonal_mask(B)       # (1 - I) mask and its sum, for the off-diagonal term
         z, proto_na = sampled.proto_seed, sampled.proto_next_action   # codebook code + its next action
 
-        # --- build the B^2 mesh: i indexes the source (s,a), j the measure argument x ---
-        i_idx = jnp.repeat(jnp.arange(B), B)      # (B^2,)  0,0,..,0,1,1,..  (source index)
-        j_idx = jnp.tile(jnp.arange(B), B)        # (B^2,)  0,1,..,B-1,0,1,.. (measure-arg index)
-        m_obs, m_act = obs[i_idx], action[i_idx]              # source (s_i, a_i)
-        m_next_obs, m_next_act = next_obs[i_idx], proto_na[i_idx]   # bootstrap (s'_i, pi_z(s'_i))
-        m_x = x[j_idx]                                        # measure argument x_j
-
-        # --- prediction M_ij = Phi(s_i,a_i,x_j)·w(z) + b, reshaped to (B,B) ---
-        # w is sqrt(d)-normalized (project_z); with ||Phi||=sqrt(d) too, M is bounded so the
-        # TD bootstrap cannot diverge (fixes the observed 108-spike-then-collapse).
         wz = project_z(self.w(z, params=w_params), True)     # (B, d); rows identical (one code)
-        wz_i = wz[i_idx]                                      # (B^2, d) source-aligned copy
-        phi, b = self.measure(m_obs, m_act, m_x, params=measure_params)   # (B^2, d), (B^2, 1)
-        M = ((phi * wz_i).sum(-1, keepdims=True) + b).reshape(B, B)
+        twz = project_z(self.w(z, params=self.target_w), True)
 
-        # --- bootstrap target M_ij = Phi_target(s'_i, pi_z(s'_i), x_j)·w_target(z) + b_target ---
-        tphi, tb = self.measure(m_next_obs, m_next_act, m_x, params=self.target_measure)
-        twz = project_z(self.w(z, params=self.target_w), True)[i_idx]
-        target_M = ((tphi * twz).sum(-1, keepdims=True) + tb).reshape(B, B)
+        if c["measure_factored"]:
+            # --- FACTORIZED mesh (Prop. 4.3): Phi = A(s,a) phi_x(x), so
+            #       M_ij = phi_x(x_j)·(A(s_i,a_i)^T w) + bound(beta_i·phi_x(x_j))
+            # costs B network evals per tower plus two (B,B) matmuls, instead of B^2 evals.
+            # This is what makes batch_size=1024 (the reference cube value) affordable;
+            # the unfactored path below is ~1.1 s/step at B=1024 vs a few ms here.
+            def mesh(o, a, xs, mp, wv):
+                A, beta, px, pb = self.measure.model_def.apply(
+                    {"params": mp}, o, a, xs, method="mesh_terms")   # (B,d,k),(B,k),(B,k),(B,k)
+                psi = jnp.einsum("bdk,bd->bk", A, wv)                # A^T w, the psi side
+                raw_b = beta @ pb.T                                  # (B,B) offset pre-bound
+                bs = float(c["measure"]["b_scale"])
+                return psi @ px.T + (bs * jnp.tanh(raw_b) if bs > 0 else raw_b), px
+
+            M, phi_basis = mesh(obs, action, x, measure_params, wz)
+            target_M, _ = mesh(next_obs, proto_na, x, self.target_measure, twz)
+        else:
+            # --- naive mesh: B^2 evaluations of the joint (s,a,x) trunk ---
+            i_idx = jnp.repeat(jnp.arange(B), B)   # (B^2,) 0,0,..,0,1,1,.. (source index)
+            j_idx = jnp.tile(jnp.arange(B), B)     # (B^2,) 0,1,..,B-1,0,1,.. (measure-arg index)
+            m_obs, m_act = obs[i_idx], action[i_idx]                    # source (s_i, a_i)
+            m_next_obs, m_next_act = next_obs[i_idx], proto_na[i_idx]   # bootstrap (s'_i, pi_z(s'_i))
+            m_x = x[j_idx]                                             # measure argument x_j
+            # w is sqrt(d)-normalized (project_z); with ||Phi||=sqrt(d) too, M is bounded so
+            # the TD bootstrap cannot diverge (fixes the observed 108-spike-then-collapse).
+            phi, b = self.measure(m_obs, m_act, m_x, params=measure_params)   # (B^2,d), (B^2,1)
+            M = ((phi * wz[i_idx]).sum(-1, keepdims=True) + b).reshape(B, B)
+            tphi, tb = self.measure(m_next_obs, m_next_act, m_x, params=self.target_measure)
+            target_M = ((tphi * twz[i_idx]).sum(-1, keepdims=True) + tb).reshape(B, B)
+            phi_basis = None
         target_M = jax.lax.stop_gradient(target_M)           # no gradient through the target
 
         # --- contrastive loss = off-diagonal TD residual + diagonal source term ---
@@ -139,7 +157,14 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         # On sqrt(d)-normalized Phi the diagonal term is inert, so a large ortho_coef acts as
         # a pure decorrelator (Phi Phi^T -> I), preventing rank collapse of the basis.
         if c["ortho_coef"] > 0:
-            phi_batch, _ = self.measure(obs, action, x, params=measure_params)   # Phi on the batch (B,d)
+            if c["measure_factored"]:
+                # Regularize the x-side basis phi_x — the factored net's analogue of the
+                # reference's phi(g), and the piece that is sqrt(k)-normalized. Applying it
+                # to the UNNORMALIZED product Phi would make the diagonal term live and turn
+                # ortho_coef=1000 into a norm-shrinker instead of a decorrelator.
+                phi_batch = phi_basis
+            else:
+                phi_batch, _ = self.measure(obs, action, x, params=measure_params)   # (B,d)
             ol, oldiag, oloff = ortho_loss(phi_batch, off, off_sum)
             loss = loss + c["ortho_coef"] * ol
             info.update({"psm_loss": loss, "orth_loss": ol, "orth_diag": oldiag, "orth_offdiag": oloff})
@@ -306,7 +331,11 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
 
         @jax.jit
         def step(w_inf, w_state, lam_params, lam_state, obs, act, xperm, goal_rep):
-            def primal(w):
+            def primal(w_raw):
+                # Re-project onto the sqrt(d) sphere at every use, as discrete_psm.py does
+                # (698, 743). Without this the objective -mean(phi_g·w) is LINEAR and hence
+                # UNBOUNDED BELOW in w: only the step budget was keeping it finite.
+                w = project_z(w_raw, True)
                 phi_g, _ = self.measure(obs, act, goal_rep)
                 phi_p, b_p = self.measure(obs, act, xperm)
                 obj = -(phi_g * w).sum(-1).mean()
@@ -324,7 +353,7 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
             if use_dgd:
                 def dual(lp):
                     phi_p, b_p = self.measure(obs, act, xperm)
-                    Mp = (phi_p * jax.lax.stop_gradient(w_inf)).sum(-1, keepdims=True) + b_p
+                    Mp = (phi_p * jax.lax.stop_gradient(project_z(w_inf, True))).sum(-1, keepdims=True) + b_p
                     lam = lam_def.apply({"params": lp}, obs, act, xperm)
                     return (Mp * lam).mean()
 
@@ -348,7 +377,56 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
 
         if bool(ic["norm_w"]):
             w_inf = project_z(w_inf, True)
-        return self.replace(w_inf=w_inf, task_goal=goal)
+        # The amortized actor was trained only on w_g = the CLOSED-FORM (zero_shot) task
+        # coordinate. The LP solution above is a different distribution, so acting with the
+        # amortized actor on it queries the actor off-distribution — which silently broke
+        # `full` mode when d80f7f0 replaced eval-time distillation. Fine-tune the actor
+        # against the w_inf we actually solved for.
+        return self.replace(w_inf=w_inf, task_goal=goal).distill_actor(dataset, goal)
+
+    def distill_actor(self, dataset, goal, steps=None):
+        """Fine-tune the amortized actor against THIS agent's w_inf and goal.
+
+        Starts from the in-loop amortized weights (so it converges in far fewer steps than
+        RLU's from-scratch distill_actor_ddpg) and maximizes the same frozen-measure goal Q
+        the training-time actor loss uses, so the objective is identical apart from w."""
+        c = self.config
+        ic = c["inference"]
+        n = int(ic["num_actor_inference_steps"]) if steps is None else int(steps)
+        if n <= 0:
+            return self
+        goal = jnp.asarray(goal, jnp.float32)
+        flow = c["actor_type"] == "flow"
+
+        @jax.jit
+        def step(actor, rng, obs, action):
+            B = obs.shape[0]
+            g_rep = jnp.broadcast_to(goal, (B,) + goal.shape)
+            w_rep = jnp.broadcast_to(self.w_inf, (B, c["d_dim"]))
+
+            def loss_fn(params):
+                if flow:
+                    noise = jax.random.normal(rng, (B, c["action_dim"]))
+                    a = self.actor(obs, w_rep, noise, params=params)
+                else:
+                    a = self.actor(obs, w_rep, params=params)
+                Q = self._goal_q(obs, a, g_rep, self.w_inf)
+                loss = -Q.mean()
+                bc_coeff = self._bc_coeff()
+                if bc_coeff > 0:   # keep it in-support, as the training-time loss does
+                    loss = (loss / jax.lax.stop_gradient(jnp.abs(Q).mean() + 1e-6)
+                            + bc_coeff * jnp.mean((a - action) ** 2))
+                return loss, Q.mean()
+
+            (_, q), g = jax.value_and_grad(loss_fn, has_aux=True)(actor.params)
+            return actor.apply_gradients(grads=g), q
+
+        actor, rng = self.actor, self.rng
+        for _ in range(n):
+            b = dataset.sample(c["batch_size"])
+            rng, k = jax.random.split(rng)
+            actor, _ = step(actor, k, jnp.asarray(b["observations"]), jnp.asarray(b["actions"]))
+        return self.replace(actor=actor, rng=rng)
 
     def infer_w_zeroshot(self, dataset, goal, num_samples=4096):
         """Closed-form goal code (no test-time optimization): w = sqrt(d)*normalize(
@@ -404,10 +482,20 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         ex_z = jnp.zeros((ex_obs.shape[0], z_dim))           # actor task coord w placeholder (z_dim == d_dim)
         ex_zbin = jnp.zeros((ex_obs.shape[0], config["max_log_seed"]))   # binary codebook code -> WNet
 
-        # measure net: (s,a,x) -> (Phi in R^d, b in R); Phi sqrt(d)-normalized, b tanh-bounded.
-        measure_def = AffineMeasureNet(d_dim=d_dim, hidden_dim=config["measure"]["hidden_dim"],
-                                       hidden_layers=config["measure"]["hidden_layers"],
-                                       b_scale=float(config["measure"].get("b_scale", 10.0)))
+        # measure net: (s,a,x) -> (Phi in R^d, b in R), b tanh-bounded.
+        mcfg = config["measure"]
+        factored = bool(mcfg["factored"]) if "factored" in mcfg else False
+        if factored:
+            # Factorized basis Phi = A(s,a) phi_x(x): the B^2 mesh becomes B evals + two
+            # matmuls, which is what makes the reference batch_size=1024 affordable.
+            measure_def = FactoredAffineMeasureNet(
+                d_dim=d_dim, k_dim=int(mcfg["k_dim"]) if "k_dim" in mcfg else 0,
+                hidden_dim=mcfg["hidden_dim"], hidden_layers=mcfg["hidden_layers"],
+                b_scale=float(mcfg.get("b_scale", 10.0)))
+        else:
+            measure_def = AffineMeasureNet(d_dim=d_dim, hidden_dim=mcfg["hidden_dim"],
+                                           hidden_layers=mcfg["hidden_layers"],
+                                           b_scale=float(mcfg.get("b_scale", 10.0)))
         measure = TrainState.create(measure_def, measure_def.init(rm, ex_obs, ex_act, ex_x)["params"],
                                     tx=optax.adam(config["lr"]))
 
@@ -462,6 +550,7 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         config["action_dim"] = action_dim
         config["proto_max_seed"] = max_seed
         config["actor_type"] = actor_type
+        config["measure_factored"] = factored
         config["flow_steps"] = int(actor_cfg["flow_steps"]) if "flow_steps" in actor_cfg else 10
         return cls(rng=rng, measure=measure, w=w,
                    target_measure=copy.deepcopy(measure.params),   # targets start equal to online params

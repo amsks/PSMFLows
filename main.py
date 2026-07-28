@@ -77,9 +77,13 @@ def main(cfg: DictConfig):
             dataset.frame_stack = cfg.frame_stack
             if config['agent_name'] == 'rebrac':
                 dataset.return_next_actions = True
-            if config['agent_name'] == 'psm':
-                # PSM's proto behavior sampler keys on the global buffer row index
+            if config['agent_name'] in ('psm', 'affine_psm'):
+                # The proto behavior sampler keys on the global buffer row index
                 # (reference train.py with_index). Emit it as batch['index'].
+                # WITHOUT this both agents fall back to arange(B) — i.e. BATCH POSITION —
+                # so pi_z is a function of where a transition lands in the batch rather
+                # than of its state, and the TD bootstrap target is re-randomized on every
+                # resample. affine_psm was missing from this list.
                 dataset.return_index = True
 
     # Create agent.

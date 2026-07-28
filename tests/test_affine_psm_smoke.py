@@ -73,3 +73,31 @@ def test_measure_and_w_receive_gradient():
 
     assert changed(a0.measure.params, a1.measure.params)
     assert changed(a0.w.params, a1.w.params)
+
+
+def test_proto_branch_consumes_batch_index():
+    # The codebook policy pi_z must key on the GLOBAL buffer row index, not on batch
+    # position. Without batch['index'] the agent falls back to arange(B), so pi_z becomes
+    # a function of where a transition lands in the batch and the TD bootstrap target is
+    # re-randomized on every resample — there is then no policy whose measure is learned.
+    # main.py must set dataset.return_index for affine_psm (it once set it only for psm).
+    agent = _agent()
+    b = _batch()
+    b_noidx = {k: v for k, v in b.items() if k != "index"}
+    b_idx = dict(b, index=np.arange(1000, 1000 + b["observations"].shape[0], dtype=np.int64))
+    _, i1 = agent.update(b_noidx)          # arange(B) fallback
+    _, i2 = agent.update(b_idx)            # global-index keyed
+    assert math.isfinite(float(i2["psm_offdiag"]))
+    # Different proto keys -> different bootstrap actions -> different TD residual.
+    # Compare psm_offdiag: psm_diag reads only the prediction M (no proto action), and
+    # the psm_loss total is swamped by the index-independent ortho term.
+    assert not np.isclose(float(i1["psm_offdiag"]), float(i2["psm_offdiag"]))
+
+
+def test_main_sets_return_index_for_affine_psm():
+    # Guards the main.py wiring itself, which is where the bug actually lived.
+    import re
+    src = open("main.py").read()
+    m = re.search(r"if config\['agent_name'\] in \(([^)]*)\):\s*\n(?:\s*#.*\n)*\s*dataset\.return_index = True", src)
+    assert m is not None, "main.py no longer gates return_index on an agent-name tuple"
+    assert "'affine_psm'" in m.group(1), "affine_psm missing from the return_index agents"

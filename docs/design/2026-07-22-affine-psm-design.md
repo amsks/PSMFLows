@@ -1,6 +1,22 @@
 # Affine (full) PSM — implementation spec (affine successor measure + constrained goal inference)
 
-**Date:** 2026-07-22 · **Branch:** `feat/psm-integration` · **Design source:**
+**Date:** 2026-07-22 · **Branch:** `feat/psm-integration`
+**AUDIT CORRECTION 2026-07-26 — read before trusting anything below.** This spec named
+RLU-continuous `agent/psm.py` as the source of truth. That file is **dead code**: no RLU
+training script instantiates `PSMAgent` (all of them drive `DiscretePSMAgent`), and it
+contains at least five paths that cannot run or are broken — `int64` actions concatenated
+with float32; `cfg.inf_coeff` referenced but absent from `PSMConfig`; `pi_z` hashing a
+tensor's *memory address* rather than the state; `w_target.load_state_dict(self.w_target
+.state_dict())`, a self-copy no-op; and `q_function` under `no_grad`, so actor distillation
+receives zero gradient from the measure. **`discrete_psm.py` is the variant that was
+actually run and is the correct reference.** Two specific claims below are false: RLU does
+NOT sample one codebook code per batch (it samples `B`), and its measure net does NOT use
+a shared trunk (`mlp_phi` and `mlp_b` are separate, 5 Linear layers each). Both are fixed
+in the code as of 2026-07-26. Deviations we make deliberately — normalized phi, tanh-bounded
+b, an enabled ortho term, sqrt(d)-normalized w — are *corrections* to RLU-continuous bugs
+or Factored-FB imports, not fidelity.
+
+**Design source:**
 RLU reference `controllable_agent/url_benchmark/agent/{psm.py,discrete_psm.py}`
 (continuous + discrete full PSM), cross-checked against `PAPER/RESEARCH_NOTE.md` §3
 (affine decomposition, Prop. 5 "affine span"). User-approved design decisions:
@@ -66,9 +82,10 @@ codebook proto sampler, the contrastive/ortho loss helpers, and the actor infras
 
 ### 2.1 Networks (`utils/psm_networks.py`, new classes)
 
-- **`AffineMeasureNet(s, a, x) → (phi ∈ R^d, b ∈ R)`** — MLP on `concat[s, a, x]` with a
-  shared trunk and two heads (`phi_fc → R^d`, `b_fc → R^1`), mirroring RLU `PSM`
-  (`psm.py:167-196`). `x` is the measure argument (a future state / goal). Ensembled
+- **`AffineMeasureNet(s, a, x) → (phi ∈ R^d, b ∈ R)`** — MLP on `concat[s, a, x]` with
+  **two fully separate trunks**, one per head (`phi`, `b`), each 3 trunk layers + a
+  (hidden, out) head = 5 Linear deep, mirroring RLU `PSM` (`psm.py:174-187`). An earlier
+  version shared one trunk and was a layer shallower; corrected 2026-07-26. `x` is the measure argument (a future state / goal). Ensembled
   (size 2) to reuse the target-uncertainty machinery, matching `PsiMap`; the ensemble is
   min-reduced only where RLU uses a single net (document the deviation inline).
 - **`w`: MLP `z → R^d`** (training-time task coordinates for codebook code `z`) with a
@@ -101,8 +118,10 @@ $d$-vector `phi` and scalar `b`, as in RLU continuous `psm.py`).
 
 Faithful to RLU `update_psm` (`psm.py:301-405`):
 
-1. Sample a batch $\{(s_i, a_i, s_i')\}$ and a **single** binary codebook code $z$ for
-   the batch (RLU samples one $z$ and repeats it, `psm.py:431-432`); get the continuation
+1. Sample a batch $\{(s_i, a_i, s_i')\}$ and **$B$ distinct** binary codebook codes, one
+   per row (RLU `sample_z(batch_size)`, `psm.py:431`; the row alignment is
+   `discrete_psm.py:596`'s, not `psm.py:432`'s, which ties $z$ to the goal column instead);
+   get the continuation
    actions $a'_i = \pi_z(s_i')$ from the hash codebook sampler.
 2. Form the $(s_i,\, x_j = s_j')$ mesh (all pairs) for the contrastive diagonal /
    off-diagonal split.
