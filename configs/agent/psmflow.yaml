@@ -1,0 +1,45 @@
+agent_name: psmflow
+batch_size: 1024
+z_dim: 128
+num_parallel: 2
+discount: 0.98
+tau: 0.01
+ortho_coef: 1000.0        # reference PSM sweep winner
+pessimism_penalty: 0.0
+actor_pessimism_penalty: 0.5
+norm_z: true
+
+lr_phi: 1.0e-5
+lr_sf: 1.0e-4
+
+phi:
+  hidden_dim: 256
+  hidden_layers: 2
+sf:
+  hidden_dim: 1024
+  hidden_layers: 1
+  embedding_layers: 2
+
+# FROZEN behavior flow — must match the Stage-A `agent=fql agent.bc_only=true` run.
+flow:
+  hidden_dims: [512, 512, 512, 512]
+  value_hidden_dims: [512, 512, 512, 512]
+  layer_norm: false
+  critic_layer_norm: true
+flow_ckpt_path: null       # REQUIRED for real runs (dir glob, restore_agent convention)
+flow_ckpt_epoch: null
+allow_untrained_flow: false
+preimage_path: null        # REQUIRED: tools/precompute_preimages.py output npz
+use_point_preimage: false  # point-vs-mixture ablation
+
+index_mix_ratio: 0.5       # P(u' from behavior preimages) vs N(0, I)
+u_clip: 3.0                # typical-set clamp on latent draws
+
+gpi_num_u: 64
+gpi_num_uprime: 16
+gpi_decode: onestep        # onestep | ode
+flow_decode_steps: 10
+
+ob_dims: null
+action_dim: null
+encoder: null

@@ -4,6 +4,7 @@ from agents.fql import FQLAgent
 from agents.ifql import IFQLAgent
 from agents.iql import IQLAgent
 from agents.psm import PSMAgent
+from agents.psmflow import PSMFlowAgent
 from agents.rebrac import ReBRACAgent
 from agents.sac import SACAgent
 
@@ -14,6 +15,7 @@ agents = dict(
     ifql=IFQLAgent,
     iql=IQLAgent,
     psm=PSMAgent,
+    psmflow=PSMFlowAgent,
     rebrac=ReBRACAgent,
     sac=SACAgent,
 )

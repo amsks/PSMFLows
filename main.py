@@ -56,6 +56,16 @@ def main(cfg: DictConfig):
     if cfg.online_steps > 0:
         assert 'visual' not in cfg.env_name, 'Online fine-tuning is currently not supported for visual environments.'
 
+    if config['agent_name'] == 'psmflow':
+        # psmflow trains on the preimage-augmented dataset (latents per transition).
+        from utils.flow_inversion import load_augmented_dataset
+        assert config.get('preimage_path'), 'psmflow requires agent.preimage_path (tools/precompute_preimages.py)'
+        aug = load_augmented_dataset(config['preimage_path'])
+        assert aug['observations'].shape[0] == train_dataset['observations'].shape[0], (
+            'preimage npz size mismatch vs env dataset — wrong env or stale file?')
+        train_dataset = aug
+        val_dataset = None  # val split has no preimages; skip validation logging at v1
+
     # Initialize agent.
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -87,6 +97,11 @@ def main(cfg: DictConfig):
                 # than of its state, and the TD bootstrap target is re-randomized on every
                 # resample. affine_psm was missing from this list.
                 dataset.return_index = True
+            if config['agent_name'] == 'psmflow':
+                # Emit u_0 / u_0' per transition: either a draw from the stored EM mixture
+                # or the exact backward-ODE point, per the point-vs-mixture ablation.
+                dataset.return_preimage_noise = True
+                dataset.preimage_point_mode = bool(config.get('use_point_preimage', False))
 
     # Create agent.
     example_batch = train_dataset.sample(1)
