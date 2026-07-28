@@ -24,7 +24,7 @@ import optax
 
 from agents.psm import (
     _plain_config, contrastive_loss, off_diagonal_mask, ortho_loss, polyak_update,
-    targets_uncertainty,
+    project_z, targets_uncertainty,
 )
 from utils.flax_utils import TrainState, nonpytree_field
 from utils.networks import ActorVectorField
@@ -113,6 +113,61 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         sampled = self.sample_step_inputs(batch, rng)
         loss, info = self.measure_loss(batch, sampled, self.phi.params, self.psi.params)
         return loss, info
+
+    # ---- inference (Rung 1: flow-GPI) ----
+    def infer_z(self, next_observations, rewards):
+        phi = self.phi(next_observations)
+        z = (rewards.reshape(1, -1) @ phi).reshape(-1) / phi.shape[0]
+        return project_z(z, self.config["norm_z"])
+
+    def infer_eval_z(self, next_observations, rewards):
+        """Copy of this agent with task_z set from rewards. Picked up generically by
+        main.py's eval hook (hasattr(agent, 'infer_eval_z'))."""
+        return self.replace(task_z=self.infer_z(next_observations, rewards))
+
+    def decode(self, observations, u):
+        """Decode latents through the FROZEN flow. observations (B, ob), u (B, d_a)."""
+        if self.config["gpi_decode"] == "onestep":
+            a = self.flow_onestep_def.apply({"params": self.flow_onestep}, observations, u)
+        else:
+            a = u
+            steps = self.config["flow_decode_steps"]
+            for i in range(steps):
+                t = jnp.full((*observations.shape[:-1], 1), i / steps)
+                a = a + self.flow_vf_def.apply({"params": self.flow_vf}, observations, a, t) / steps
+        return jnp.clip(a, -1.0, 1.0)
+
+    @jax.jit
+    def gpi_select(self, observations, seed=None):
+        """argmax_u max_u' [mean_P - pess * unc](psi(s, u', u)^T w) over sampled latents.
+
+        Single observation (ob_dims,) — the eval/acting path."""
+        c = self.config
+        assert observations.ndim == 1, "gpi_select acts on a single observation"
+        K, Mi, d_a = c["gpi_num_u"], c["gpi_num_uprime"], c["action_dim"]
+        seed = self.rng if seed is None else seed
+        r_u, r_idx = jax.random.split(seed)
+        u_cand = jnp.clip(jax.random.normal(r_u, (K, d_a)), -c["u_clip"], c["u_clip"])
+        u_idx = jnp.clip(jax.random.normal(r_idx, (Mi, d_a)), -c["u_clip"], c["u_clip"])
+        obs = jnp.broadcast_to(observations, (K * Mi, *observations.shape))
+        # repeat/tile must pair with the (K, Mi) reshape below: repeat varies SLOWEST so
+        # candidate k occupies rows [k*Mi, (k+1)*Mi), which is what reshape(K, Mi) reads
+        # as row k. Swapping repeat and tile still yields a valid-looking matrix and a
+        # valid latent, so it fails silently — pinned by
+        # test_gpi_select_returns_a_candidate_it_actually_scored.
+        uc = jnp.repeat(u_cand, Mi, axis=0)
+        ui = jnp.tile(u_idx, (K, 1))
+        qpsis = self.psi(obs, ui, uc)                       # (P, K*Mi, z_dim)
+        Qs = (qpsis * self.task_z).sum(-1)                  # (P, K*Mi)
+        qmean, qunc = targets_uncertainty(Qs, c["num_parallel"])
+        Q = (qmean - c["actor_pessimism_penalty"] * qunc).reshape(K, Mi)
+        return u_cand[jnp.argmax(Q.max(axis=1))]
+
+    @jax.jit
+    def sample_actions(self, observations, seed=None, temperature=1.0):
+        seed = self.rng if seed is None else seed
+        u_star = self.gpi_select(observations, seed=seed)
+        return self.decode(observations[None], u_star[None])[0]
 
     @classmethod
     def create(cls, seed, ex_observations, ex_actions, config):

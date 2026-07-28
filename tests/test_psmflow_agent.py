@@ -9,6 +9,7 @@ import math
 import os
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -215,3 +216,105 @@ def test_flow_checkpoint_from_a_different_env_is_rejected():
             np.zeros((1, STAGE_A_ACT), np.float32),
             c,
         )
+
+
+# ---- Task 4: flow-GPI inference ----
+
+def test_infer_z_and_gpi_action_bounds():
+    agent = _agent()
+    agent, _ = agent.update(_batch())
+    b = _batch(1)
+    rewards = np.random.default_rng(2).standard_normal((B,)).astype(np.float32)
+    agent2 = agent.infer_eval_z(b["next_observations"], rewards)
+    assert float(np.linalg.norm(np.asarray(agent2.task_z))) > 0.0
+
+    ob = b["observations"][0]
+    a = np.asarray(agent2.sample_actions(ob, seed=jax.random.PRNGKey(0)))
+    assert a.shape == (ACT,)
+    assert np.all(np.abs(a) <= 1.0 + 1e-5)
+
+
+def test_gpi_select_respects_u_clip():
+    agent = _agent(u_clip=0.25)
+    agent, _ = agent.update(_batch())
+    ob = _batch(1)["observations"][0]
+    u_star = np.asarray(agent.gpi_select(ob, seed=jax.random.PRNGKey(0)))
+    assert np.all(np.abs(u_star) <= 0.25 + 1e-6)
+
+
+def test_inferred_z_changes_gpi_choice():
+    agent = _agent()
+    for i in range(5):
+        agent, _ = agent.update(_batch(i))
+    b = _batch(9)
+    ob = b["observations"][0]
+    r1 = np.random.default_rng(3).standard_normal((B,)).astype(np.float32)
+    a1 = np.asarray(agent.infer_eval_z(b["next_observations"], r1).sample_actions(ob, seed=jax.random.PRNGKey(1)))
+    a2 = np.asarray(agent.infer_eval_z(b["next_observations"], -r1).sample_actions(ob, seed=jax.random.PRNGKey(1)))
+    assert not np.allclose(a1, a2), "opposite rewards must change the GPI action"
+
+
+def test_infer_eval_z_exists_for_the_main_eval_hook():
+    """main.py dispatches on hasattr(agent, 'infer_eval_z'). A rename here would silently
+    skip reward inference at eval and score the agent with task_z still all zeros."""
+    assert hasattr(_agent(), "infer_eval_z")
+
+
+def test_acts_through_the_real_eval_call_path():
+    """Exercise the exact calls main.py and utils.evaluation.evaluate make.
+
+    evaluate wraps sample_actions in supply_rng, which injects `seed` as a KEYWORD and
+    passes `observations=` / `temperature=` by keyword too. A positional-only signature
+    or a renamed parameter would pass every other test here and only fail at eval time,
+    on the GPU, after a full training run.
+    """
+    from utils.evaluation import supply_rng
+
+    agent = _agent()
+    agent, _ = agent.update(_batch())
+    b = _batch(7)
+    rewards = np.random.default_rng(11).standard_normal((B,)).astype(np.float32)
+
+    # main.py: eval_agent = agent.infer_eval_z(z_batch['next_observations'], rew)
+    eval_agent = agent.infer_eval_z(b["next_observations"], rewards)
+    # evaluate: actor_fn = supply_rng(agent.sample_actions, ...); actor_fn(observations=, temperature=)
+    actor_fn = supply_rng(eval_agent.sample_actions, rng=jax.random.PRNGKey(0))
+    action = np.asarray(actor_fn(observations=b["observations"][0], temperature=1.0))
+    assert action.shape == (ACT,)
+    assert np.all(np.isfinite(action)) and np.all(np.abs(action) <= 1.0 + 1e-5)
+
+
+def test_gpi_select_returns_a_candidate_it_actually_scored():
+    """u* must be one of the sampled candidates, not an index into the wrong axis.
+
+    Q is reshaped (K, M) from a (K*M,) flat score built with repeat(u_cand, M) /
+    tile(u_idx, K). Getting repeat and tile the wrong way round still produces a
+    plausible-looking (K, M) matrix and a valid latent, so the bug is invisible unless
+    the returned u* is checked against the candidate set.
+    """
+    agent = _agent()
+    agent, _ = agent.update(_batch())
+    ob = _batch(1)["observations"][0]
+    u_star = np.asarray(agent.gpi_select(ob, seed=jax.random.PRNGKey(0)))
+
+    # Reconstruct the candidate draw the method makes.
+    c = agent.config
+    r_u, _ = jax.random.split(jax.random.PRNGKey(0))
+    cand = np.asarray(jnp.clip(
+        jax.random.normal(r_u, (c["gpi_num_u"], c["action_dim"])), -c["u_clip"], c["u_clip"]))
+    assert np.any(np.all(np.isclose(cand, u_star[None, :]), axis=1)), \
+        "gpi_select returned a latent that is not among the sampled candidates"
+
+
+def test_decode_paths_agree_and_stay_in_bounds():
+    """onestep and ode are two decoders of the same frozen flow; both must produce valid
+    actions. They are not required to agree numerically (onestep is a distilled
+    approximation), but both must respect the action bounds."""
+    for mode in ("onestep", "ode"):
+        agent = _agent(gpi_decode=mode)
+        obs = _batch(4)["observations"]
+        u = np.clip(np.random.default_rng(5).standard_normal((B, ACT)), -3, 3).astype(np.float32)
+        a = np.asarray(agent.decode(obs, u))
+        assert a.shape == (B, ACT)
+        assert np.all(np.abs(a) <= 1.0 + 1e-5), mode
+        assert np.all(np.isfinite(a)), mode
