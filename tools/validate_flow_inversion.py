@@ -21,8 +21,13 @@ Reports three things (RESEARCH_NOTE.md §3.2, write-up §6):
   ess         effective sample size of the EM preimage posterior: how informative the
               epsilon-relaxed preimage distribution is.
 
-Gate (note §5): typicality holds and round-trip is small => inversion is trustworthy
-enough to build the representation on. Otherwise the flow needs capacity / more ODE steps.
+Gate (spec §1): chi2 typicality >= 0.95, round-trip < 0.1, mean ESS > 20 => inversion is
+trustworthy enough to build the representation on. Otherwise the flow needs capacity /
+more ODE steps. `gate_pass` in the report is the conjunction.
+
+The sample is SEEDED off cfg.seed. It did not used to be (Dataset.sample draws from
+global np.random), which made the typicality numbers move run to run and invited reading
+a different batch as a change in the flow.
 """
 import os
 import sys
@@ -34,10 +39,13 @@ import utils.xla_guard  # noqa: F401  -- MUST precede jax (see module docstring)
 import hydra
 import jax
 import jax.numpy as jnp
+import ml_collections
 import numpy as np
+from omegaconf import OmegaConf
 
-from agents.fql import FQLAgent, get_config
+from agents.fql import FQLAgent
 from envs.env_utils import make_env_and_datasets
+from main import _lists_to_tuples
 from utils.datasets import Dataset
 from utils.flax_utils import restore_agent
 
@@ -70,18 +78,29 @@ def main(cfg):
 
     _, _, train_dataset, _ = make_env_and_datasets(cfg.env_name, frame_stack=cfg.frame_stack)
     ds = Dataset.create(**train_dataset)
-    batch = ds.sample(n)
+    # Seeded: Dataset.sample() otherwise draws from global np.random, so every invocation
+    # scored a different batch and the typicality numbers wandered between runs.
+    idxs = np.random.default_rng(int(cfg.seed)).integers(0, ds.size, n)
+    batch = ds.sample(n, idxs=idxs)
     obs = jnp.asarray(batch["observations"])
     act = jnp.asarray(batch["actions"])
 
-    # Build a real FQL agent at the dataset's dims (create derives ob_dims/action_dim).
-    agent_cfg = get_config()
+    # Build the agent from the Hydra `agent` group, NOT fql.get_config(): the net shapes
+    # must match the Stage-A run whose checkpoint we restore below.
+    assert cfg.agent.agent_name == "fql", "run with agent=fql (Stage-A flow shapes)"
+    agent_cfg = ml_collections.ConfigDict(
+        _lists_to_tuples(OmegaConf.to_container(cfg.agent, resolve=True)))
     agent_cfg["flow_steps"] = flow_steps
-    agent = FQLAgent.create(0, obs[:1], act[:1], agent_cfg)
+    agent = FQLAgent.create(int(cfg.seed), obs[:1], act[:1], agent_cfg)
 
     trained = cfg.get("restore_path", None) is not None
     if trained:
         agent = restore_agent(agent, cfg.restore_path, cfg.restore_epoch)
+    else:
+        assert cfg.inversion.get("allow_untrained", False), (
+            "a RANDOM flow is only a control; the typicality test is a statement about a "
+            "FITTED flow. Set restore_path=<stage-A ckpt dir> "
+            "(or inversion.allow_untrained=true to characterize the control).")
 
     # --- round trip: a -> E(s,a) -> G(s,·), with matched step discretization ---
     # jit(vmap), NOT bare vmap: on GPU, un-jitted vmap of this function (lax.scan with an
@@ -107,19 +126,40 @@ def main(cfg):
         )
     ))(obs, act, keys)
 
+    rt_mean = float(jnp.mean(rt))
+    mean_ess = float(jnp.mean(ess))
     report = {
         "flow": "TRAINED" if trained else "RANDOM (control)",
         "env": cfg.env_name,
+        "seed": int(cfg.seed),
         "n": int(obs.shape[0]),
         "action_dim": d_a,
         "flow_steps": flow_steps,
-        "roundtrip_l2_mean": round(float(jnp.mean(rt)), 6),
+        "roundtrip_l2_mean": round(rt_mean, 6),
         "roundtrip_l2_median": round(float(jnp.median(rt)), 6),
         "roundtrip_l2_max": round(float(jnp.max(rt)), 6),
         "typicality": _chi2_report(sq_norms, d_a),
-        "mean_ess": round(float(jnp.mean(ess)), 3),
+        "mean_ess": round(mean_ess, 3),
         "min_ess": round(float(jnp.min(ess)), 3),
     }
+
+    # Gate (spec §1). The typicality term is the fraction inside the central 99% chi^2
+    # band — a coverage statement, deliberately weaker than the KS test above, which
+    # rejects on shape differences too small to matter for training.
+    try:
+        from scipy import stats
+        lo, hi = stats.chi2.ppf(0.005, d_a), stats.chi2.ppf(0.995, d_a)
+        typicality = float(np.mean((sq_norms >= lo) & (sq_norms <= hi)))
+        report["chi2_typicality_99pct_band"] = round(typicality, 4)
+        report["gate_pass"] = bool(typicality >= 0.95 and rt_mean < 0.1 and mean_ess > 20)
+        report["gate_detail"] = {
+            "typicality>=0.95": bool(typicality >= 0.95),
+            "roundtrip<0.1": bool(rt_mean < 0.1),
+            "mean_ess>20": bool(mean_ess > 20),
+        }
+    except ImportError:
+        report["note_gate"] = "scipy unavailable; gate not evaluated"
+
     for k, v in report.items():
         print(f"{k}: {v}")
 
