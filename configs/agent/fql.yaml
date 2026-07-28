@@ -13,4 +13,6 @@ q_agg: mean
 alpha: 10.0            # BC coefficient (tune per environment)
 flow_steps: 10
 normalize_q_loss: false
+bc_only: false         # true => reward-free behaviour-flow pretraining for psmflow
+                       # (no critic, no Q term, never reads rewards/masks)
 encoder: null          # visual encoder name (None, 'impala_small', ...)

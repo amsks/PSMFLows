@@ -62,7 +62,8 @@ class FQLAgent(flax.struct.PyTreeNode):
         x_0, jacobian = self._get_preimage_and_jacobian(state, action, n_steps)
         gram = jacobian.T @ jacobian + 1e-6 * jnp.eye(jacobian.shape[-1], dtype=jacobian.dtype)
         eigvals, eigvecs = jnp.linalg.eigh(gram)
-        cov_eigvals = jnp.clip(1.0 / (alpha ** 2 * eigvals), a_min=0.01, a_max=1.0)
+        # positional bounds: jax removed the a_min/a_max kwargs (broke on jax 0.10).
+        cov_eigvals = jnp.clip(1.0 / (alpha ** 2 * eigvals), 0.01, 1.0)
         cov = (eigvecs * cov_eigvals[None, :]) @ eigvecs.T
         return x_0, cov
     
@@ -127,21 +128,53 @@ class FQLAgent(flax.struct.PyTreeNode):
                 )(samples)
             )(means, covs)
 
-            log_joint = jnp.log(weights[..., None]) + log_likelihoods
+            # Floor the mixture weights: a component that is driven to exactly zero makes
+            # log(weights) = -inf, and then log_joint - log_q is -inf - (-inf) = NaN.
+            safe_weights = jnp.maximum(weights, 1e-12)
+            log_joint = jnp.log(safe_weights[..., None]) + log_likelihoods
             log_q = jax.scipy.special.logsumexp(log_joint, axis=0)
-            responsibilities = jnp.exp(log_joint - log_q[None, :])
-            sample_weights = jax.nn.softmax(log_energy - log_q, axis=0)
+            # A sample far from EVERY component has log_q = -inf, which poisons both the
+            # responsibilities and the importance weights. Fall back to uniform
+            # responsibility and a floored log_q for such samples rather than emitting NaN.
+            q_ok = jnp.isfinite(log_q)
+            log_q = jnp.where(q_ok, log_q, 0.0)
+            responsibilities = jnp.where(
+                q_ok[None, :], jnp.exp(log_joint - log_q[None, :]), 1.0 / n_components)
+            sample_weights = jax.nn.softmax(
+                jnp.where(q_ok, log_energy - log_q, -jnp.inf), axis=0)
             gamma = responsibilities * sample_weights[None, :]
 
             n_k = jnp.sum(gamma, axis=1)
             new_weights = n_k / jnp.sum(n_k)
+            # A component whose responsibility mass collapses gets its scatter divided by a
+            # near-zero n_k, producing a huge or non-PSD covariance; the next iteration's
+            # MultivariateNormalFullCovariance then returns NaN. Measured on
+            # cube-single-play this hit ~1% of transitions (always at the last EM step),
+            # which over precompute_preimages.py's ~1M transitions is ~10k corrupted
+            # latents. Symmetrize and floor the spectrum to keep every component PSD.
+            # The floor must be RELATIVE to the largest eigenvalue, not absolute: this EM
+            # grows the covariance scale by ~4x per iteration (measured: max eigenvalue
+            # 1 -> 6 -> 34 -> 305 -> 2281 -> 6095 over 8 steps), and an absolute 1e-6 floor
+            # against a 6e3 top eigenvalue is a condition number of 1e9, which float32
+            # cannot reconstruct as PSD — the eigendecomposition returns small NEGATIVE
+            # eigenvalues and the next log_prob is NaN. Capping the condition number at
+            # 1e6 keeps every component representable.
+            def _condition(c):
+                c = 0.5 * (c + jnp.swapaxes(c, -1, -2))          # kill asymmetry drift
+                w, v = jnp.linalg.eigh(c)
+                floor = jnp.maximum(jnp.max(w, axis=-1, keepdims=True) * 1e-6, 1e-12)
+                w = jnp.maximum(w, floor)
+                return (v * w[..., None, :]) @ jnp.swapaxes(v, -1, -2)
             new_means = jnp.array([
                 jnp.sum(gamma[k, :, None] * samples, axis=0) / jnp.maximum(n_k[k], 1e-8)
                 for k in range(n_components)
             ])
             new_covs = jnp.array([
-                (gamma[k, :, None] * (samples - new_means[k])).T @ (samples - new_means[k]) / jnp.maximum(n_k[k], 1e-8)
-                + 1e-6 * jnp.eye(action_dim)
+                _condition(
+                    (gamma[k, :, None] * (samples - new_means[k])).T @ (samples - new_means[k])
+                    / jnp.maximum(n_k[k], 1e-8)
+                    + 1e-6 * jnp.eye(action_dim)
+                )
                 for k in range(n_components)
             ])
             ess = 1.0 / jnp.sum(sample_weights ** 2)
@@ -196,6 +229,18 @@ class FQLAgent(flax.struct.PyTreeNode):
         actor_actions = self.network.select('actor_onestep_flow')(batch['observations'], noises, params=grad_params)
         distill_loss = jnp.mean((actor_actions - target_flow_actions) ** 2)
 
+        if self.config['bc_only']:
+            # Reward-free behaviour-flow pretraining (PSMFlows): no critic, no Q term, and
+            # crucially no read of batch['rewards']/['masks'] — the pretraining dataset has
+            # neither. What survives is exactly the flow objective plus its one-step
+            # distillation, which is the G_theta that psmflow later freezes.
+            actor_loss = bc_flow_loss + self.config['alpha'] * distill_loss
+            return actor_loss, {
+                'actor_loss': actor_loss,
+                'bc_flow_loss': bc_flow_loss,
+                'distill_loss': distill_loss,
+            }
+
         # Q loss.
         actor_actions = jnp.clip(actor_actions, -1, 1)
         qs = self.network.select('critic')(batch['observations'], actions=actor_actions)
@@ -230,9 +275,13 @@ class FQLAgent(flax.struct.PyTreeNode):
 
         rng, actor_rng, critic_rng = jax.random.split(rng, 3)
 
-        critic_loss, critic_info = self.critic_loss(batch, grad_params, critic_rng)
-        for k, v in critic_info.items():
-            info[f'critic/{k}'] = v
+        # bc_only: skip the critic branch entirely. Its params stay in the tree (so
+        # checkpoints round-trip into a default-shaped agent) but receive no gradient.
+        critic_loss = 0.0
+        if not self.config['bc_only']:
+            critic_loss, critic_info = self.critic_loss(batch, grad_params, critic_rng)
+            for k, v in critic_info.items():
+                info[f'critic/{k}'] = v
 
         actor_loss, actor_info = self.actor_loss(batch, grad_params, actor_rng)
         for k, v in actor_info.items():
@@ -395,6 +444,9 @@ def get_config():
             alpha=10.0,  # BC coefficient (need to be tuned for each environment).
             flow_steps=100,  # Number of flow steps.
             normalize_q_loss=False,  # Whether to normalize the Q loss.
+            bc_only=False,  # Reward-free behaviour-flow pretraining: drop the critic and the
+            # Q term, keeping bc_flow_loss + alpha*distill_loss. The param tree is unchanged
+            # (critic present but untrained) so checkpoints restore into a default FQL agent.
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
         )
     )

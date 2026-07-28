@@ -119,3 +119,39 @@ def test_batch_exposes_u0_and_u0prime():
     assert b['next_noise_preimage'].shape == (8, 2)
     assert np.all(np.isfinite(b['noise_preimage']))
     assert np.all(np.isfinite(b['next_noise_preimage']))
+
+
+def test_em_posterior_ess_is_finite():
+    """The EM preimage posterior must not produce NaN ESS.
+
+    A component whose responsibility mass collapses divides its scatter by a near-zero
+    n_k, giving a huge / non-PSD covariance; the next iteration's MVN log_prob then
+    returns NaN. Measured at ~1% of real cube-single transitions before the spectrum
+    floor in compute_full_proposal_distribution_em — which would corrupt ~10k latents
+    over a 1M-transition precompute, silently.
+
+    Many components + few samples is the regime that provokes the collapse.
+    """
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+    from agents.fql import FQLAgent, get_config
+
+    cfg = get_config()
+    cfg["flow_steps"] = 10
+    rng = np.random.default_rng(0)
+    obs = jnp.asarray(rng.standard_normal((16, 19)), jnp.float32)
+    act = jnp.asarray(np.clip(rng.standard_normal((16, 5)), -1, 1), jnp.float32)
+    agent = FQLAgent.create(0, obs[:1], act[:1], cfg)
+
+    keys = jax.random.split(jax.random.PRNGKey(0), obs.shape[0])
+    _, covs, _, ess = jax.vmap(
+        lambda s, a, k: agent.compute_full_proposal_distribution_em(
+            s, a, k, num_samples=24, n_steps=12, n_initial_steps=10, alpha=1.0, n_components=4
+        )
+    )(obs, act, keys)
+
+    assert np.all(np.isfinite(np.asarray(ess))), "EM produced non-finite ESS"
+    # every component covariance stays PSD (the property the floor enforces)
+    eigs = np.linalg.eigvalsh(np.asarray(covs))
+    assert np.all(eigs > -1e-8), f"non-PSD covariance: min eig {eigs.min()}"
