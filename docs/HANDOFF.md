@@ -9,15 +9,127 @@ paginate: true
 
 # PSMFlows — Session Handoff
 
-Current work: **PSMFlow v1** (`docs/plans/2026-07-20-psmflow-v1.md`) — Tasks 1 and 2.
-The **affine PSM** cube push (07-22 → 07-26, below) is **PARKED**, not closed: the
-07-26 entry's Findings 3 and 4 (rectangular measure mesh, split x-/(s,a)-branch) are
-still the open leads if we return to it. The older bilinear-PSM parity hunt
-(2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RESEARCH_NOTE.md`
+Current work: **PSMFlow v1** (`docs/plans/2026-07-20-psmflow-v1.md`) — **Tasks 1–8 code
+complete**; the pipeline is now operator-driven (GPU runs + gates), with one open method
+call on the D3 ESS gate. The **affine PSM** cube push (07-22 → 07-26, below) is **PARKED**,
+not closed: the 07-26 entry's Findings 3 and 4 (rectangular measure mesh, split
+x-/(s,a)-branch) are still the open leads if we return to it. The older bilinear-PSM parity
+hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RESEARCH_NOTE.md`
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
 Branch: `feat/psm-integration` · Machine: `midi-01` (UT CS)
-Date: **2026-07-28** (latest) · prior: 2026-07-26, 07-15, 07-13, 07-07
+Date: **2026-07-29** (latest) · prior: 2026-07-28, 07-26, 07-15, 07-13, 07-07
+
+---
+
+<!-- _class: lead -->
+
+## 2026-07-29 session — PSMFlow v1 Tasks 3–8 done; cube preimages landed; D3 ESS gate FAILS
+
+Reference docs: note `PAPER/RESEARCH_NOTE.md` · spec `docs/design/2026-07-20-psmflow-v1-design.md`
+· plan `docs/plans/2026-07-20-psmflow-v1.md`.
+
+| Task | What landed | Commit |
+|---|---|---|
+| 3 | `PSMFlowAgent` core — flow-indexed measure loss, frozen-flow load, jitted update | `0c4f2ba` |
+| 4 | Flow-GPI inference (`infer_z`, `gpi_select`, frozen-flow decode) | `c444a16` |
+| 5 | Chain-MDP ground-truth test (GPI ranks goalward latents) | `b463b87` |
+| 6 | Agent registered, `configs/agent/psmflow.yaml`, `main.py` wiring + smoke | `76310c8` |
+| 7 | Diagnostics D1–D4 | `1f0fd42` |
+| 8 | Stage launchers + this slide | *this commit* |
+
+Suite: **102 passed, 1 skipped.**
+
+---
+
+## The three-stage pipeline — one command each
+
+```bash
+# Stage A — reward-free behaviour flow (FQL bc_only). One seed per GPU.
+SEEDS="0" bash scripts/pretrain_behavior_flow.sh 1 500000 cube-single-play-singletask-v0
+
+# Stage B — invert the flow over the dataset (MUST be flow_steps>=100)
+.venv/bin/python tools/precompute_preimages.py agent=fql \
+    env_name=cube-single-play-singletask-v0 \
+    restore_path='/var/local/amsks/exp/PSMFLows/bcflow_*/sd000_*' restore_epoch=500000 \
+    agent.flow_steps=100 preimage_out=/var/local/amsks/exp/PSMFLows/preimages_cube_single.npz
+
+# Stage C — psmflow representation training
+FLOW_CKPT='/var/local/amsks/exp/PSMFLows/bcflow_cube_single_20260726_135032/sd000_*' \
+FLOW_EPOCH=500000 PREIMAGES=/var/local/amsks/exp/PSMFLows/preimages_cube_single.npz \
+SEEDS="0" bash scripts/launch_psmflow.sh cube-single-play-singletask-v0 1 500000
+```
+
+**Stage A is `pretrain_behavior_flow.sh`, not the plan's `launch_flowbc.sh`** — Task 1 had
+already created it under that name and two tool docstrings cite the path, so Task 8
+extended it (multi-seed, `FLOW_STEPS`/`SAVE_INT`) instead of landing a second launcher for
+the same stage. Both scripts guard their required inputs and exit 1 before JIT.
+
+---
+
+## Diagnostics D1–D4 (Task 7) — all `stdout` JSON, no pytest
+
+| | Tool | Asks |
+|---|---|---|
+| D1 | `tools/validate_flow_fidelity.py` | does the flow reproduce the dataset's action distribution (RBF-MMD, mode-hist TV, off-support frac) |
+| D2 | `tools/eval_fixed_u_rollouts.py` | is a fixed `u` reproducible AND distinct (within-u vs across-u final-state distance) |
+| D3 | `tools/validate_flow_inversion.py` | typicality / round-trip / ESS — carries the spec gate |
+| D4 | `tools/latent_q_sanity.py` | oracle-reward flow-GPI, isolating representation+GPI from reward inference. Gate: ≥50% of FQL on pointmaze-medium |
+
+**D3 is now seeded — and that settles the 07-28 open question.** `Dataset.sample` drew from
+global `np.random`, so every invocation scored a *different batch*; the earlier
+"KS 0.095 → 0.061" reading was that, not a changed flow. Pinned at `seed=0`, cube gives
+p = **3.4e-9** @100 and **6.3e-5** @200 — **A2 IS rejected at both**. This supersedes the
+07-28 slide's "A2 is not rejected at 5% @200" caution. D3 also built its agent from
+`fql.get_config()` rather than the Hydra agent group (same defect fixed in
+`tools/precompute_preimages.py` in `03bfc71`); it now uses `cfg.agent`.
+
+---
+
+## OPEN — the D3 ESS gate FAILS on the real cube flow
+
+| `flow_steps` | roundtrip | χ² band | mean ESS | gate |
+|---|---|---|---|---|
+| 100 | 1.2e-4 | 0.9873 | **7.16** | **FAIL** (needs > 20) |
+| 200 | 7.5e-5 | 0.9912 | **7.14** | **FAIL** (needs > 20) |
+
+Round-trip and typicality pass comfortably; only ESS fails. **Not a regression** — ESS was
+~7 at every `flow_steps`, including settings that never NaN'd. It is the EM's actual
+operating point on cube: `num_clusters=1` fits a 5×5 covariance (15 free parameters) from
+~7 effective samples, and `min_ess=1.0` means some transitions put all posterior mass on a
+single draw. Knobs: `inversion.num_samples` (linear cost) and `inversion.alpha` (flatter
+target ⇒ higher ESS, less sharp posterior).
+
+**ESS is not comparable across environments** — untrained pointmaze reads 16.9, *higher*
+than the trained cube flow, because `d_a` is 2 not 5 and a near-identity flow gives a flat
+posterior. Do not gate on the cross-env comparison.
+
+**The cube preimages were computed at this ESS.**
+`/var/local/amsks/exp/PSMFLows/preimages_cube_single.npz` — 319 MB, n=1,000,000, finished
+07-29 00:47, from the 500k Stage-A ckpt at `flow_steps=100` (`.meta.json` sidecar records
+the full inversion config). **The decision to make before Stage C: is 20 the right
+threshold, or does this get recomputed at larger `num_samples`?** That is a method call,
+not a code one. A recompute is ~10 h wall-clock at last night's rate.
+
+---
+
+## NEXT — Phase A exit (spec §5), operator-driven
+
+1. Stage A flow on **pointmaze-medium** (cube ckpt exists) → **D1 gate** both envs.
+2. **Resolve the ESS question**, then Stage B preimages for pointmaze (+ cube recompute if
+   that is the call) → **D3 gate**.
+3. **D2** rollout report — informational, feeds note §7 risk 1 (does `u` index distinct
+   behaviours at all).
+4. Train psmflow both envs, 500k, 3 seeds → **D4 oracle-GPI gate on pointmaze**.
+5. Zero-shot eval vs in-repo PSM and FB, same envs/steps/seeds; extend
+   `scripts/compare_multiseed.py` to psmflow groups.
+
+Coverage-ladder stress tests and VC-FB comparisons are the *next* spec, once these gates pass.
+
+Caveat carried forward: the landed cube Stage-A ckpt was trained at the FQL default
+`flow_steps=10` and is inverted by overriding to 100 at precompute time. Stage A now
+*trains* at 100 by default (safe only because `utils/xla_guard.py` disables the autotuner —
+see the 07-28 slide), so a re-trained flow will not be step-identical to the current one.
 
 ---
 
