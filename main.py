@@ -58,11 +58,16 @@ def main(cfg: DictConfig):
 
     if config['agent_name'] == 'psmflow':
         # psmflow trains on the preimage-augmented dataset (latents per transition).
-        from utils.flow_inversion import load_augmented_dataset
+        from utils.flow_inversion import load_augmented_dataset, repair_invalid_preimages
         assert config.get('preimage_path'), 'psmflow requires agent.preimage_path (tools/precompute_preimages.py)'
         aug = load_augmented_dataset(config['preimage_path'])
         assert aug['observations'].shape[0] == train_dataset['observations'].shape[0], (
             'preimage npz size mismatch vs env dataset — wrong env or stale file?')
+        # Size check FIRST (it is the wrong-env guard), then neutralize rows whose inversion
+        # diverged. Applied at load, not only in the precompute, so npz files written before
+        # `preimage_valid` existed are covered too: a single NaN latent otherwise NaNs the
+        # whole update, and at batch 1024 over 1M rows a poisoned row lands within ~100 steps.
+        aug, _ = repair_invalid_preimages(aug)
         train_dataset = aug
         val_dataset = None  # val split has no preimages; skip validation logging at v1
 

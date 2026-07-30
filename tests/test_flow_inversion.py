@@ -207,3 +207,40 @@ def test_em_ess_survives_a_diverging_flow_sample(monkeypatch):
     # The diverged sample must be EXCLUDED, not merely tolerated: with 24 samples and one
     # dropped, ESS can never exceed the 23 that remain.
     assert np.all(np.asarray(ess) <= 23.0 + 1e-4), "diverged sample still carries weight"
+
+
+def test_ess_reports_zero_not_num_samples_when_every_sample_is_rejected(monkeypatch):
+    """ESS must not report its BEST value on total failure.
+
+    When no sample is usable, the EM falls back to uniform logits so softmax returns
+    1/num_samples for every sample, and 1/sum(w^2) evaluates to exactly num_samples --
+    the maximum ESS can take. Measured on the cube Stage-A checkpoint: all 13 of the 1M
+    rows whose stored mixture is NaN reported ESS=100/100. D3 gates on mean ESS, so the
+    gate read perfect health on precisely the rows where the inversion had collapsed.
+    """
+    cfg = get_config()
+    cfg["flow_steps"] = 10
+    rng = np.random.default_rng(0)
+    obs = jnp.asarray(rng.standard_normal((4, 19)), jnp.float32)
+    act = jnp.asarray(np.clip(rng.standard_normal((4, 5)), -1, 1), jnp.float32)
+    agent = FQLAgent.create(0, obs[:1], act[:1], cfg)
+
+    # Every sample non-finite == the all-rejected case the fallback exists for.
+    monkeypatch.setattr(
+        FQLAgent, "compute_flow_actions",
+        lambda self, observations, noises: jnp.full_like(jnp.asarray(noises), jnp.nan))
+
+    keys = jax.random.split(jax.random.PRNGKey(0), obs.shape[0])
+    num_samples = 24
+    _, _, _, ess = jax.vmap(
+        lambda s, a, k: agent.compute_full_proposal_distribution_em(
+            s, a, k, num_samples=num_samples, n_steps=3, n_initial_steps=10,
+            alpha=1.0, n_components=3
+        )
+    )(obs, act, keys)
+
+    ess = np.asarray(ess)
+    assert np.all(np.isfinite(ess)), "the failure signal itself must stay finite"
+    np.testing.assert_allclose(ess, 0.0, atol=1e-6)
+    assert not np.any(ess >= num_samples - 1e-4), (
+        "a row with zero usable samples reported the maximum possible ESS")

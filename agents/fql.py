@@ -25,6 +25,17 @@ class FQLAgent(flax.struct.PyTreeNode):
 
         Single example: `state` (ob_dim,), `action` (action_dim,). vmap for batches
         so `jax.jacfwd` gives a per-example (A, A) Jacobian, not the full (B, A, B, A).
+
+        CAN RETURN NaN. The inverse is an implicit-Euler fixed point run for a FIXED 5
+        sweeps with no convergence check, and for some (state, action) it diverges instead
+        of contracting. Measured on the cube Stage-A ckpt at n_steps=100: 13 of 1M dataset
+        transitions (0.0013%), deterministic across rng seeds since nothing here is random.
+        NaN then propagates to the Jacobian, hence to the Laplace proposal built from it in
+        `_get_predistribution_proposal`, hence to every sample of the EM that starts there --
+        so a NaN mixture in the preimage npz means THIS diverged, not that the EM misbehaved.
+        Callers must treat non-finite output as "inversion failed for this row"; see
+        `utils.flow_inversion.compute_preimage_validity`. Raising n_steps reduces but does
+        not eliminate it.
         """
         if self.config['encoder'] is not None:
             state = self.network.select('actor_bc_flow_encoder')(state)
@@ -90,7 +101,10 @@ class FQLAgent(flax.struct.PyTreeNode):
             logits = jnp.where(ok, logits, -jnp.inf)
             logits = jnp.where(jnp.any(ok), logits, jnp.zeros_like(logits))
             weights = jax.nn.softmax(logits, axis=0)
-            ess = 1.0 / jnp.sum(weights ** 2)
+            # Report 0, not num_samples, when NOTHING was usable. The uniform fallback above
+            # makes every weight 1/num_samples, so 1/sum(w^2) evaluates to num_samples --
+            # the metric's BEST attainable value -- on total failure. See the EM variant.
+            ess = jnp.where(jnp.any(ok), 1.0 / jnp.sum(weights ** 2), 0.0)
             new_x_0 = jnp.sum(weights[..., None] * samples, axis=0)
             diff = samples - new_x_0[None, :]
             new_cov = (weights[..., None] * diff).T @ diff + 1e-6 * jnp.eye(cov.shape[-1], dtype=cov.dtype)
@@ -200,7 +214,15 @@ class FQLAgent(flax.struct.PyTreeNode):
                 )
                 for k in range(n_components)
             ])
-            ess = 1.0 / jnp.sum(sample_weights ** 2)
+            # ESS must not report success when the step failed outright. If `ok` is all-False
+            # the fallback at the `logits` line above makes every weight exactly
+            # 1/num_samples, so 1/sum(w^2) == num_samples -- the BEST value the metric can
+            # take -- for a row where every single sample was rejected. Measured on the cube
+            # Stage-A ckpt: all 13 of the 1M rows whose stored mixture is NaN reported
+            # ESS=100/100, deterministically across rng seeds. D3 gates on mean ESS, so the
+            # gate was blind to precisely its worst cases. 0 is the honest floor: a row with
+            # no usable sample has no effective samples.
+            ess = jnp.where(jnp.any(ok), 1.0 / jnp.sum(sample_weights ** 2), 0.0)
             return (new_means, new_covs, new_weights, rng), ess
 
         (means, covs, weights, rng), ess = jax.lax.scan(_em_step, (means, covs, weights, rng), None, length=n_steps)

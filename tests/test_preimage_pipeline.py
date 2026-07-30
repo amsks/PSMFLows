@@ -14,9 +14,12 @@ import pytest
 from agents.fql import FQLAgent, get_config
 from utils.datasets import Dataset
 from utils.flow_inversion import (
+    PREIMAGE_VALID_KEY,
     augment_dataset_with_point_preimage,
     augment_dataset_with_preimage_distribution,
+    compute_preimage_validity,
     load_augmented_dataset,
+    repair_invalid_preimages,
     save_augmented_dataset,
 )
 
@@ -126,6 +129,87 @@ def test_ess_is_persisted_from_the_final_em_step():
     np.testing.assert_allclose(
         aug["preimage_ess"][:8], np.asarray(ref)[:, -1], rtol=1e-5, atol=1e-5
     )
+
+
+def _augmented_with_a_diverged_row(row=3):
+    """A finite augmented dataset with one row poisoned the way a diverged inverse does."""
+    agent, ds = _agent(), _dataset()
+    aug = augment_dataset_with_preimage_distribution(agent, ds, _inv_cfg())
+    aug = augment_dataset_with_point_preimage(agent, aug, _inv_cfg())
+    aug['noise_preimage_mean'][row] = np.nan
+    aug['noise_preimage_cov'][row] = np.nan
+    aug['noise_preimage_point'][row] = np.nan
+    aug['preimage_roundtrip'][row] = np.nan
+    return aug, row
+
+
+def test_validity_mask_flags_exactly_the_diverged_rows():
+    """The flow inverse can diverge; the mask must find those rows and only those.
+
+    `FQLAgent._get_preimage_and_jacobian` runs a fixed 5-sweep implicit-Euler fixed point
+    with no convergence check, and on the cube Stage-A checkpoint 13 of 1M transitions
+    diverge to NaN, which then spreads to every product built on the preimage.
+    """
+    aug, row = _augmented_with_a_diverged_row()
+    valid = compute_preimage_validity(aug)
+
+    assert valid.shape == (N,) and valid.dtype == np.float32
+    assert valid[row] == 0.0
+    assert valid.sum() == N - 1, 'a finite row was flagged, or the diverged row was missed'
+
+
+def test_repair_resets_diverged_rows_to_the_prior_and_marks_them():
+    """A diverged row must become trainable without inventing a preimage for it.
+
+    A NaN latent means we do not know which u produced the action, so the mixture arm gets
+    the N(0, I) prior — the honest posterior under no information. Rows cannot be dropped:
+    `Dataset.sample` pairs each transition with row idx+1, so deleting rows would silently
+    re-pair transitions across the gap.
+    """
+    aug, row = _augmented_with_a_diverged_row()
+    finite_elsewhere = {k: v.copy() for k, v in aug.items() if k.startswith('noise_preimage')}
+
+    # 1 of this fixture's 12 rows is 8.3%, over the production ceiling; the ceiling itself
+    # is exercised by test_repair_aborts_rather_than_masking_a_broken_inversion.
+    out, valid = repair_invalid_preimages(aug, max_invalid_frac=0.5)
+
+    assert valid[row] == 0.0 and out[PREIMAGE_VALID_KEY][row] == 0.0
+    for key, arr in out.items():
+        if key.startswith('noise_preimage') or key.startswith('preimage_'):
+            assert np.all(np.isfinite(arr)), f'{key} still non-finite after repair'
+    # the prior, exactly
+    np.testing.assert_allclose(out['noise_preimage_mean'][row], 0.0)
+    for k in range(out['noise_preimage_cov'].shape[1]):
+        np.testing.assert_allclose(out['noise_preimage_cov'][row, k], np.eye(ACT), atol=0)
+    # and every OTHER row is untouched
+    for key, before in finite_elsewhere.items():
+        others = [i for i in range(N) if i != row]
+        np.testing.assert_array_equal(out[key][others], before[others])
+
+
+def test_repair_aborts_rather_than_masking_a_broken_inversion():
+    """Repair is only defensible for a divergence tail, so it must refuse at scale.
+
+    13/1M rows is a tail. If a large fraction is non-finite the inversion itself is wrong,
+    and silently substituting the prior for those rows would train on fabricated latents
+    while every health scalar looked clean.
+    """
+    aug, _ = _augmented_with_a_diverged_row()
+    aug['noise_preimage_mean'][:] = np.nan  # every row diverged
+
+    with pytest.raises(AssertionError, match='above the'):
+        repair_invalid_preimages(aug)
+
+
+def test_repair_recomputes_validity_for_npz_written_before_the_key_existed():
+    """The cube npz predates `preimage_valid`; loading it must still be safe."""
+    aug, row = _augmented_with_a_diverged_row()
+    assert PREIMAGE_VALID_KEY not in aug
+
+    out, valid = repair_invalid_preimages(aug, max_invalid_frac=0.5)
+
+    assert valid[row] == 0.0
+    assert np.all(np.isfinite(out['noise_preimage_mean']))
 
 
 def test_roundtrip_health_matches_a_direct_decode():

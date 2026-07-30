@@ -19,6 +19,85 @@ def load_augmented_dataset(path):
         return {k: z[k] for k in z.files}
 
 
+#: Per-row 1.0/0.0 mask over every preimage product. Written by the precompute, recomputed
+#: on the fly for npz files that predate it.
+PREIMAGE_VALID_KEY = 'preimage_valid'
+
+#: Above this invalid fraction, a few diverged rows have stopped being a tail artifact and
+#: the inversion itself is wrong; repairing that many rows would hide a real failure.
+MAX_INVALID_PREIMAGE_FRAC = 0.01
+
+
+def compute_preimage_validity(dataset):
+    """Per-row mask: is every preimage product for this transition finite?
+
+    The flow inverse can diverge (see `FQLAgent._get_preimage_and_jacobian`), and NaN
+    propagates from there into the mixture, the point preimage and the round-trip alike.
+    The mask is the CONJUNCTION across all arms present, deliberately: `use_point_preimage`
+    selects an arm at training time, and a shared row set keeps the point-vs-mixture
+    ablation a comparison of representations rather than of two different datasets.
+
+    Returns:
+        valid: (N,) float32 in {0.0, 1.0}.
+    """
+    size = get_size(dataset)
+    valid = np.ones((size,), bool)
+    for key in ('noise_preimage_mean', 'noise_preimage_cov', 'noise_preimage_weights',
+                'noise_preimage_point', 'preimage_roundtrip', 'preimage_ess'):
+        if key in dataset:
+            arr = np.asarray(dataset[key])
+            valid &= np.isfinite(arr).reshape(size, -1).all(axis=1)
+    return valid.astype(np.float32)
+
+
+def repair_invalid_preimages(dataset, max_invalid_frac=MAX_INVALID_PREIMAGE_FRAC):
+    """Make rows whose inversion diverged safe to train on, loudly and in bounded number.
+
+    A NaN latent means the inverse diverged, so we do not know which `u` produced that
+    action. Rows CANNOT simply be dropped: `Dataset.sample` pairs each transition with row
+    `idx + 1` for the next-policy index, so deleting rows would silently re-pair transitions
+    across the gap. Instead the mixture arm is reset to the standard normal PRIOR
+    (mean 0, cov I) — the honest posterior when the data carries no information about `u` —
+    and the point arm, which has no distributional fallback, to 0. Both are recorded in
+    `preimage_valid` so a caller can mask them.
+
+    This is only defensible because the count is tiny; past `max_invalid_frac` it would be
+    papering over a broken inversion, so that aborts instead.
+
+    Returns:
+        (dataset, valid): the dataset with `preimage_valid` set and invalid rows reset.
+    """
+    valid = dataset.get(PREIMAGE_VALID_KEY)
+    valid = compute_preimage_validity(dataset) if valid is None else np.asarray(valid)
+    bad = valid < 0.5
+    n_bad = int(bad.sum())
+    if n_bad:
+        frac = n_bad / len(valid)
+        assert frac <= max_invalid_frac, (
+            f'{n_bad}/{len(valid)} preimages ({frac:.4%}) are non-finite, above the '
+            f'{max_invalid_frac:.2%} ceiling. That is no longer a divergence tail — re-run '
+            'tools/precompute_preimages.py (a higher inversion.n_initial_steps reduces it) '
+            'rather than training on repaired rows.'
+        )
+        print(f'WARNING: {n_bad}/{len(valid)} preimages ({frac:.4%}) diverged to non-finite '
+              f'and were reset to the N(0, I) prior; see preimage_valid.')
+        if 'noise_preimage_mean' in dataset:
+            dataset['noise_preimage_mean'][bad] = 0.0
+        if 'noise_preimage_cov' in dataset:
+            d_a = dataset['noise_preimage_cov'].shape[-1]
+            dataset['noise_preimage_cov'][bad] = np.eye(d_a, dtype=np.float32)
+        if 'noise_preimage_weights' in dataset:
+            k = dataset['noise_preimage_weights'].shape[-1]
+            dataset['noise_preimage_weights'][bad] = 1.0 / k
+        if 'noise_preimage_point' in dataset:
+            dataset['noise_preimage_point'][bad] = 0.0
+        for key in ('preimage_roundtrip', 'preimage_ess'):
+            if key in dataset:
+                dataset[key][bad] = 0.0
+    dataset[PREIMAGE_VALID_KEY] = valid
+    return dataset, valid
+
+
 def sample_preimage_noise(means, covs, weights, rng=None):
     """Sample one preimage-noise vector per transition from its EM Gaussian mixture.
 

@@ -48,6 +48,7 @@ export WANDB_MODE="${WANDB_MODE:-online}"
 export WANDB_DIR="$LOCAL/wandb"
 export WANDB_ENTITY=amsks
 export OGBENCH_DATASET_DIR="$LOCAL/ogbench"
+export MUJOCO_GL=egl            # midi-01 has no DISPLAY; pointmaze builds a renderer
 
 # eval_interval=0 disables eval: task success is meaningless for a reward-free BC flow.
 for seed in "${SEEDS[@]}"; do

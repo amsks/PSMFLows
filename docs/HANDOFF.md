@@ -24,6 +24,124 @@ Date: **2026-07-29** (latest) · prior: 2026-07-28, 07-26, 07-15, 07-13, 07-07
 
 <!-- _class: lead -->
 
+## 2026-07-29 (later) — the D3 ESS gate is an `alpha` problem, not a sample-count problem
+
+Root-caused the failing gate by auditing the stored cube preimages. **`inversion.alpha=1.0`
+is too low by ~20x**, and that single knob accounts for the failure. Chain of measurement:
+
+**1. The flow map is shallow in `u`.** Singular values of J = d(action)/d(noise) at the
+preimage, 4096 cube rows: sigma_max median **0.117**, sigma_min median **0.068**.
+
+**2. So the Laplace proposal carries no information.** cov = (1/alpha^2)(J^T J)^{-1} with
+sigma ~ 0.1 gives eigenvalues ~100, and they are clipped to `[0.01, 1.0]` — for **99.8%** of
+rows *every* eigenvalue is clipped, leaving the proposal exactly the N(0, I) prior. The
+"local Laplace covariance" is adaptive in name only.
+
+**3. And the target is ~10x broader than that proposal.** With
+`||G(s,u) - a|| ~ sigma*||u - u*||`, the target `exp(-alpha*||G(s,u)-a||)` has width
+`1/(alpha*sigma) ~ 10` at alpha=1. A prior-width proposal against a 10x-wider target is
+exactly the regime that collapses ESS — and it explains the EM's measured 4x-per-iteration
+covariance growth as it chases a genuinely broad target.
+
+**4. Raising alpha fixes every symptom monotonically** (512 cube rows, all else as configured):
+
+| alpha | mean ESS | frac ESS>20 | post. width / prior | ‖mu‖ | ‖G(s,mu)-a‖ |
+|---|---|---|---|---|---|
+| **1.0** (as run) | 9.99 | 0.115 | 4.124 | 3.945 | 0.323 |
+| 5.0 | 15.35 | 0.301 | 2.653 | 2.770 | 0.166 |
+| 10.0 | 20.31 | 0.404 | 1.977 | 2.575 | 0.104 |
+| **20.0** | **21.81** | 0.438 | **0.939** | 2.602 | 0.055 |
+| 50.0 | 21.79 | 0.436 | 0.292 | 2.534 | 0.022 |
+
+At alpha=20 the gate passes (mean ESS > 20), the posterior becomes *narrower* than its prior
+for the first time — i.e. starts behaving like a posterior — ‖mu‖ lands near the chi_5
+typical radius of 2.13, and the mean's round-trip improves 6x. ESS saturates by 20; past it
+the posterior over-tightens for nothing. **This is the opposite of the 07-28 note's
+suggestion to lower alpha**; flattening the target raises ESS only by discarding information,
+and is measurably not the mechanism here. Table is recorded in
+`configs/inversion/default.yaml`; the value is left at 1.0 pending the recompute call
+(~10 h / 1M rows, and it invalidates the existing npz).
+
+Two hypotheses checked and **rejected** — worth recording so they are not re-run:
+- *More samples.* ESS tracks posterior geometry, not sampling noise: corr(ESS, cov trace)
+  **+0.33**, corr(ESS, ‖mu‖) **−0.31**, but corr(ESS, ‖a‖) **−0.003** and mean ESS is flat
+  at 9.6–9.8 across 0/1/2/3/4 clipped action dims. `num_samples` buys sqrt(N) against a
+  mismatch it cannot remove.
+- *The flow collapsed to a deterministic policy.* It has not. Varying `u` over the whole
+  typical set moves the action with per-dim sd **0.105**, vs **0.270** for the behaviour data
+  across the 32 nearest states — **39%**, narrower than the data but nowhere near degenerate.
+  The policy family pi_u is real, so `psi(s,u',u)` has something to discriminate. (The small
+  Jacobian invited the opposite conclusion; the nonlinear map over ‖u‖<=3 is what saves it.)
+
+### The 13 NaN rows: root cause found, and it is NOT the EM
+
+`_get_preimage_and_jacobian`'s **implicit-Euler inverse diverges** — a fixed 5 sweeps with no
+convergence check. Traced step by step on row 32009: the preimage, Jacobian, J^T J and the
+whole proposal are already NaN *before EM step 0*. Deterministic: 13/13 poisoned rows
+reproduce across 5 independent rng seeds, 0/13 finite controls ever do. So a NaN mixture in
+an npz means the inverse diverged, not that the EM misbehaved — the earlier attribution to
+`fql.py`'s masking was wrong.
+
+### Fixed this session
+
+- **`preimage_ess` reported 100/100 on total failure** (`fql.py`, both EM and non-EM
+  variants). When no sample is usable the uniform fallback makes every weight
+  `1/num_samples`, so `1/sum(w^2)` evaluates to `num_samples` — the metric's *best* value.
+  All 13 NaN rows scored a perfect 100, so **D3 gated on a metric that was blind to exactly
+  its worst cases**. Now 0.0, with a test that pins it.
+- **NaN latents could reach Stage C** (`utils/flow_inversion.py`, `main.py`,
+  `tools/precompute_preimages.py`). New `preimage_valid` mask + `repair_invalid_preimages`:
+  invalid rows are reset to the N(0, I) prior — the honest posterior under no information —
+  counted, warned about, and **aborted above a 1% ceiling** so this can never quietly paper
+  over a broken inversion. Rows are *not dropped*: `Dataset.sample` pairs each transition
+  with row `idx+1`, so deleting rows would silently re-pair across the gap. Applied at load
+  as well as at write, so the existing cube npz (which predates the key) is covered.
+
+Audit notes: all 999,987 finite stored covariances are Cholesky-able in float32 (0 negative
+eigenvalues), so `sample_preimage_noise` is safe; its unseeded global-`np.random` default is
+fine because `main.py:76` seeds it from `cfg.seed`. `utils/flow_steering.py` discards ESS and
+never checks finiteness — same exposure, but it is WP2 groundwork reachable only from its own
+test, so latent. `tools/validate_flow_fidelity.py`'s `mmd_rbf` ignores `preimage_limit`
+(hardcoded `act[:1024]`), so that one metric is always a 1024-sample estimate.
+
+### D1 — Stage A signs off, but pointmaze is weakly certified
+
+| config | MMD (RBF) | mode-hist TV | off-support @0.2 |
+|---|---|---|---|
+| pointmaze trained @100 | 3.0e-4 | 0.038 | 0.314 |
+| pointmaze RANDOM control | 3.97e-3 | 0.111 | 0.522 |
+| cube trained @100 | 1.5e-4 | 0.016 | 0.473 |
+| cube trained @10 | 2.7e-4 | 0.019 | 0.350 |
+| cube RANDOM control | 1.46e-1 | 0.507 | 0.9995 |
+
+Both trained flows beat their controls (the spec sets no numeric threshold). **Cube's margin
+is ~1000x on MMD; pointmaze's is 13x, and its random control is nearly competent** — with
+`d_a=2` a near-identity flow already reproduces the action marginal, the same reason ESS is
+not comparable across envs. A pointmaze D1 pass certifies much less than a cube one, which
+matters because pointmaze carries the D4 gate. off-support is a real ~31% for pointmaze, not
+a subsample artifact (0.350 @1024 → 0.329 @2048 → 0.314 @4096 → 0.316 @8192). Cube's *local*
+fidelity is worse at flow_steps=100 (0.473) than at 10 (0.350) while global MMD/TV improve —
+and 100 is the setting the preimages ran at.
+
+### Stage A on pointmaze — DONE
+
+500k steps, 1h27m, `flow_steps=100` (inversion-safe from the start, unlike the cube ckpt):
+`/var/local/amsks/exp/PSMFLows/bcflow_pointmaze-medium-navigate_20260729_142219/sd000_20260729_142225`
+wandb `qcmsr46t`. Note `utils/log_utils.py:73` `mkdtemp()`s the wandb dir and so **ignores
+`WANDB_DIR`** repo-wide; offline runs land in `/tmp` and must be copied out before syncing.
+
+### NEXT
+
+1. **Decide alpha** (recommend 20) → recompute cube preimages → D3 gate should pass.
+2. Stage B on pointmaze at the same alpha → D3 there.
+3. **D2** on either ckpt — independent of all the above, and it is what confirms `u` indexes
+   *distinct* policies rather than merely non-degenerate ones.
+4. Then Stage C, D4, zero-shot vs PSM/FB.
+
+---
+
+<!-- _class: lead -->
+
 ## 2026-07-29 session — PSMFlow v1 Tasks 3–8 done; cube preimages landed; D3 ESS gate FAILS
 
 Reference docs: note `PAPER/RESEARCH_NOTE.md` · spec `docs/design/2026-07-20-psmflow-v1-design.md`

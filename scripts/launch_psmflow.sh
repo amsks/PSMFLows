@@ -49,6 +49,7 @@ export WANDB_MODE="$WMODE"
 export WANDB_DIR="$LOCAL/wandb"
 export WANDB_ENTITY=amsks
 export OGBENCH_DATASET_DIR="$LOCAL/ogbench"
+export MUJOCO_GL=egl            # midi-01 has no DISPLAY; pointmaze builds a renderer
 
 for seed in "${SEEDS[@]}"; do
   log="$LOCAL/logs/$GROUP/sd${seed}.log"

@@ -52,6 +52,7 @@ from utils.flax_utils import restore_agent
 from utils.flow_inversion import (
     augment_dataset_with_point_preimage,
     augment_dataset_with_preimage_distribution,
+    repair_invalid_preimages,
     save_augmented_dataset,
 )
 
@@ -100,6 +101,13 @@ def main(cfg):
     out = augment_dataset_with_preimage_distribution(agent, ds, dict(cfg.inversion))
     out = augment_dataset_with_point_preimage(agent, out, dict(cfg.inversion))
 
+    # The flow inverse can diverge on individual transitions and NaN spreads from there
+    # through every product built on it. Record which rows are trustworthy BEFORE writing,
+    # so a training run never has to rediscover it, and abort outright if the count says the
+    # inversion is broken rather than merely tailed.
+    out, valid = repair_invalid_preimages(out)
+    n_bad = int((valid < 0.5).sum())
+
     out_path = cfg.get('preimage_out', 'preimages.npz')
     save_augmented_dataset(out_path, out)
     # Sidecar: which flow produced these latents. Without it an npz is unusable — the
@@ -108,8 +116,10 @@ def main(cfg):
         json.dump(dict(env_name=cfg.env_name, restore_path=str(cfg.restore_path),
                        restore_epoch=cfg.restore_epoch, flow_steps=int(agent_cfg['flow_steps']),
                        inversion=OmegaConf.to_container(cfg.inversion, resolve=True),
-                       num_transitions=int(out['actions'].shape[0])), f, indent=2)
-    print(f"Wrote {out_path} (+ .meta.json), n={out['actions'].shape[0]}")
+                       num_transitions=int(out['actions'].shape[0]),
+                       num_invalid_preimages=n_bad), f, indent=2)
+    print(f"Wrote {out_path} (+ .meta.json), n={out['actions'].shape[0]}, "
+          f"invalid={n_bad}")
 
 
 if __name__ == "__main__":
