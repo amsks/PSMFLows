@@ -160,22 +160,20 @@ figure), `scripts/compare_{multiseed,fb_multiseed,protoxplant}.py` (PSM/FB only)
    `utils/log_utils.py`; default `<hydra run dir>/<tool>.json`). D2 re-run and recovered:
    consistency ratio 0.51 cube / 0.53 pointmaze — u indexes distinct, reproducible
    behaviors. `tools/analyze_preimages.py` also DONE (item 6 below, minus spatial maps).
-2. **`scripts/compare_zeroshot.py`** (P0): step-aligned multi-seed table for
-   psmflow/psm/fb groups — mean ± 95% CI across seeds per step, peak-over-grid per seed,
-   shared-window comparison; reads `eval.csv` from run groups. Replaces the hardwired
-   reference-JSON logic of `compare_multiseed.py` for the new method.
-3. **`tools/viz_latent_value.py`** — the "why" plot for pointmaze (d_a=2, so u-space is
-   directly plottable): heatmap of `max_u' psi(s,u',u)^T w` over a u-grid at chosen states,
-   overlaid with (a) dataset action preimages at that state, (b) the GPI-selected u, (c)
-   the decoded action arrows in the maze frame. Shows in one figure whether GPI selects
-   inside the data manifold and whether the value landscape is smooth in u.
+2. ~~**`scripts/compare_zeroshot.py`**~~ **DONE 08-04**: `label=glob` args, mean ± 95%
+   CI (t-critical) across seeds per shared step, peak-over-grid and final per seed;
+   verified against the FQL baseline (reproduces peak 0.687 ± 0.201).
+3. ~~**`tools/viz_latent_value.py`**~~ **DONE 08-04** (needs a trained Stage-C ckpt to
+   run): Q(u) heatmap over the u-grid at sampled states, dataset preimages of the
+   NEIGHBORS nearest states and the `gpi_select` pick overlaid. Core functions smoke-
+   tested against an untrained agent.
 4. **`tools/viz_policy_rollouts.py`** — eval rollouts rendered in the env with per-step
    annotations: chosen u (colored), predicted `psi^T w`, and for pointmaze the trajectory
-   overlaid on the maze vs dataset trajectories. Success/failure case gallery.
-5. **`tools/calibration_check.py`** — predicted `psi(s,u,u')^T w` vs realized discounted
-   return for the K GPI candidates (main.tex Rem. 9.2: widening gap with K is the
-   adversarial-u failure signature). This is the single most diagnostic plot for "the
-   representation lies to GPI".
+   overlaid on the maze vs dataset trajectories. Success/failure case gallery. (Still to
+   build — needs a trained ckpt to be meaningful.)
+5. ~~**`tools/calibration_check.py`**~~ **DONE 08-04** (needs a trained Stage-C ckpt to
+   run): per-state Pearson/Spearman of predicted score vs realized fixed-u discounted
+   return + realized rank of the GPI pick; scatter figure.
 6. **`tools/analyze_preimages.py`** — npz-level report generalizing
    plot_preimage_intuition: ESS / roundtrip / typicality / validity histograms, Jacobian
    singular-value spectra, and (pointmaze) spatial maps of ESS over the maze — where in
@@ -210,11 +208,10 @@ inversion math**.
 ### 5.2 Confirmed defects — OPEN (prioritized)
 
 **P0 — before/with the next launches:**
-1. **No npz↔checkpoint pairing guard**: `main.py` checks only row count; a preimage npz
-   from a different Stage-A ckpt / alpha vintage loads silently and Stage C trains on
-   mismatched latents with no symptom. The `.meta.json` sidecar exists precisely for this —
-   read it and assert `restore_path`/`flow_steps`/`alpha` against the agent config.
-   Do this before the first real Stage-C launch.
+1. ~~**No npz↔checkpoint pairing guard**~~ **DONE 08-04**: `main.py` now reads the
+   `.meta.json` sidecar and asserts env_name, resolved checkpoint path, and epoch against
+   the agent config (warns if the sidecar is missing). The validity mask also now flags
+   finite-but-diverged point preimages (||u*||² > 100).
 2. HANDOFF + intuition-figure staleness must ship with the pending inversion commit (§1.2).
 
 **P1:**
@@ -247,10 +244,10 @@ reference comment in `utils/flow_inversion.py:171`; D3 spec says "ESS > 20/100" 
 
 ### 5.3 Theory ↔ code gaps (from the PAPER cross-check — ablate or document, don't silently ship)
 
-1. **Pessimism penalties exist in the shipped agent** (`targets_uncertainty` on the
-   measure target, `actor_pessimism_penalty` in `gpi_select`) but appear in neither paper —
-   and the paper's whole positioning is "fix the policy space, not the loss". Ablate at 0
-   or write the paragraph.
+1. **A pessimism penalty exists in the shipped agent** but appears in neither paper — and
+   the paper's whole positioning is "fix the policy space, not the loss". Precisely:
+   training-side `pessimism_penalty` defaults to 0.0 (inert), but `gpi_select` applies
+   `actor_pessimism_penalty=0.5` at inference. Ablate at 0 or write the paragraph.
 2. **`u'` is not drawn from `p0`**: `index_mix_ratio=0.5` mixes permuted dataset
    preimages. Prop. 7.2's C=1 hypothesis is `u' ~ p0` independent. Ablate at 0.
 3. **Box clip (`u_clip=3`) is not the paper's chi-square ball `U_delta`** — the exact
