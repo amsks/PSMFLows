@@ -59,6 +59,27 @@ D3 on both npz.
   `np.random.default_rng()` (OS entropy) — identical seed + weights gave different `w_inf`
   and eval success. Now seeded off the `seed` argument.
 
+### Later same session — D2 recovered (PASSES both envs), preimage analyzer landed
+
+- **D-tools now persist their reports** (`utils/log_utils.py:write_report`; `report_out`
+  config key, default `<hydra run dir>/<tool>.json`) — the class of loss that ate the
+  08-03 D2 numbers is closed. D2's `across` metric also fixed: it averaged over self- and
+  within-u pairs, deflating `across` and flattering the ratio.
+- **D2 re-run on both Stage-A ckpts** (reports in `/data-local/amsks/PSMFLows/logs/`):
+  consistency ratio **0.51 cube / 0.53 pointmaze** (within-u final-state distance ≈ half
+  of across-u). Fixed `u` is reproducible AND distinct — the policy family is real, which
+  answers note §7 risk 1 and gives A3 its first favorable evidence.
+- **`tools/analyze_preimages.py`** (new): full-npz report (ESS/roundtrip/typicality
+  distributions, posterior geometry vs prior and u_clip, correlations) + figure, JSON next
+  to the npz. On the OLD alpha=1 cube npz: mean ESS 9.8, **39% of posterior means outside
+  the u_clip box**, 85% of posteriors wider than the prior — quantifies what the alpha=20
+  recompute restores. Run it on the new npz when they land.
+- **New finding: 8 rows/1M have finite-but-astronomical point preimages** (||u*||² up to
+  1e59; trimmed-mean typicality is healthy at 5.57 vs expected 5). The finiteness-based
+  `preimage_valid` does NOT catch these. P1: extend `compute_preimage_validity` with a
+  typicality bound (e.g. ||u*||² > 100 ⇒ invalid) — do it before point-mode training is
+  ever used; EM-mode Stage C is unaffected (their mixtures are finite).
+
 ### Top open items before Stage C (full list + priorities in the roadmap doc)
 
 1. **npz↔checkpoint pairing guard** in `main.py` — row count is the only check today; a

@@ -26,7 +26,7 @@ in-sample TD Prop. 7.2); Rungs 2–3 and the coverage-ladder benchmark are the n
 | D1 — flow fidelity | **PASSED** both envs (cube margin ~1000x on MMD over random control; pointmaze only 13x — weakly certified because d_a=2) |
 | Stage B — preimages | **RECOMPUTE IN FLIGHT** at alpha=20, N=200 for both envs (tmux `watch_cube` / `watch_pointmaze`, ETA ~12:30 on 08-04, outputs `/data-local/amsks/PSMFLows/preimages_{cube_single,pointmaze_medium}_a20_n200.npz`). The old cube npz (alpha=1, N=100) is superseded. |
 | D3 — inversion gate | **PENDING** on the new npz. History: failed at alpha=1 (ESS ~7); root-caused to proposal/target width mismatch; see §1.1 for today's twist. |
-| D2 — fixed-u rollouts | **RUN BUT LOST** (08-03): the tool prints JSON to stdout only and stdout wasn't captured. Must re-run with output persisted. |
+| D2 — fixed-u rollouts | **PASSED both envs** (re-run 08-04 with persisted reports): consistency ratio 0.51 cube / 0.53 pointmaze — fixed u is reproducible and distinct. Reports in `/data-local/amsks/PSMFLows/logs/d2_*.json`. |
 | Stage C — psmflow training | **NOT STARTED** (only a 2k-step plumbing smoke on 08-03). |
 | D4 — oracle-GPI gate | Denominator now exists: FQL on pointmaze-medium, 3 seeds x 500k, mean peak **0.687 ± 0.081 sd** → gate = **peak ≥ 0.34** (50-episode evals on the 50k grid). |
 | Zero-shot vs PSM/FB | Not started; `scripts/compare_multiseed.py` does not support psmflow groups yet. |
@@ -156,9 +156,10 @@ figure), `scripts/compare_{multiseed,fb_multiseed,protoxplant}.py` (PSM/FB only)
 
 **To build, in priority order:**
 
-1. **`report_out` flag on all four D-tools** (P0, ~30 min): write the JSON report next to
-   the checkpoint (`<ckpt_dir>/d3_report.json` etc.). The D2 results were already lost once
-   to stdout; gates must leave artifacts. (Interim: always `| tee`.)
+1. ~~**`report_out` flag on all four D-tools**~~ **DONE 08-04** (`write_report` in
+   `utils/log_utils.py`; default `<hydra run dir>/<tool>.json`). D2 re-run and recovered:
+   consistency ratio 0.51 cube / 0.53 pointmaze — u indexes distinct, reproducible
+   behaviors. `tools/analyze_preimages.py` also DONE (item 6 below, minus spatial maps).
 2. **`scripts/compare_zeroshot.py`** (P0): step-aligned multi-seed table for
    psmflow/psm/fb groups — mean ± 95% CI across seeds per step, peak-over-grid per seed,
    shared-window comparison; reads `eval.csv` from run groups. Replaces the hardwired
