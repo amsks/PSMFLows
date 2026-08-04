@@ -88,7 +88,16 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
     def sample_step_inputs(self, batch, rng):
         c = self.config
         B, adim = batch["observations"].shape[0], c["action_dim"]
-        u_data = jnp.asarray(batch["noise_preimage"])
+        # Clip HERE, not only on u_index below: `u_clip` is documented as the typical-set
+        # clamp on ALL latent draws, and u_data goes straight into psi(obs, u_idx, u) while
+        # the bootstrap target only ever sees psi(next_obs, u_idx, u_idx) with u_idx already
+        # clipped. Leaving u_data raw gives the online branch inputs the target branch never
+        # sees, and the stored EM mixtures are broad enough for that to be catastrophic:
+        # sampled |u| reaches 377 per-dim on pointmaze (43% of rows exceed u_clip, 6.5%
+        # exceed 10), which drove psm_offdiag from ~300 to 3.5e7 and left psm_diag flat
+        # instead of descending. Clipping restores train/target consistency; it does NOT fix
+        # the underlying mixture calibration (cov trace 15.9 vs a prior trace of 2.0).
+        u_data = jnp.clip(jnp.asarray(batch["noise_preimage"]), -c["u_clip"], c["u_clip"])
         r_mix, r_gauss, r_perm, r_tail = jax.random.split(rng, 4)
         gauss = jax.random.normal(r_gauss, (B, adim))
         perm = jax.random.permutation(r_perm, B)

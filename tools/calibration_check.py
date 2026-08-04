@@ -87,9 +87,10 @@ def main(cfg):
     gamma = float(config["discount"])
     onestep = jax.jit(agent.decode)
     rng = np.random.default_rng(int(cfg.seed))
+    d_a = int(agent.config["action_dim"])  # null in the yaml; create() fills it
     states, preds, reals = [], [], []
     for si in range(NUM_STATES):
-        u_cand = np.clip(rng.standard_normal((NUM_CAND, int(config["action_dim"]))),
+        u_cand = np.clip(rng.standard_normal((NUM_CAND, d_a)),
                          -float(config["u_clip"]), float(config["u_clip"])).astype(np.float32)
         ob0, _ = eval_env.reset(seed=int(cfg.seed) * 1000 + si)
         pred = _score(agent, jnp.asarray(ob0), jnp.asarray(u_cand),

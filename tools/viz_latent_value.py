@@ -86,7 +86,8 @@ def main(cfg):
     lim = float(config["u_clip"])
     ax0 = np.linspace(-lim, lim, GRID)
     uu, vv = np.meshgrid(ax0, ax0)
-    d_a = int(config["action_dim"])
+    # action_dim is null in the yaml; create() fills it into the AGENT's config.
+    d_a = int(agent.config["action_dim"])
     u_grid = np.zeros((GRID * GRID, d_a), np.float32)
     u_grid[:, 0], u_grid[:, 1] = uu.ravel(), vv.ravel()
 
