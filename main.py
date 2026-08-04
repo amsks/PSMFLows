@@ -63,6 +63,31 @@ def main(cfg: DictConfig):
         aug = load_augmented_dataset(config['preimage_path'])
         assert aug['observations'].shape[0] == train_dataset['observations'].shape[0], (
             'preimage npz size mismatch vs env dataset — wrong env or stale file?')
+        # Pairing guard: latents are only meaningful for the EXACT flow that produced them.
+        # The row count above catches wrong-env; the .meta.json sidecar catches the silent
+        # case — same env, different Stage-A seed/epoch or inversion vintage — which would
+        # otherwise train the whole representation on another flow's latents with no
+        # symptom except bad results.
+        import glob as _glob
+        meta_path = str(config['preimage_path']) + '.meta.json'
+        if os.path.exists(meta_path):
+            with open(meta_path) as f:
+                meta = json.load(f)
+            assert meta.get('env_name') == cfg.env_name, (
+                f"preimage npz was computed on {meta.get('env_name')!r}, not {cfg.env_name!r}")
+            ckpt = config.get('flow_ckpt_path')
+            if ckpt and meta.get('restore_path'):
+                ours = {os.path.realpath(p) for p in _glob.glob(str(ckpt))}
+                theirs = {os.path.realpath(p) for p in _glob.glob(str(meta['restore_path']))}
+                assert ours & theirs, (
+                    f"preimage npz was inverted from {meta['restore_path']!r} but "
+                    f"agent.flow_ckpt_path={ckpt!r} resolves elsewhere — mismatched flow")
+                assert int(meta.get('restore_epoch') or 0) == int(config.get('flow_ckpt_epoch') or 0), (
+                    f"preimage npz used restore_epoch={meta.get('restore_epoch')} but "
+                    f"agent.flow_ckpt_epoch={config.get('flow_ckpt_epoch')}")
+        else:
+            print('WARNING: preimage npz has no .meta.json sidecar; cannot verify it '
+                  'matches agent.flow_ckpt_path — proceed only if you are sure.')
         # Size check FIRST (it is the wrong-env guard), then neutralize rows whose inversion
         # diverged. Applied at load, not only in the precompute, so npz files written before
         # `preimage_valid` existed are covered too: a single NaN latent otherwise NaNs the

@@ -47,6 +47,13 @@ def compute_preimage_validity(dataset):
         if key in dataset:
             arr = np.asarray(dataset[key])
             valid &= np.isfinite(arr).reshape(size, -1).all(axis=1)
+    if 'noise_preimage_point' in dataset:
+        # Finiteness is not enough for the point arm: the implicit-Euler inverse can blow
+        # up to huge FINITE values (measured ||u*||^2 ~ 1e59 on 8/1M alpha=1 cube rows)
+        # without reaching NaN. chi^2_{d_a} mass above 100 is ~0 for any action dim here,
+        # so every such row is a diverged inverse, not an atypical-but-real latent.
+        sq = (np.asarray(dataset['noise_preimage_point'], np.float64) ** 2).sum(-1)
+        valid &= ~(sq > 100.0)
     return valid.astype(np.float32)
 
 
