@@ -28,7 +28,7 @@ from agents.psm import (
 )
 from utils.flax_utils import TrainState, nonpytree_field
 from utils.networks import ActorVectorField
-from utils.psm_networks import PhiMap, PsiMap
+from utils.psm_networks import FlowVectorField, NoiseConditionedActor, PhiMap, PsiMap
 
 
 @flax.struct.dataclass
@@ -37,9 +37,15 @@ class StepInputs:
 
     u_data:  (B, d_a) dataset latent (preimage of the batch action)
     u_index: (B, d_a) policy-index latent u' (mixed Gaussian/behavior, clipped)
+    task_w:  (B, z_dim) task vector for the amortized actor (mixed Gaussian/phi-goal)
+    flow_*:  CFM draws for the actor's latent-space BC velocity field
     """
     u_data: Any
     u_index: Any
+    task_w: Any
+    flow_x0: Any
+    flow_t: Any
+    flow_noise: Any
 
 
 class PSMFlowAgent(flax.struct.PyTreeNode):
@@ -48,6 +54,8 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
     psi: TrainState
     target_phi: Any
     target_psi: Any
+    actor: TrainState       # amortized LATENT actor (s, w, noise) -> u (flowBC recipe, Rung 3)
+    actor_vf: TrainState    # CFM velocity field over preimage latents (the actor's BC anchor)
     flow_vf: Any        # FROZEN params: multi-step BC velocity field (ODE decode)
     flow_onestep: Any   # FROZEN params: one-step distilled decoder (fast decode)
     task_z: Any         # (z_dim,) eval task vector w, set via infer_eval_z
@@ -79,16 +87,78 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
 
     def sample_step_inputs(self, batch, rng):
         c = self.config
-        B = batch["observations"].shape[0]
+        B, adim = batch["observations"].shape[0], c["action_dim"]
         u_data = jnp.asarray(batch["noise_preimage"])
-        r_mix, r_gauss, r_perm = jax.random.split(rng, 3)
-        gauss = jax.random.normal(r_gauss, (B, c["action_dim"]))
+        r_mix, r_gauss, r_perm, r_tail = jax.random.split(rng, 4)
+        gauss = jax.random.normal(r_gauss, (B, adim))
         perm = jax.random.permutation(r_perm, B)
         behavior = u_data[perm]  # behavior-biased indices (analog of PSM/FB z-mixing)
         mask = (jax.random.uniform(r_mix, (B,)) < c["index_mix_ratio"])[:, None]
         u_index = jnp.where(mask, behavior, gauss)
         u_index = jnp.clip(u_index, -c["u_clip"], c["u_clip"])
-        return StepInputs(u_data=u_data, u_index=u_index)
+        # Task vector for the amortized actor: Gaussian, with a mix_ratio fraction replaced
+        # by project_z(phi(next_obs[perm])) — the same sample_mixed_z recipe PSM/FB train
+        # their actors on. stop_gradient: the actor branch must not shape the basis.
+        r_w, r_wmix, r_wperm, r_x0, r_t, r_noise = jax.random.split(r_tail, 6)
+        gauss_w = project_z(jax.random.normal(r_w, (B, c["z_dim"])), c["norm_z"])
+        wperm = jax.random.permutation(r_wperm, B)
+        goal_w = project_z(jax.lax.stop_gradient(self.phi(batch["next_observations"]))[wperm],
+                           c["norm_z"])
+        wmask = (jax.random.uniform(r_wmix, (B,)) < c["actor"]["task_mix_ratio"])[:, None]
+        task_w = jnp.where(wmask, goal_w, gauss_w)
+        return StepInputs(
+            u_data=u_data, u_index=u_index, task_w=task_w,
+            flow_x0=jax.random.normal(r_x0, (B, adim)),
+            flow_t=jax.random.uniform(r_t, (B, 1)),
+            flow_noise=jax.random.normal(r_noise, (B, adim)))
+
+    def flow_actor_loss(self, batch, sampled, actor_params, vf_params):
+        """flowBC actor (fb_flowbc recipe), transposed to LATENT space.
+
+        Same three terms as agents/psm.py:flow_actor_loss, with the action space
+        replaced by the flow's latent space:
+          - CFM velocity field v(s, x_t, t) trained toward the dataset PREIMAGE latents
+            u_data — the latent-space behavior distribution. (Under an exact flow this is
+            N(0, I) everywhere; measured, it is not — D3 — which is exactly why the BC
+            anchor is worth learning rather than assuming.)
+          - one-step NoiseConditionedActor(s, w, noise) -> tanh * u_clip, distilled from
+            the vf's Euler rollout.
+          - Q term: the DIAGONAL score psi(s, u_a, u_a)^T w — the value of committing to
+            index u_a — with the same ensemble pessimism as gpi_select.
+        psi is read at fixed params (no gradient); the frozen flow is untouched. Deployed
+        action = flow decode of the actor's latent, so it stays data-like by construction.
+        """
+        c = self.config
+        obs = batch["observations"]
+        w = sampled.task_w
+        x0, t, noise = sampled.flow_x0, sampled.flow_t, sampled.flow_noise
+        steps = c["actor"]["flow_steps"]
+        u_clip = c["u_clip"]
+
+        def rollout(vf_p, o, n):
+            u = n
+            for i in range(steps):
+                ti = jnp.full((o.shape[0], 1), i / steps)
+                u = u + self.actor_vf(o, u, ti, params=vf_p) / steps
+            return jnp.clip(u, -u_clip, u_clip)
+
+        # CFM toward the dataset's latents (u_data plays the role of the data action).
+        x1 = sampled.u_data
+        xt = (1 - t) * x0 + t * x1
+        pred = self.actor_vf(obs, xt, t, params=vf_params)
+        bc_flow_loss = jnp.mean((pred - (x1 - x0)) ** 2)
+
+        u_a = u_clip * self.actor(obs, w, noise, params=actor_params)
+        # psi at its stored params: the DPG gradient reaches the actor THROUGH psi's
+        # inputs; psi's own params are outside the argnums and receive no gradient.
+        Qs = (self.psi(obs, u_a, u_a) * w).sum(-1)  # (P, B)
+        qmean, qunc = targets_uncertainty(Qs, c["num_parallel"])
+        Q = qmean - c["actor_pessimism_penalty"] * qunc
+        q_loss = -Q.mean() / jax.lax.stop_gradient(jnp.abs(Qs).mean() + 1e-8)
+        distill = jnp.mean((u_a - jax.lax.stop_gradient(rollout(vf_params, obs, noise))) ** 2)
+        loss = q_loss + c["actor"]["bc_coeff"] * distill + bc_flow_loss
+        return loss, {"actor_loss": loss, "actor_q": Q.mean(),
+                      "actor_bc_flow_loss": bc_flow_loss, "actor_bc_error": distill}
 
     def apply_update(self, batch, sampled):
         tau = self.config["tau"]
@@ -98,7 +168,16 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         psi = self.psi.apply_gradients(grads=g_psi)
         target_phi = polyak_update(phi.params, self.target_phi, tau)
         target_psi = polyak_update(psi.params, self.target_psi, tau)
-        return self.replace(phi=phi, psi=psi, target_phi=target_phi, target_psi=target_psi), info
+        new = self.replace(phi=phi, psi=psi, target_phi=target_phi, target_psi=target_psi)
+        if self.config["actor"]["enabled"]:
+            # Actor branch at the PRE-update psi (PSM's no-interleave convention).
+            (_, a_info), (g_a, g_vf) = jax.value_and_grad(
+                self.flow_actor_loss, argnums=(2, 3), has_aux=True)(
+                batch, sampled, self.actor.params, self.actor_vf.params)
+            new = new.replace(actor=new.actor.apply_gradients(grads=g_a),
+                              actor_vf=new.actor_vf.apply_gradients(grads=g_vf))
+            info = {**info, **a_info}
+        return new, info
 
     @jax.jit
     def update(self, batch):
@@ -166,7 +245,14 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
     @jax.jit
     def sample_actions(self, observations, seed=None, temperature=1.0):
         seed = self.rng if seed is None else seed
-        u_star = self.gpi_select(observations, seed=seed)
+        if self.config["acting"] == "actor":
+            # Rung 3: one shot through the amortized latent actor, then decode.
+            assert self.config["actor"]["enabled"], "acting=actor needs actor.enabled=true"
+            noise = jax.random.normal(seed, (1, self.config["action_dim"]))
+            u_star = self.config["u_clip"] * self.actor(
+                observations[None], self.task_z[None], noise)[0]
+        else:
+            u_star = self.gpi_select(observations, seed=seed)
         return self.decode(observations[None], u_star[None])[0]
 
     @classmethod
@@ -188,6 +274,25 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
                                 tx=optax.adam(config["lr_phi"]))
         psi = TrainState.create(psi_def, psi_def.init(rpsi, ex_observations, ex_u, ex_u)["params"],
                                 tx=optax.adam(config["lr_sf"]))
+
+        # Amortized latent actor (flowBC recipe over latents). Always created so the
+        # checkpoint tree shape does not depend on actor.enabled; only updated/acted with
+        # when enabled.
+        rng, ractor, ravf = jax.random.split(rng, 3)
+        ex_w = jnp.zeros((ex_observations.shape[0], z_dim))
+        actor_def = NoiseConditionedActor(
+            action_dim=action_dim, hidden_dim=config["actor"]["hidden_dim"],
+            hidden_layers=config["actor"]["hidden_layers"],
+            embedding_layers=config["actor"]["embedding_layers"])
+        actor_vf_def = FlowVectorField(
+            action_dim=action_dim, hidden_dim=config["actor"]["vf_hidden_dim"],
+            hidden_layers=config["actor"]["vf_hidden_layers"])
+        actor = TrainState.create(
+            actor_def, actor_def.init(ractor, ex_observations, ex_w, ex_u)["params"],
+            tx=optax.adam(config["lr_actor"]))
+        actor_vf = TrainState.create(
+            actor_vf_def, actor_vf_def.init(ravf, ex_observations, ex_u, ex_u[..., :1])["params"],
+            tx=optax.adam(config["lr_actor_vf"]))
 
         # FROZEN behavior flow (FQL Stage-A checkpoint). Defs are rebuilt from config;
         # shapes must match the checkpointed run.
@@ -214,6 +319,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         config["action_dim"] = action_dim
         return cls(rng=rng, phi=phi, psi=psi,
                    target_phi=copy.deepcopy(phi.params), target_psi=copy.deepcopy(psi.params),
+                   actor=actor, actor_vf=actor_vf,
                    flow_vf=flow_vf, flow_onestep=flow_onestep,
                    task_z=jnp.zeros((z_dim,), jnp.float32),
                    config=flax.core.FrozenDict(config),
@@ -272,8 +378,16 @@ def get_config():
             norm_z=True,
             lr_phi=1.0e-5,
             lr_sf=1.0e-4,
+            lr_actor=1.0e-4,
+            lr_actor_vf=3.0e-4,
             phi=dict(hidden_dim=256, hidden_layers=2),
             sf=dict(hidden_dim=1024, hidden_layers=1, embedding_layers=2),
+            # amortized latent actor (flowBC recipe over latents, Rung 3). Off by default:
+            # v1 inference is flow-GPI; enable for the actor ablation / deployment path.
+            actor=dict(enabled=False, hidden_dim=512, hidden_layers=2, embedding_layers=2,
+                       vf_hidden_dim=512, vf_hidden_layers=4, flow_steps=10,
+                       bc_coeff=1.0, task_mix_ratio=0.5),
+            acting="gpi",            # gpi | actor
             # frozen behavior flow (must match the Stage-A fql bc_only run)
             flow=dict(hidden_dims=(512, 512, 512, 512), value_hidden_dims=(512, 512, 512, 512),
                       layer_norm=False, critic_layer_norm=True),

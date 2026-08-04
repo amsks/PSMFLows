@@ -80,6 +80,26 @@ D3 on both npz.
   typicality bound (e.g. ||u*||² > 100 ⇒ invalid) — do it before point-mode training is
   ever used; EM-mode Stage C is unaffected (their mixtures are finite).
 
+### Later still — amortized flowBC LATENT actor (Rung 3), off by default
+
+`agents/psmflow.py` now carries the fb_flowbc actor recipe transposed to latent space
+(`actor.enabled`, default **false** — v1 inference stays flow-GPI, and the pending Stage-C
+launches are unaffected):
+
+- `actor_vf` = FlowVectorField, CFM toward the dataset **preimage latents** (the
+  latent-space behavior distribution — N(0,I) only under a perfect flow, so worth
+  learning); `actor` = NoiseConditionedActor(s, w, noise) → tanh·u_clip.
+- Actor loss mirrors `psm.flow_actor_loss`: −Q/|Q| + bc_coeff·distill + bc_flow_loss,
+  with Q = the **diagonal** score ψ(s,u_a,u_a)ᵀw (value of committing to index u_a),
+  same ensemble pessimism as gpi_select. ψ/φ take no actor gradients; flow frozen.
+- w per batch = PSM's sample_mixed_z (task_mix_ratio phi(next_obs[perm]) vs random unit z).
+- `acting: gpi | actor` switches deployment; both decode through the frozen flow, so
+  actions stay data-like either way. Knobs in `configs/agent/psmflow.yaml` under `actor:`;
+  reference cube used bc_coeff **3.0** (our default 1.0 — sweep when the ablation runs).
+- Tests: `tests/test_psmflow_actor.py` — disabled default is a no-op; enabled trains only
+  (actor, actor_vf) with psi deltas byte-identical to the disabled run; acting=actor
+  emits a boxed latent and a valid action.
+
 ### Top open items before Stage C (full list + priorities in the roadmap doc)
 
 1. **npz↔checkpoint pairing guard** in `main.py` — row count is the only check today; a

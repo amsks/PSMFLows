@@ -104,7 +104,9 @@ stale on both counts.
    the "we don't need conservatism" positioning); `index_mix_ratio` = 0 (paper assumes
    `u' ~ p0`; code mixes 50% permuted dataset preimages); one-step vs multi-step ODE
    decode; u'-codebook vs PSM hash codebook (main.tex Rem. 8.1 calls this "the ablation
-   to run first"); point-preimage vs EM posterior.
+   to run first"); point-preimage vs EM posterior; flow-GPI vs the amortized flowBC
+   latent actor (Rung 3, `agent.actor.enabled=true agent.acting=actor`, added 08-04 —
+   sweep bc_coeff {1, 3}, the reference cube value is 3).
 10. **Antmaze + cube-double** expansion once pointmaze/cube-single numbers exist.
 
 ### Phase C — paper

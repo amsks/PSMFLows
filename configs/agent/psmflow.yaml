@@ -11,6 +11,8 @@ norm_z: true
 
 lr_phi: 1.0e-5
 lr_sf: 1.0e-4
+lr_actor: 1.0e-4
+lr_actor_vf: 3.0e-4
 
 phi:
   hidden_dim: 256
@@ -19,6 +21,21 @@ sf:
   hidden_dim: 1024
   hidden_layers: 1
   embedding_layers: 2
+
+# Amortized LATENT actor (flowBC recipe over latents, Rung 3). Off by default: v1
+# inference is flow-GPI; enable for the actor ablation / deployment path. The actor emits
+# u in [-u_clip, u_clip]; the deployed action is the frozen flow's decode of that u.
+actor:
+  enabled: false
+  hidden_dim: 512
+  hidden_layers: 2
+  embedding_layers: 2
+  vf_hidden_dim: 512
+  vf_hidden_layers: 4
+  flow_steps: 10           # Euler steps for the latent-BC ODE distillation target
+  bc_coeff: 1.0            # distillation weight (reference cube value is 3.0)
+  task_mix_ratio: 0.5      # P(w from phi(next_obs[perm])) vs random unit z
+acting: gpi                # gpi | actor
 
 # FROZEN behavior flow — must match the Stage-A `agent=fql agent.bc_only=true` run.
 flow:
