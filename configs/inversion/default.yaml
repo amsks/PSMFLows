@@ -1,26 +1,46 @@
 num_clusters: 1
 # Inverse temperature of the preimage target pi(u) ~ exp(-alpha*||G(s,u) - a||).
-# MEASURED TOO LOW ON CUBE, and it is what fails the D3 ESS gate. Near the preimage
+# At alpha=1 the target is far broader than the proposal: near the preimage
 # ||G(s,u) - a|| ~ sigma*||u - u*|| with sigma = ||d(action)/d(noise)|| ~ 0.1 (median
 # singular value 0.068 on the Stage-A cube ckpt), so the target's width in u-space is
-# ~1/(alpha*sigma) ~ 10 at alpha=1: an order of magnitude BROADER than the N(0,I) prior,
-# while the Laplace proposal is clipped to exactly the prior for 99.8% of rows. A narrow
-# proposal against a broad target is what collapses ESS. Sweep over 512 cube rows,
-# everything else as configured:
-#     alpha    mean ESS   frac ESS>20   post. width/prior   ||mu||   ||G(s,mu)-a||
-#       1.0        9.99         0.115               4.124    3.945          0.323
-#       5.0       15.35         0.301               2.653    2.770          0.166
-#      10.0       20.31         0.404               1.977    2.575          0.104
-#      20.0       21.81         0.438               0.939    2.602          0.055
-#      50.0       21.79         0.436               0.292    2.534          0.022
-# ESS saturates by ~20 (the D3 gate needs mean > 20) and the posterior first becomes
-# narrower than its prior there, i.e. starts behaving like a posterior at all; past 20 it
-# over-tightens for no ESS gain. NOTE this is the OPPOSITE direction from lowering alpha to
-# flatten the target -- that raises ESS only by discarding information, and is measurably
-# not what is happening here. Changing this invalidates existing preimage npz files
-# (~10 h to recompute 1M rows), so it is left at the as-run value pending that call.
-alpha: 1.0
-num_samples: 100
+# ~1/(alpha*sigma) ~ 10 -- an order of magnitude BROADER than the N(0,I) prior, while the
+# Laplace proposal is clipped to exactly the prior for 99.8% of rows. A narrow proposal
+# against a broad target is what collapses ESS. Raising alpha fixes that, and also sharpens
+# the point preimage (||G(s,mu)-a||), which is why it is set high here.
+#
+# Sweep re-measured 2026-08-03 on the first 512 cube rows, num_clusters=1, num_samples=100
+# (TRACE-MEAN ESS -- see the 2026-08-04 CORRECTION below; final-step ESS runs higher):
+#     alpha    mean ESS   median   frac ESS>20   ESS/N
+#       1.0        9.23     7.46         0.084   0.092
+#       5.0       13.19    10.36         0.218   0.132
+#      10.0       17.42    13.75         0.337   0.174
+#      20.0       18.39    14.26         0.361   0.184
+#      50.0       17.84    13.62         0.348   0.178
+#     100.0       18.39    14.08         0.360   0.184
+#
+# SUPERSEDES an earlier table here that read ~21.8 at alpha=20 and concluded alpha alone
+# clears the gate: that table was produced with the pre-fix `preimage_ess`, which returned
+# exactly `num_samples` -- its best value -- for rows where no sample was usable.
+#
+# CORRECTION 2026-08-04: the table ABOVE (and the 49.3/82.0 below) is the TRACE-MEAN ESS.
+# validate_flow_inversion.py used to average over all 10 EM iterations, but Stage B stores
+# (and precompute_preimages.py persists) only the FINAL iterate, and ESS improves across
+# iterations -- so the tool understated the stored posterior. It now gates on ess[:, -1].
+# Re-measured on the cube Stage-A ckpt (256 rows, seed 0), alpha=20, N=100: final-step
+# mean ESS 21.7 (trace-mean 17.7) -- the D3 gate PASSES at N=100, marginally. So the
+# 08-03 reading "ESS saturates ~18.4 and NO alpha reaches 20" was an artifact of the trace
+# statistic, and the 07-29 conclusion "alpha=20 clears the gate" was directionally right
+# (its 21.8 number was still inflated by the pre-fix metric; the honest value is ~21.7).
+#
+# num_samples buys MARGIN, linearly: ESS ~ N / (1 + CV^2(w)), and per-sample efficiency
+# also improves because the EM fits a better proposal from more draws -- trace-mean ESS/N
+# at alpha=20 goes 0.184 (N=100) -> 0.264 (N=200) -> 0.341 (N=400). At alpha=20, N=200
+# the gate passes comfortably on both envs (trace-mean 49.3 cube / 82.0 pointmaze;
+# final-step higher still). N=200 is kept for headroom over the marginal N=100 pass; cost
+# is linear, ~19.5 h per 1M rows at batch_size=256 (17.95 s / 256 rows vs 9.02 s at N=100).
+# Changing either knob invalidates existing preimage npz files.
+alpha: 20.0
+num_samples: 200
 n_steps: 10
 n_initial_steps: 100
 batch_size: 256

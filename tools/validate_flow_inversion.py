@@ -119,15 +119,33 @@ def main(cfg):
     sq_norms = np.asarray(jnp.sum(preimage ** 2, axis=-1))
 
     # --- ESS of the EM preimage posterior ---
-    keys = jax.random.split(jax.random.PRNGKey(0), obs.shape[0])
+    # Read from `cfg.inversion`, the same group Stage B uses (mapped exactly as
+    # utils/flow_inversion.py:augment_dataset_with_preimage_distribution does, including
+    # num_clusters -> n_components). These were hardcoded to alpha=1.0 / n_components=3,
+    # so the gate scored a posterior the precompute never computes: it was blind to
+    # `inversion.alpha` — the one knob that decides whether ESS passes — and fit 3
+    # components against the configured 1.
+    inv = cfg.inversion
+    keys = jax.random.split(jax.random.PRNGKey(int(inv.get("seed", 0))), obs.shape[0])
     _, _, _, ess = jax.jit(jax.vmap(
         lambda s, a, k: agent.compute_full_proposal_distribution_em(
-            s, a, k, num_samples=100, n_steps=10, n_initial_steps=100, alpha=1.0, n_components=3
+            s, a, k,
+            num_samples=int(inv.get("num_samples", 100)),
+            n_steps=int(inv.get("n_steps", 10)),
+            n_initial_steps=int(inv.get("n_initial_steps", 100)),
+            alpha=float(inv.get("alpha", 1.0)),
+            n_components=int(inv.get("num_clusters", 1)),
         )
     ))(obs, act, keys)
 
+    # `ess` is (B, n_steps): one value per EM iteration, from the lax.scan in
+    # compute_full_proposal_distribution_em. The posterior Stage B stores is the LAST
+    # iterate, and precompute_preimages.py persists ess[:, -1] — gate on that same
+    # statistic. Averaging the whole trace (as this tool previously did) understates it,
+    # because ESS improves across EM iterations as the proposal tightens onto the target.
+    ess_final = ess[:, -1]
     rt_mean = float(jnp.mean(rt))
-    mean_ess = float(jnp.mean(ess))
+    mean_ess = float(jnp.mean(ess_final))
     report = {
         "flow": "TRAINED" if trained else "RANDOM (control)",
         "env": cfg.env_name,
@@ -140,7 +158,12 @@ def main(cfg):
         "roundtrip_l2_max": round(float(jnp.max(rt)), 6),
         "typicality": _chi2_report(sq_norms, d_a),
         "mean_ess": round(mean_ess, 3),
-        "min_ess": round(float(jnp.min(ess)), 3),
+        "min_ess": round(float(jnp.min(ess_final)), 3),
+        # Trace mean over all EM iterations — comparable with numbers this tool printed
+        # before 2026-08-04, which gated on this (lower) statistic by mistake.
+        "mean_ess_trace": round(float(jnp.mean(ess)), 3),
+        # ESS is only interpretable against the settings that produced it (alpha above all).
+        "inversion": OmegaConf.to_container(inv, resolve=True),
     }
 
     # Gate (spec §1). The typicality term is the fraction inside the central 99% chi^2

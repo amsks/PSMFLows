@@ -1,4 +1,67 @@
-# Reference benchmarks — FB + Flow (`fb_flowbc`) on cube-single (state)
+# Reference benchmarks
+
+Two independent baselines live here:
+
+1. **FQL on pointmaze-medium** — the denominator of the PSMFlow **D4 gate**. In-repo, run
+   2026-08-03. See immediately below.
+2. **FB + Flow (`fb_flowbc`) on cube-single** — the comparison target for our JAX PSM +
+   flow actor, pulled from the reference wandb project. See further down.
+
+---
+
+## FQL on pointmaze-medium — the D4 gate denominator
+
+The PSMFlow v1 spec (`docs/design/2026-07-20-psmflow-v1-design.md` line 22) gates D4 at
+"≥ 50% of FQL's single-task success on pointmaze-medium", but **no such number existed** —
+this file held only cube-single FB numbers, and `tools/latent_q_sanity.py` prints eval info
+without comparing it to anything. These runs supply it.
+
+**Config:** in-repo `agent=fql` at its committed defaults (reward-driven, NOT `bc_only`;
+`flow_steps=10`, `alpha=10`, `lr=3e-4`, `batch_size=256`), `env_name=
+pointmaze-medium-navigate-singletask-task1-v0` — the SAME env as the Stage-A behaviour flow
+that D4's psmflow checkpoint is built on. 500k offline steps, eval every 50k, 50 episodes,
+seeds 0/1/2. Runs under `/data-local/amsks/PSMFLows/exp/PSMFLows/fqlbaseline_pointmaze_medium*`.
+
+| step | sd0 | sd1 | sd2 | mean |
+|---|---:|---:|---:|---:|
+| 50k | 0.04 | 0.14 | 0.22 | 0.133 |
+| 100k | 0.20 | 0.24 | 0.02 | 0.153 |
+| 150k | 0.38 | 0.06 | 0.14 | 0.193 |
+| 200k | 0.32 | 0.56 | 0.48 | 0.453 |
+| 250k | 0.34 | 0.22 | 0.60 | 0.387 |
+| 300k | 0.20 | 0.54 | 0.38 | 0.373 |
+| 350k | 0.62 | 0.10 | 0.38 | 0.367 |
+| 400k | 0.56 | 0.60 | 0.76 | 0.640 |
+| 450k | 0.70 | 0.58 | 0.44 | 0.573 |
+| 500k | 0.66 | 0.30 | 0.54 | 0.500 |
+
+| statistic | sd0 | sd1 | sd2 | pooled |
+|---|---:|---:|---:|---|
+| peak | 0.70 | 0.60 | 0.76 | **mean 0.687, sd 0.081** |
+| final @500k | 0.66 | 0.30 | 0.54 | mean 0.500 |
+| late-window (350–500k) mean | 0.635 | 0.395 | 0.530 | mean 0.520, sd 0.186 |
+
+### USE PEAK. Gate = success ≥ 0.34.
+
+**Peak is the only stable statistic here.** Across seeds it varies by sd 0.081
+(0.60/0.70/0.76), while the late-window mean varies by sd 0.186 and single points swing
+wildly — seed 1 alone reads 0.56 → 0.22 → 0.54 → 0.10 → 0.60 on consecutive evals, and
+`final@500k` lands anywhere in 0.30–0.66 purely on where the oscillation happens to sit at
+the last eval. A denominator taken from any single point, including the final one, moves by
+a factor of ~2 for reasons that have nothing to do with the algorithm.
+
+So: **D4 passes if psmflow's PEAK success on pointmaze-medium ≥ 0.34** (= 50% of the
+3-seed mean peak 0.687), comparing peak to peak. Report psmflow's peak over the same 50k
+eval grid with 50 episodes, and run ≥ 3 seeds — with this much per-eval variance a
+single-seed psmflow number is not interpretable either.
+
+Independently useful: these runs establish that pointmaze-medium **is** learnable by a
+flow-based agent in this repo at 500k, so a weak D4 result cannot be attributed to the
+environment being too hard.
+
+---
+
+## FB + Flow (`fb_flowbc`) on cube-single (state)
 
 Pulled from wandb **`amsks/factored-fb`**, runs named `cube_single__s{N}__ortho1000__lrb1e-4`
 (the vanilla state PSM/FB + flow-actor baseline). These are the comparison targets for
