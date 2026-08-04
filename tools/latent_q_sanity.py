@@ -34,6 +34,7 @@ from main import _lists_to_tuples
 from utils.datasets import Dataset
 from utils.evaluation import evaluate
 from utils.flax_utils import restore_agent
+from utils.log_utils import write_report
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
@@ -60,7 +61,11 @@ def main(cfg):
     info, _, _ = evaluate(agent=agent, env=eval_env, config=config,
                           num_eval_episodes=50, num_video_episodes=0,
                           video_frame_skip=3, seed=cfg.seed)
-    print(json.dumps({k: float(v) for k, v in info.items()}, indent=2))
+    report = {"env": cfg.env_name, "seed": int(cfg.seed),
+              "restore_path": str(cfg.restore_path), "restore_epoch": int(cfg.restore_epoch)}
+    report.update({k: float(v) for k, v in info.items()})
+    print(json.dumps(report, indent=2))
+    write_report(report, cfg, "d4_latent_q_sanity.json")
 
 
 if __name__ == "__main__":

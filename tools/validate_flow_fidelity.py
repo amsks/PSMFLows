@@ -35,6 +35,7 @@ from envs.env_utils import make_env_and_datasets
 from main import _lists_to_tuples
 from utils.datasets import Dataset
 from utils.flax_utils import restore_agent
+from utils.log_utils import write_report
 
 
 def _kmeans(x, k, iters=50, seed=0):
@@ -77,7 +78,12 @@ def main(cfg):
     noises = jax.random.normal(jax.random.PRNGKey(cfg.seed), act.shape)
     flow_act = np.asarray(agent.compute_flow_actions(jnp.asarray(obs), noises=noises))
 
-    bw = np.median(np.linalg.norm(act[:512, None] - act[None, :512], axis=-1)) + 1e-6
+    # MMD cost is quadratic (an (m, m, d_a) intermediate), so cap the sample — but honor
+    # a preimage_limit BELOW the cap instead of silently slicing [:1024] regardless, and
+    # record the count so the estimate's support is visible in the report.
+    m_mmd = min(n, 1024)
+    m_bw = min(n, 512)
+    bw = np.median(np.linalg.norm(act[:m_bw, None] - act[None, :m_bw], axis=-1)) + 1e-6
     lab_d, centers = _kmeans(act, k=min(16, n))
     lab_f = ((flow_act[:, None] - centers[None]) ** 2).sum(-1).argmin(1)
     k = centers.shape[0]
@@ -91,15 +97,18 @@ def main(cfg):
     nn = sd.argsort(1)[:, :32]
     off = np.array([np.min(np.linalg.norm(act[nn[i]] - flow_act[i], axis=-1)) for i in range(n)])
 
-    print(json.dumps({
+    report = {
         "flow": "TRAINED" if cfg.restore_path is not None else "RANDOM (control)",
         "env": cfg.env_name,
         "seed": int(cfg.seed),
         "n": int(n),
-        "mmd_rbf": _mmd_rbf(act[:1024], flow_act[:1024], bw),
+        "mmd_n": int(m_mmd),
+        "mmd_rbf": _mmd_rbf(act[:m_mmd], flow_act[:m_mmd], bw),
         "mode_hist_tv": float(0.5 * np.abs(hist_d - hist_f).sum()),
         "off_support_frac@0.2": float((off > 0.2).mean()),
-    }, indent=2))
+    }
+    print(json.dumps(report, indent=2))
+    write_report(report, cfg, "d1_flow_fidelity.json")
 
 
 if __name__ == "__main__":

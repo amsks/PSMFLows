@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 from datetime import datetime
@@ -7,6 +8,21 @@ import ml_collections
 import numpy as np
 import wandb
 from PIL import Image, ImageEnhance
+
+
+def write_report(report, cfg, default_name):
+    """Persist a diagnostic tool's (D1-D4) JSON report and echo it to stdout.
+
+    Destination: cfg.report_out if set, else `default_name` in the hydra run dir
+    (os.getcwd() -- hydra chdirs there under version_base=None). Gates must leave
+    artifacts: the tools printed to stdout only, and the 2026-08-03 D2 numbers were
+    lost because nothing captured it.
+    """
+    out = cfg.get("report_out", None) or os.path.join(os.getcwd(), default_name)
+    with open(out, "w") as f:
+        json.dump(report, f, indent=2)
+    print(f"report -> {out}")
+    return out
 
 
 class CsvLogger:

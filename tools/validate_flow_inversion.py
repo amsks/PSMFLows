@@ -48,6 +48,7 @@ from envs.env_utils import make_env_and_datasets
 from main import _lists_to_tuples
 from utils.datasets import Dataset
 from utils.flax_utils import restore_agent
+from utils.log_utils import write_report
 
 
 def _chi2_report(sq_norms, d_a):
@@ -185,6 +186,7 @@ def main(cfg):
 
     for k, v in report.items():
         print(f"{k}: {v}")
+    write_report(report, cfg, "d3_flow_inversion.json")
 
 
 if __name__ == "__main__":

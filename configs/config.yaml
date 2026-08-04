@@ -17,6 +17,9 @@ restore_epoch: null
 # plumbing smokes; null means the whole thing (~1M transitions on OGBench).
 preimage_out: preimages.npz
 preimage_limit: null
+# Diagnostic tools (D1-D4) write their JSON report here; null = <hydra run dir>/<tool>.json.
+# They used to print to stdout only, which is how the 2026-08-03 D2 numbers were lost.
+report_out: null
 
 offline_steps: 1000000
 online_steps: 0

@@ -33,6 +33,7 @@ from agents.fql import FQLAgent
 from envs.env_utils import make_env_and_datasets
 from main import _lists_to_tuples
 from utils.flax_utils import restore_agent
+from utils.log_utils import write_report
 
 NUM_U = 16
 EPISODES_PER_U = 4
@@ -71,15 +72,22 @@ def main(cfg):
     within = np.mean([np.linalg.norm(finals[i, a] - finals[i, b])
                       for i in range(NUM_U) for a in range(EPISODES_PER_U) for b in range(a + 1, EPISODES_PER_U)])
     flat = finals.reshape(-1, finals.shape[-1])
-    across = np.mean(np.linalg.norm(flat[:, None] - flat[None], axis=-1))
-    print(json.dumps({
+    # Across-u only: pairs of rollouts with DIFFERENT u. Averaging over the full flat
+    # pairwise matrix included the zero self-pairs and the within-u pairs, which deflated
+    # `across` and made consistency_ratio read better than it is.
+    dists = np.linalg.norm(flat[:, None] - flat[None], axis=-1)
+    uid = np.repeat(np.arange(NUM_U), EPISODES_PER_U)
+    across = float(dists[uid[:, None] != uid[None, :]].mean())
+    report = {
         "env": cfg.env_name,
         "seed": int(cfg.seed),
         "num_u": NUM_U, "episodes_per_u": EPISODES_PER_U,
         "within_u_final_dist": float(within),
-        "across_final_dist": float(across),
+        "across_u_final_dist": across,
         "consistency_ratio": float(within / (across + 1e-8)),
-    }, indent=2))
+    }
+    print(json.dumps(report, indent=2))
+    write_report(report, cfg, "d2_fixed_u_rollouts.json")
 
 
 if __name__ == "__main__":
