@@ -18,7 +18,57 @@ hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RES
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
 Branch: `feat/psm-integration` · Machine: `midi-01` (UT CS)
-Date: **2026-07-29** (latest) · prior: 2026-07-28, 07-26, 07-15, 07-13, 07-07
+Date: **2026-08-04** (latest) · prior: 2026-07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+
+---
+
+<!-- _class: lead -->
+
+## 2026-08-04 session — full audit + roadmap; the D3 ESS statistic was wrong (again), and it changes the story back
+
+Deliverable: **`docs/plans/2026-08-04-status-roadmap-audit.md`** — status, OGBench roadmap
+(gates, baselines, success criteria, viz/analysis scripts), full code audit, rewrite plan.
+Read that first; this slide records only what changed on disk.
+
+### The D3 gate was averaging ESS over the whole EM trace, not the final iterate
+
+`compute_full_proposal_distribution_em` returns `ess` shaped `(n_steps,)` per row (one per
+EM iteration); after vmap the D3 tool took `mean(ess)` over BOTH axes. Stage B stores — and
+`precompute_preimages.py` persists, and the intuition figure plots — only `ess[:, -1]`, and
+ESS improves across EM iterations, so **every number the tool printed understated the
+stored posterior**. Fixed: the gate now uses final-step ESS and also prints
+`mean_ess_trace` for comparability with pre-08-04 printouts.
+
+**Re-measured (cube Stage-A ckpt, 256 rows, seed 0, alpha=20, N=100): final-step mean ESS
+21.7, trace-mean 17.7 — the gate PASSES at N=100.** So the 08-03 working-tree conclusion
+"no alpha reaches 20; num_samples is what clears the gate" was an artifact of the trace
+statistic; alpha=20 was the right call and N buys *margin* (linear), not the pass.
+`configs/inversion/default.yaml`'s comment block now carries the correction. The in-flight
+N=200 recomputes (`watch_cube` / `watch_pointmaze` tmux, ETA ~12:30 08-04) are NOT wasted —
+they give comfortable headroom over a marginal 21.7 — let them finish, then run the fixed
+D3 on both npz.
+
+### Also fixed this session (audit P0s)
+
+- `tools/latent_q_sanity.py` (D4): the 10k relabel batch was **unseeded** (global
+  np.random) — the gate number changed run to run. Now seeded off `cfg.seed`, same pattern
+  as D3. D4 is a spec gate; its number must be a function of the checkpoint.
+- `scripts/launch_fb_cube.sh` / `launch_psm_cube.sh` ran bare `python` (= 2.7 on midi-01).
+  Now `$REPO/.venv/bin/python`.
+- `agents/affine_psm.py` `infer_w_goal`: the constraint-set permutation used
+  `np.random.default_rng()` (OS entropy) — identical seed + weights gave different `w_inf`
+  and eval success. Now seeded off the `seed` argument.
+
+### Top open items before Stage C (full list + priorities in the roadmap doc)
+
+1. **npz↔checkpoint pairing guard** in `main.py` — row count is the only check today; a
+   wrong-vintage npz trains silently on mismatched latents. The `.meta.json` sidecar
+   exists for exactly this. Do it before the first real Stage-C launch.
+2. **Persist diagnostic reports** — the 08-03 D2 results were lost because the tools print
+   JSON to stdout only. Add a `report_out` (or always `| tee`). D2 must be re-run.
+3. Commit the 08-03 + 08-04 working tree as one story (inversion config + fixed D3 tool +
+   benchmarks doc + this slide); fix `tools/plot_preimage_intuition.py`'s now-stale panel
+   titles ("alpha=1 as run", "raising alpha is what clears the gate") when regenerating.
 
 ---
 
