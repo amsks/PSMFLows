@@ -18,6 +18,7 @@ GROUP="${GROUP:-fb_cube_single_$(date +%Y%m%d_%H%M%S)}"
 
 REPO=/u/amsks/git/PSMFLows
 LOCAL=/var/local/amsks
+PY="$REPO/.venv/bin/python"    # system `python` is 2.7 on midi-01 — never use it
 mkdir -p "$LOCAL/exp" "$LOCAL/wandb" "$LOCAL/logs/$GROUP"
 
 cd "$REPO"
@@ -35,7 +36,7 @@ for actor in "${ACTORS[@]}"; do
     name="${actor}_sd${seed}"
     log="$LOCAL/logs/$GROUP/${name}.log"
     echo "launching $name -> $log"
-    nohup python main.py \
+    nohup "$PY" main.py \
       agent=fb agent.actor.type="$actor" $EXTRA \
       env_name="$ENV" \
       offline_steps="$STEPS" online_steps=0 \

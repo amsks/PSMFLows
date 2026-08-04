@@ -365,11 +365,15 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
                 lam_params = optax.apply_updates(lam_params, ul)
             return w_inf, w_state, lam_params, lam_state, obj, con
 
+        # Seeded off `seed`: default_rng() with no argument draws from OS entropy, so two
+        # runs with identical cfg.seed and identical weights got different constraint sets
+        # xperm — and hence different w_inf and eval success — defeating the seeded eval.
+        perm_rng = np.random.default_rng(seed)
         for _ in range(int(ic["num_inference_steps"])):
             b = dataset.sample(c["batch_size"])
             obs = jnp.asarray(b["observations"]); act = jnp.asarray(b["actions"])
             xb = jnp.asarray(b["next_observations"])
-            perm = np.random.default_rng().permutation(obs.shape[0])
+            perm = perm_rng.permutation(obs.shape[0])
             xperm = xb[perm]
             goal_rep = jnp.broadcast_to(goal, obs.shape[:-1] + goal.shape)
             w_inf, w_state, lam_params, lam_state, _, _ = step(

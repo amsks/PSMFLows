@@ -48,7 +48,11 @@ def main(cfg):
     agent = restore_agent(agent, cfg.restore_path, cfg.restore_epoch)
 
     n = min(ds.size, int(cfg.get('eval_relabel_size', 10000)))
-    zb = ds.sample(n)
+    # Seeded: Dataset.sample() otherwise draws from global np.random, so the relabel
+    # batch — hence w, hence the printed success — changed run to run. D4 is a spec
+    # gate; its number must be a function of the checkpoint (same fix as D3's).
+    idxs = np.random.default_rng(int(cfg.seed)).integers(0, ds.size, n)
+    zb = ds.sample(n, idxs=idxs)
     # The +1 shift turns cube-single's {-1, 0} task reward into {0, 1} so w points at
     # goal-reaching states; without it z is inverted (see main.py eval hook).
     rew = zb['rewards'] + float(cfg.get('eval_reward_shift', 1.0))
