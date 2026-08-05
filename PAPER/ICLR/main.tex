@@ -1,0 +1,306 @@
+% PSMFlows — ICLR 2027 draft skeleton. Build: latexmk -pdf main.tex
+\documentclass{article}
+\usepackage{iclr2027_conference,times}
+\input{math_commands.tex}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\newtheorem{proposition}{Proposition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{assumption}{Assumption}
+\newcommand{\D}{\mathcal{D}}
+\newcommand{\suppo}{\operatorname{supp}}
+
+\title{PSMFlows: Zero-Shot Reinforcement Learning on Limited-Support Data\\
+via Flow-Indexed Successor Measures}
+
+\author{Anonymous Authors\\
+\texttt{anonymous@example.com}}
+
+\newcommand{\fix}{\marginpar{FIX}}
+\newcommand{\new}{\marginpar{NEW}}
+
+\iclrfinalcopy % remove for anonymized submission
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Zero-shot reinforcement learning methods such as Forward--Backward representations (FB)
+and Proto Successor Measures (PSM) learn task-agnostic occupancy representations from
+reward-free data, but their training loops evaluate candidate actions that the dataset
+never supports: value estimates at out-of-distribution actions are unconstrained, and the
+policy-improvement argmax seeks out exactly those errors. We propose \emph{PSMFlows},
+which removes this failure mode by construction. A behavior-cloned conditional flow
+$G_\theta(s,u)$ maps latent noise to data-like actions; holding the noise fixed defines a
+family of policies $\pi_u(s)=G_\theta(s,u)$ indexed by $u$, and a successor-measure
+representation $\psi(s,u',u)^\top\varphi(x)$ is learned over this family, with dataset
+transitions carrying their own latents via flow inversion. Every action the method
+considers---during training and at inference---is a decode of the frozen flow, converting
+the hard constraint $a\in\suppo\mu_\D(\cdot\mid s)$ into the benign constraint that
+$\|u\|$ be typical. We describe the three-stage pipeline, a staged diagnostic protocol
+that makes each assumption falsifiable in isolation, and report first results on OGBench:
+the flow, inversion, and latent-family stages certify cleanly, while first
+representation-learning runs isolate a concrete failure mode---the learned measure
+discriminates policy indices without aligning them to realized behavior---that our
+diagnostics localize and that motivates the next iteration of the training loss.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+% TODO(intro): full motivation + contributions. Placeholder summary for layout.
+Behavior foundation models promise a single reward-free pretraining phase after which any
+downstream reward can be solved zero-shot. The dominant family---FB
+\citep{touati2021learning} and PSM \citep{agarwal2024protosm}---learns linear-algebraic
+representations of successor measures. Applied to \emph{offline} data with limited
+support, however, these methods inherit the classic offline-RL pathology: their Bellman
+maximization queries actions the dataset cannot certify. Conservatism penalties (VC-FB;
+\citealp{jeen2023conservative}) treat the symptom in the loss; we instead change the
+policy space so the symptom cannot arise.
+
+\textbf{Contributions.}
+(i)~a formulation of zero-shot offline RL as successor-measure learning over a
+\emph{flow-indexed} policy family, in which the training distribution has behavior-policy
+concentrability $C=1$;
+(ii)~an in-sample training algorithm in which dataset transitions carry their own latents
+via flow inversion, with a relaxed-posterior (Laplace + importance-sampled EM) preimage
+operator;
+(iii)~a staged, falsifiable diagnostic protocol (D1--D4) that separates flow fidelity,
+index coherence, inversion health, and control;
+(iv)~an empirical study on OGBench, including a negative result whose diagnosis is, we
+argue, itself informative about what successor-measure losses ground and what they do
+not.
+
+\begin{figure}[t]
+\centering
+\resizebox{\linewidth}{!}{%
+\begin{tikzpicture}[
+  node distance=5mm and 9mm,
+  box/.style={draw, rounded corners=2pt, align=center, font=\small,
+              minimum height=9mm, inner sep=5pt},
+  frozen/.style={box, fill=blue!8},
+  data/.style={box, fill=gray!12},
+  stage/.style={font=\scriptsize\itshape, text=gray},
+  arr/.style={-{Latex[length=2.2mm]}, thick}]
+\node[data] (ds) {Dataset $\D$\\ $(s,a,s')$, no rewards};
+\node[frozen, right=of ds] (flow) {Behavior flow\\ $G_\theta(s,u)$ \textbf{(frozen)}};
+\node[box, right=of flow] (pre) {Preimages\\ $u^\star=E_\theta(s,a)$,\ $q_\alpha(u\mid s,a)$};
+\node[box, right=of pre] (sm) {Successor measure\\ $\psi(s,u',u)^\top\varphi(x)$};
+\node[data, below=of sm] (rew) {Reward $r$};
+\node[box, right=of sm] (gpi) {$w=\E[r\varphi]$;\ GPI over $u$\\ $a = G_\theta(s,\hat u)$};
+\node[stage, above=1mm of flow] {Stage A};
+\node[stage, above=1mm of pre] {Stage B};
+\node[stage, above=1mm of sm] {Stage C};
+\node[stage, above=1mm of gpi] {Inference};
+\draw[arr] (ds) -- (flow);
+\draw[arr] (flow) -- (pre);
+\draw[arr] (pre) -- (sm);
+\draw[arr] (sm) -- (gpi);
+\draw[arr] (rew) -| (gpi);
+\draw[arr] (flow) to[bend right=22] node[below, font=\scriptsize]{frozen decode} (gpi.south west);
+\end{tikzpicture}}
+\caption{\textbf{The PSMFlows pipeline.} A reward-free behavior flow (Stage A, frozen) turns
+noise into data-like actions; flow inversion (Stage B) equips every dataset transition
+with its latent; a successor measure over the flow-indexed policy family is trained
+in-sample (Stage C); at test time a reward is projected onto the state basis and
+generalized policy improvement runs entirely in latent space. An editable draw.io source
+of this figure is provided in \texttt{figures/pipeline.drawio}.}
+\label{fig:pipeline}
+\end{figure}
+
+\section{Preliminaries}
+\label{sec:prelim}
+
+\textbf{Setting.} A reward-free MDP $(\mathcal S,\mathcal A,P,\gamma)$ with
+$\mathcal A\subseteq\mathbb R^{d_a}$; an offline dataset
+$\D=\{(s_i,a_i,s'_i)\}_{i=1}^N$ collected by an unknown behavior policy
+$\mu(\cdot\mid s)$ with state marginal $\rho$. At test time a reward $r$ is revealed
+(as labels on a sample of $\D$) and a policy must be produced with no further
+interaction.
+
+\textbf{Successor measures.} For a policy $\pi$,
+$M^\pi(s,a,X)=\E\big[\sum_{t\ge1}\gamma^{t-1}\mathbf 1\{s_t\in X\}\mid s_0=s,a_0=a\big]$
+is the discounted occupancy of $X\subseteq\mathcal S$. Then
+$Q^\pi_r(s,a)=\int r\,dM^\pi(s,a,\cdot)$: one object serves every reward, which is the
+basis of zero-shot RL. FB parameterizes $m^\pi(s,a,x)=F(s,a,z_\pi)^\top B(x)$;
+PSM uses an affine decomposition $m^\pi = b + \Phi\, w_\pi$ whose policy dependence is
+linear. Both train by a measure-matching temporal-difference loss and infer tasks by
+projecting $r$ on the state basis.
+
+\textbf{The limited-support problem.} The TD loss and the actor of these methods evaluate
+$Q$ at actions from a training policy $\pi_{\mathrm{tr}}$. The relevant quantity is the
+concentrability $C(\pi_{\mathrm{tr}})=\operatorname{ess\,sup}
+\pi_{\mathrm{tr}}(a\mid s)/\mu(a\mid s)$: FB's deterministic actor gives $C=\infty$; PSM's
+uniform action sampling gives $C$ finite only for full-support behavior. On play or
+mode-restricted data neither holds, and value errors at unsupported actions are exactly
+the ones the argmax selects. % TODO(prelim): cite offline-RL concentrability results.
+
+\textbf{Conditional flow matching.} A velocity field $v_\theta(s,u_t,t)$ trained with the
+CFM regression $\E\|v_\theta(s,(1-t)u_0+ta,t)-(a-u_0)\|^2$, $u_0\sim\mathcal N(0,I)$,
+induces a decoder $G_\theta(s,\cdot)$: the time-one map of the ODE
+$\dot u=v_\theta(s,u,t)$. With latent dimension equal to action dimension,
+$G_\theta(s,\cdot)$ is a $C^1$ diffeomorphism of $\mathbb R^{d_a}$; its inverse
+$E_\theta(s,\cdot)$ is computed by backward integration.
+
+\section{Method: PSMFlows}
+\label{sec:method}
+
+\subsection{A flow-indexed policy family}
+Fix the trained (and thereafter frozen) behavior flow. For $u\in\mathbb R^{d_a}$ define
+the fixed-index policy $\pi_u(s)=G_\theta(s,u)$. Two properties make this family the
+right search space for offline zero-shot RL. First, \emph{mass conversion}: for any set
+$U$ of prior mass $1-\delta$, the decoded actions carry $1-\delta$ of the behavior mass
+\emph{simultaneously at every state}, so ``stay on the data'' becomes ``keep $\|u\|$
+typical''. Second, \emph{divergence isometry}: for any $\nu$ over latents,
+$D_f\!\big(\pi_\nu \,\|\, \hat\mu_\theta\big)=D_f(\nu\,\|\,p_0)$ at every state, so
+trust-region constraints against the (unknown) behavior density become closed-form
+constraints against a standard normal. % TODO(method): restate formal versions + proofs (see technical report).
+
+\subsection{Dataset latents by flow inversion}
+Training a measure over $\{\pi_u\}$ requires transitions labeled with latents. Since
+$G_\theta(s,\cdot)$ is invertible, each dataset action has a point preimage
+$u^\star_i=E_\theta(s_i,a_i)$; because a whole basin of latents decodes near $a_i$, we
+also fit the relaxed posterior
+\begin{equation}
+q_\alpha(u\mid s,a)\;\propto\;\mathcal N(u;0,I)\,
+\exp\!\big(-\alpha\|G_\theta(s,u)-a\|\big),
+\label{eq:posterior}
+\end{equation}
+by importance-sampled EM initialized from the Laplace approximation with covariance
+$\propto (J^\top J)^{-1}$, $J=\partial G_\theta/\partial u$
+(Figure~\ref{fig:preimage}). The temperature $\alpha$ trades sharpness against effective
+sample size (ESS); both are measured and gated (\S\ref{sec:exp}). Under an exact flow,
+$E_\theta(s,a)\sim\mathcal N(0,I)$ on data, so the $\chi^2_{d_a}$ typicality of
+$\|u^\star\|^2$ is a direct, falsifiable test of the flow-equals-behavior assumption.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/preimage_intuition.png}
+\caption{\textbf{What the noise preimage is, and why the temperature $\alpha$ decides
+whether it is usable.} (A)~a 2D latent-space slice at one real cube transition: the
+preimage of an action is a \emph{basin}, not a point; at $\alpha{=}1$ the inversion
+target (shading) is far broader than the $\mathcal N(0,I)$ prior (dashed).
+(B)~the same slice at $\alpha{=}20$: the basin contracts to prior scale.
+(C)~aggregate over $10^6$ transitions: point preimages track the $\chi_{d_a}$ typical
+radius, while low-$\alpha$ posterior means drift far outside it.
+(D)~mean ESS versus $\alpha$ against the D3 gate. % TODO(fig): regenerate from the alpha=20/N=200 artifacts.
+}
+\label{fig:preimage}
+\end{figure}
+
+\subsection{Successor measures over the family}
+We learn $m(s,u,u',x)=\psi(s,u',u)^\top\varphi(x)$, the density of
+$M^{u\to u'}(s,\cdot)$: take the action indexed by $u$ now, then follow $\pi_{u'}$. The
+Bellman identity closes on the diagonal,
+$M^{u\to u'}(s,X)=\E_{s'}[\mathbf 1\{s'\in X\}+\gamma M^{u'\to u'}(s',X)]$, so a single
+network suffices. The empirical loss is the standard measure-matching TD objective with
+batch negatives, an orthonormality regularizer on $\varphi$, and three sampling rules:
+the action slot $u$ is drawn from the stored preimage posterior of the transition
+(clipped to the typical set); the index slot $u'$ is drawn fresh (mixed
+$\mathcal N(0,I)$/permuted behavior latents); the bootstrap target is
+$\bar\psi(s',u',u')$---the continuation latent \emph{is} the policy index. No decoded
+action appears anywhere in training; under an exact flow the training distribution has
+concentrability $C=1$ w.r.t.\ the behavior policy.
+
+\subsection{Inference}
+Given rewards on relabeled data, $w=\frac1N\sum_i r(s'_i)\varphi(s'_i)$ is the
+least-squares task projection (exact under orthonormal $\varphi$), and
+$\psi(s,u',u)^\top w$ estimates the corresponding $Q$. Rung~1 (used here) is sampled
+GPI: draw $K$ candidate latents and $M$ indices, take
+$\hat u=\arg\max_k\max_m\psi(s,u'_m,u_k)^\top w$, act $a=G_\theta(s,\hat u)$. Rungs 2--3
+(in-sample latent $Q$-iteration; an amortized latent actor trained with a flow-BC anchor
+in latent space) are implemented but not yet part of the evaluated protocol.
+% TODO(method): algorithm float, cf. the plain-terms companion (PAPER/pipeline.tex).
+
+\section{Experiments and current findings}
+\label{sec:exp}
+
+\textbf{Protocol.} OGBench \citep{park2024ogbench} \texttt{pointmaze-medium-navigate} and
+\texttt{cube-single-play} (state-based, single-task rewards); FQL
+\citep{park2025fql} as the per-task topline; in-repo, parity-verified PSM and FB as
+zero-shot baselines. All reported numbers use $\ge 3$ seeds, 50-episode evaluations on a
+50k-step grid, mean $\pm$ 95\% CI; gates D1--D4 must pass in order, which localizes any
+failure to a single stage.
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+Gate & Question & Result (pointmaze / cube) & Status\\
+\midrule
+D1 & flow reproduces data actions & MMD $3\cdot10^{-4}$ / $1.5\cdot10^{-4}$ (ctrl.\ $\times13$ / $\times10^3$) & \textbf{pass}\\
+D2 & fixed $u$ = distinct, repeatable policy & consistency ratio $0.53$ / $0.51$ & \textbf{pass}\\
+D3 & inversion trustworthy & ESS $91$ / $82$; roundtrip $\sim10^{-4}$; typicality $\ge0.99$ & \textbf{pass}\\
+D4 & oracle-reward control $\ge50\%$ of FQL & $0.00$ vs.\ FQL peak $0.687\pm0.201$ & \textbf{fail}\\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Staged diagnostics (current state).} The generative substrate certifies
+cleanly; control does not yet. The point of the protocol is that the failure is
+localized: it lies in the representation/inference stage, not the flow or the inversion.}
+\label{tab:gates}
+\end{table}
+
+\textbf{Finding 1: the substrate works.} The behavior flow beats random controls by
+1--3 orders of magnitude on distribution match (D1); fixed-latent policies are
+reproducible and mutually distinct (D2); and at $\alpha{=}20$, $N{=}200$ the preimage
+posterior passes every inversion gate (D3), with $99\%$ of inverted latents inside the
+central $\chi^2_{d_a}$ typicality band---direct evidence for the exact-flow assumption at
+the fidelity our gates demand.
+
+\textbf{Finding 2: the temperature is measurable, and it matters.} At $\alpha{=}1$ the
+Laplace proposal collapses to the prior (99.8\% of rows fully clipped), 39\% of posterior
+means leave the typical set, and ESS $\approx$ 10; at $\alpha{=}20$ posterior means track
+the $\chi_{d_a}$ radius and ESS exceeds the gate five-fold (Figure~\ref{fig:preimage}).
+Latents computed at the wrong temperature are quantifiably noise.
+
+\textbf{Finding 3 (negative, diagnosed): the measure discriminates indices it does not
+ground.} First representation runs (3 seeds, 500k--1M steps, both preimage modes) reach
+$0.00$ success even with oracle rewards. Gradient probing of the trained
+$\psi^\top w$ shows sensitivity $386$ to the index slot $u'$ and $115$ to the state, but
+only $12.6$ to the action slot $u$ that GPI selects and decodes; the value landscape over
+candidate latents is flat to $\pm2.5\%$, and predicted scores are uncorrelated with the
+realized returns of the corresponding fixed-$u$ policies (Spearman $-0.13$). Meanwhile the
+\emph{state}-value $V(s)=\max_{u}\psi(s,u,u)^\top w$ correlates $0.89$ with negative
+distance-to-goal: the representation learns \emph{where} the task is, but not
+\emph{which policy index} realizes it---TD grounds the index slot only through
+bootstrap chains, never against the actual rollouts of $\pi_{u'}$.
+% TODO(exp): resolution experiments — index-grounding losses, Rung-2 latent Q-iteration,
+% the u'-codebook ablation, longer training; then the coverage ladder + VC-FB comparison.
+
+\section{Related work}
+\label{sec:related}
+% TODO(related): FB/PSM line; conservative zero-shot RL (VC-FB/MC-FB); latent-noise
+% policies (DSRL); flow/diffusion policies in offline RL (FQL, IDQL, Diffusion-QL);
+% successor features and GPI; occupancy generative models.
+\emph{Deferred to the next draft; see RESEARCH\_NOTE \S6 for the verified map.}
+
+\section{Conclusion}
+\label{sec:conclusion}
+% TODO(conclusion).
+PSMFlows converts the support constraint of offline zero-shot RL into latent-space
+typicality by construction. Its generative substrate is validated; its open problem---
+grounding the policy-index axis of the successor measure against realized behavior---is
+now precisely characterized, and is the subject of ongoing work.
+
+\subsubsection*{Reproducibility statement}
+All gates, tools, and launchers are scripted; every diagnostic writes a JSON artifact;
+preimage archives carry sidecars recording the exact checkpoint and inversion settings
+that produced them. % TODO: repo link at de-anonymization.
+
+\bibliography{references}
+\bibliographystyle{iclr2027_conference}
+
+\appendix
+\section{Appendix}
+% TODO: full derivations (see technical report main.tex), diagnostic definitions,
+% hyperparameters, additional figures (latent value landscapes, calibration scatter).
+
+\end{document}
