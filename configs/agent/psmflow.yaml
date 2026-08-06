@@ -5,7 +5,11 @@ num_parallel: 2
 discount: 0.98
 tau: 0.01
 ortho_coef: 1000.0        # reference PSM sweep winner
-pessimism_penalty: 0.0
+# 0.5 with num_parallel=2 is EXACT min-Q in the TD target (mean - |q1-q2|/2 = min).
+# Added 08-05: the actor-coupled backup (unlike the old fixed-index one) is an
+# improvement loop, and without target pessimism actor_q oscillated 450<->6500 on
+# pointmaze. PSM ships 0.0 here but its phi is anchored by the proto branch.
+pessimism_penalty: 0.5
 actor_pessimism_penalty: 0.5
 norm_z: true
 
@@ -22,11 +26,13 @@ sf:
   hidden_layers: 1
   embedding_layers: 2
 
-# Amortized LATENT actor (flowBC recipe over latents, Rung 3). Off by default: v1
-# inference is flow-GPI; enable for the actor ablation / deployment path. The actor emits
-# u in [-u_clip, u_clip]; the deployed action is the frozen flow's decode of that u.
+mix_ratio: 0.5             # P(w from phi(next_obs[perm])) vs random unit z (PSM's sample_mixed_z)
+
+# Amortized LATENT actor (flowBC recipe over latents). Load-bearing since the 08-05
+# redesign (PAPER/decisions.tex): the measure backup bootstraps the actor's latent at s',
+# so it always trains. The actor emits u in [-u_clip, u_clip]; the deployed action is the
+# frozen flow's decode of that u.
 actor:
-  enabled: false
   hidden_dim: 512
   hidden_layers: 2
   embedding_layers: 2
@@ -34,8 +40,7 @@ actor:
   vf_hidden_layers: 4
   flow_steps: 10           # Euler steps for the latent-BC ODE distillation target
   bc_coeff: 1.0            # distillation weight (reference cube value is 3.0)
-  task_mix_ratio: 0.5      # P(w from phi(next_obs[perm])) vs random unit z
-acting: gpi                # gpi | actor
+acting: actor              # actor | gpi (per-step latent argmax, actor-free ablation)
 
 # FROZEN behavior flow — must match the Stage-A `agent=fql agent.bc_only=true` run.
 flow:
@@ -49,11 +54,9 @@ allow_untrained_flow: false
 preimage_path: null        # REQUIRED: tools/precompute_preimages.py output npz
 use_point_preimage: false  # point-vs-mixture ablation
 
-index_mix_ratio: 0.5       # P(u' from behavior preimages) vs N(0, I)
 u_clip: 3.0                # typical-set clamp on latent draws
 
 gpi_num_u: 64
-gpi_num_uprime: 16
 gpi_decode: onestep        # onestep | ode
 flow_decode_steps: 10
 

@@ -1,0 +1,86 @@
+% PSMFlows decision log. One entry per design decision / failure mode, newest first.
+% Format per entry: Observations (what we measured), Problem (the mechanism), Fix (what
+% we change and why). Keep entries short; point to tools/reports for evidence.
+% Build: latexmk -pdf decisions.tex
+\documentclass[11pt]{article}
+\usepackage[margin=1.1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage[colorlinks=true,linkcolor=blue!60!black]{hyperref}
+
+\newcommand{\D}{\mathcal{D}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\R}{\mathbb{R}}
+
+\title{PSMFlows: Decision Log}
+\author{}
+\date{Running document --- started August 2026}
+
+\begin{document}
+\maketitle
+
+\section{2026-08-05 --- The fixed-$u$ policy family is not goal-covering}
+
+\subsection*{Observations}
+\begin{enumerate}
+  \item \textbf{Reachability (exhaustive).} On pointmaze-medium task1, $d_a=2$, so a
+    $13{\times}13$ grid covers the whole latent box $[-3,3]^2$. Rolling every grid
+    latent, 32 dataset preimages, and 32 preimages of goal-reaching transitions as
+    fixed-$u$ policies (full 1000-step episodes): \textbf{0 of 233 ever reach the goal};
+    75\% never get closer than ${\sim}23$ (maze span ${\sim}30$); best is $1.32$ at the
+    saturated corner $u\approx[2,2.5]$.
+    [\texttt{tools/latent\_reachability.py}]
+
+    \emph{Cube generalization (08-05, same tool):} 2 of 128 candidates succeed (both
+    prior draws, each in 1 of 2 episodes --- ${\sim}1\%$ of (latent, episode) pairs);
+    goal-transition preimages again do no better than random draws. The family's
+    ${\sim}1$--$2\%$ ceiling \emph{quantitatively matches} the observed cube Stage-C GPI
+    floor of $0.02$--$0.06$: GPI was already extracting everything the family contains.
+    \emph{Antmaze (08-05):} 5 of 64 prior draws succeed, each in 1 of 2 episodes
+    (${\sim}4\%$ of pairs). Family ceiling across the three envs: $0\%$ / ${\sim}1\%$ /
+    ${\sim}4\%$ --- always floor-level, never usable.
+  \item \textbf{Latent coherence.} Along expert episodes, within-episode variance of the
+    Stage-B preimage latents is $0.99\times$ the marginal variance (lag-1 autocorrelation
+    $0.27$, ${\sim}0$ by lag 50); goal-reaching segments identical. A trajectory has no
+    latent identity: the demonstrator's route is \emph{latent white noise}.
+  \item \textbf{Field structure.} Visualizing $a = G(xy, u)$ as a vector field per fixed
+    $u$: typical latents give corridor-following fields with per-cell arbitrary direction
+    choices $\Rightarrow$ circulation $\Rightarrow$ rollouts orbit near the start (path
+    length 164, net displacement 1.4); saturated latents give near-constant headings
+    (circular variance $0.01$--$0.03$) that wall-slide diagonally and cannot turn.
+    [\texttt{tools/viz\_fixed\_u\_field.py}]
+  \item \textbf{Per-state coverage is fine.} At fixed cells, 512 latent draws span
+    directions with circular variance $0.45$--$0.78$: every direction remains available
+    at every state. The deficiency is purely temporal.
+  \item \textbf{Downstream symptoms all follow.} $\psi$'s TD target bootstraps
+    $\psi(s', u', u')$ (continuation latent $=$ index), so $\psi$ faithfully represents
+    a family whose members all share the same never-reach-goal value: $\psi^\top w$ is
+    flat (spread ${\sim}10\%$ of mean), the GPI argmax is noise and drifts to saturated
+    corners, calibration reads predicted 85--212 vs.\ realized all-zero, and all eleven
+    Stage-C runs score $0.0$ (cube floors at $0.02$--$0.06$).
+\end{enumerate}
+
+\subsection*{Problem}
+Behavior cloning factorizes the data as (state $\mapsto$ conditional action
+distribution; $u \mapsto$ quantile within it). The observation lacks the demonstrator's
+goal, so the goal-driven direction choice is forced into $u$ \emph{independently at each
+step}; nothing couples $u$ across time. Rung-1 assumes $u$ is a persistent policy index
+(``holding the noise fixed defines a family of policies''), but the family this actually
+defines contains only orbiters and constant headings --- routes exist only as latent
+\emph{sequences}. Stage C is not buggy; it succeeds at representing the wrong object.
+The support-constraint contribution (every considered action is a flow decode, $C=1$)
+is untouched.
+
+\subsection*{Fix}
+Drop ``fixed noise $=$ policy index.'' Keep the frozen flow as the action-support
+constraint; move policy identity to a task vector $w$ conditioning a \emph{per-step}
+latent actor $u(s, w)$ (the Rung-3 amortized actor, built 08-04), and change the $\psi$
+backup to bootstrap the actor's latent at $s'$ --- $\psi(s', \cdot, u(s',w))$ ---
+i.e.\ policy improvement in latent space (PSM transposed to latents). Observation 4 says
+the per-step coverage this needs exists; every backup action remains a flow decode.
+Pending evidence: the running PSM baseline on pointmaze (RL-optimized family) is the
+control for whether improvement-in-the-family is the missing ingredient. Fallback if it
+also flatlines: trajectory-level latent in Stage A (skill-conditioned flow
+$G(s, u; w_{\text{traj}})$), at the cost of retooling Stages A--B.
+
+\end{document}

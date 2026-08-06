@@ -1,17 +1,28 @@
-"""PSMFlow agent — successor measures over a flow-indexed policy family.
+"""PSMFlow agent — latent-space PSM over a frozen behavior flow.
 
-Code <-> research note (PAPER/RESEARCH_NOTE.md):
+Redesigned 2026-08-05 (PAPER/decisions.tex, first entry): the original Rung-1 semantics
+indexed policies by a FIXED latent u' and bootstrapped psi(s', u', u') — faithful to a
+family that is structurally non-goal-covering (fixed-u policies are orbiters or
+tanh-saturated constant headings; expert routes are latent white noise). This version is
+PSM transposed to the flow's latent space: policy identity lives in the task vector w,
+actions live in latent space, and the deployed action is always a flow decode.
+
+Code <-> write-up:
   phi (PhiMap)            -> varphi(x)        shared basis over future states
-  psi (PsiMap)            -> psi(s, u', u)    measure head: z-slot = policy index u',
+  psi (PsiMap)            -> psi(s, w, u)     measure head: z-slot = task vector w,
                                               action-slot = current latent u
+  actor                   -> u(s, w, noise)   per-step latent actor (flowBC recipe)
   flow_vf / flow_onestep  -> G_theta          FROZEN behavior flow (FQL Stage-A ckpt)
   batch['noise_preimage'] -> u = E_theta(s,a) dataset latent (preimage pipeline)
   infer_z                 -> w = E[r varphi]  closed-form reward inference
-  sample_actions          -> flow-GPI         argmax_u max_u' psi(s,u',u)^T w, decode
+  sample_actions          -> decode(actor latent) (acting=actor, default) or per-step
+                             argmax_u psi(s,w,u)^T w over prior draws (acting=gpi)
 
-TD target: M^{u->u'}(s,.) backs up onto M^{u'->u'}(s',.) — the continuation latent IS
-the index — so every action the backup implies is a flow decode (in-support, Prop. 3).
-No decoded action appears anywhere in training; the flow is used only at act time.
+TD target: M^{pi_w}(s, u_data, .) backs up onto psi(s', w, u(s', w)) — the ACTOR's
+latent at s' (PSM's sf_next_action, in latent space). Policy improvement happens in
+latent space; every action either branch implies is still a flow decode, so the
+in-support constraint (C=1) is preserved. u_data (the Stage-B preimage) is the dataset
+action in latent space — the in-sample anchor of the TD.
 """
 
 import copy
@@ -36,12 +47,13 @@ class StepInputs:
     """Per-step sampled quantities.
 
     u_data:  (B, d_a) dataset latent (preimage of the batch action)
-    u_index: (B, d_a) policy-index latent u' (mixed Gaussian/behavior, clipped)
-    task_w:  (B, z_dim) task vector for the amortized actor (mixed Gaussian/phi-goal)
+    u_next:  (B, d_a) actor's latent at s' under task_w (the TD bootstrap action)
+    task_w:  (B, z_dim) task vector, shared by the measure and actor branches
+             (PSM's sample_mixed_z: Gaussian mixed with phi(next_obs[perm]))
     flow_*:  CFM draws for the actor's latent-space BC velocity field
     """
     u_data: Any
-    u_index: Any
+    u_next: Any
     task_w: Any
     flow_x0: Any
     flow_t: Any
@@ -54,7 +66,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
     psi: TrainState
     target_phi: Any
     target_psi: Any
-    actor: TrainState       # amortized LATENT actor (s, w, noise) -> u (flowBC recipe, Rung 3)
+    actor: TrainState       # amortized LATENT actor (s, w, noise) -> u (flowBC recipe)
     actor_vf: TrainState    # CFM velocity field over preimage latents (the actor's BC anchor)
     flow_vf: Any        # FROZEN params: multi-step BC velocity field (ODE decode)
     flow_onestep: Any   # FROZEN params: one-step distilled decoder (fast decode)
@@ -70,13 +82,15 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         goal = next_obs  # phi_input='s' convention (as PSM)
         off, off_sum = off_diagonal_mask(obs.shape[0])
         P = c["num_parallel"]
-        u, u_idx = sampled.u_data, sampled.u_index
+        u, w, u_next = sampled.u_data, sampled.task_w, sampled.u_next
 
         phi_g = self.phi(goal, params=phi_params)
-        M = self.psi(obs, u_idx, u, params=psi_params) @ phi_g.T
+        M = self.psi(obs, w, u, params=psi_params) @ phi_g.T
         tphi = self.phi(goal, params=self.target_phi)
-        # Continuation latent IS the index: the bootstrap policy at s' is pi_{u'}.
-        tM = self.psi(next_obs, u_idx, u_idx, params=self.target_psi) @ tphi.T
+        # Bootstrap action = the ACTOR's latent at s' (PSM sf_loss's sf_next_action,
+        # transposed to latent space). This is where policy improvement enters the
+        # measure: the continuation is pi_w, not a fixed-u orbit (decisions.tex 08-05).
+        tM = self.psi(next_obs, w, u_next, params=self.target_psi) @ tphi.T
         tmean, tunc = targets_uncertainty(tM, P)
         target_M = tmean - c["pessimism_penalty"] * tunc
         cl, cdiag, coff = contrastive_loss(M, jax.lax.stop_gradient(target_M), c["discount"], off, off_sum)
@@ -88,35 +102,30 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
     def sample_step_inputs(self, batch, rng):
         c = self.config
         B, adim = batch["observations"].shape[0], c["action_dim"]
-        # Clip HERE, not only on u_index below: `u_clip` is documented as the typical-set
-        # clamp on ALL latent draws, and u_data goes straight into psi(obs, u_idx, u) while
-        # the bootstrap target only ever sees psi(next_obs, u_idx, u_idx) with u_idx already
-        # clipped. Leaving u_data raw gives the online branch inputs the target branch never
-        # sees, and the stored EM mixtures are broad enough for that to be catastrophic:
-        # sampled |u| reaches 377 per-dim on pointmaze (43% of rows exceed u_clip, 6.5%
-        # exceed 10), which drove psm_offdiag from ~300 to 3.5e7 and left psm_diag flat
-        # instead of descending. Clipping restores train/target consistency; it does NOT fix
-        # the underlying mixture calibration (cov trace 15.9 vs a prior trace of 2.0).
+        # Clip u_data: `u_clip` is the typical-set clamp on ALL latent draws, and the
+        # bootstrap side only ever sees tanh-bounded actor latents. Leaving u_data raw
+        # gives the online branch inputs the target branch never sees, and the stored EM
+        # mixtures are broad enough for that to be catastrophic: sampled |u| reaches 377
+        # per-dim on pointmaze (43% of rows exceed u_clip), which drove psm_offdiag from
+        # ~300 to 3.5e7 and left psm_diag flat. Clipping restores train/target
+        # consistency; it does NOT fix the underlying mixture calibration.
         u_data = jnp.clip(jnp.asarray(batch["noise_preimage"]), -c["u_clip"], c["u_clip"])
-        r_mix, r_gauss, r_perm, r_tail = jax.random.split(rng, 4)
-        gauss = jax.random.normal(r_gauss, (B, adim))
-        perm = jax.random.permutation(r_perm, B)
-        behavior = u_data[perm]  # behavior-biased indices (analog of PSM/FB z-mixing)
-        mask = (jax.random.uniform(r_mix, (B,)) < c["index_mix_ratio"])[:, None]
-        u_index = jnp.where(mask, behavior, gauss)
-        u_index = jnp.clip(u_index, -c["u_clip"], c["u_clip"])
-        # Task vector for the amortized actor: Gaussian, with a mix_ratio fraction replaced
-        # by project_z(phi(next_obs[perm])) — the same sample_mixed_z recipe PSM/FB train
-        # their actors on. stop_gradient: the actor branch must not shape the basis.
-        r_w, r_wmix, r_wperm, r_x0, r_t, r_noise = jax.random.split(r_tail, 6)
+        # Task vector w, shared by measure + actor branches: Gaussian, with a mix_ratio
+        # fraction replaced by project_z(phi(next_obs[perm])) — PSM's sample_mixed_z.
+        # stop_gradient: sampling must not shape the basis.
+        r_w, r_wmix, r_wperm, r_next, r_x0, r_t, r_noise = jax.random.split(rng, 7)
         gauss_w = project_z(jax.random.normal(r_w, (B, c["z_dim"])), c["norm_z"])
         wperm = jax.random.permutation(r_wperm, B)
         goal_w = project_z(jax.lax.stop_gradient(self.phi(batch["next_observations"]))[wperm],
                            c["norm_z"])
-        wmask = (jax.random.uniform(r_wmix, (B,)) < c["actor"]["task_mix_ratio"])[:, None]
+        wmask = (jax.random.uniform(r_wmix, (B,)) < c["mix_ratio"])[:, None]
         task_w = jnp.where(wmask, goal_w, gauss_w)
+        # TD bootstrap action: the actor's latent at s' under task_w (PSM's flow-mode
+        # sf_next_action). NoiseConditionedActor is tanh-bounded; scale to the u box.
+        u_next = c["u_clip"] * self.actor(batch["next_observations"], task_w,
+                                          jax.random.normal(r_next, (B, adim)))
         return StepInputs(
-            u_data=u_data, u_index=u_index, task_w=task_w,
+            u_data=u_data, u_next=u_next, task_w=task_w,
             flow_x0=jax.random.normal(r_x0, (B, adim)),
             flow_t=jax.random.uniform(r_t, (B, 1)),
             flow_noise=jax.random.normal(r_noise, (B, adim)))
@@ -132,8 +141,8 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             anchor is worth learning rather than assuming.)
           - one-step NoiseConditionedActor(s, w, noise) -> tanh * u_clip, distilled from
             the vf's Euler rollout.
-          - Q term: the DIAGONAL score psi(s, u_a, u_a)^T w — the value of committing to
-            index u_a — with the same ensemble pessimism as gpi_select.
+          - Q term: psi(s, w, u_a)^T w — the task-w value of emitting latent u_a now —
+            with ensemble pessimism (PSM's flow_actor_loss, action slot = latent).
         psi is read at fixed params (no gradient); the frozen flow is untouched. Deployed
         action = flow decode of the actor's latent, so it stays data-like by construction.
         """
@@ -160,7 +169,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         u_a = u_clip * self.actor(obs, w, noise, params=actor_params)
         # psi at its stored params: the DPG gradient reaches the actor THROUGH psi's
         # inputs; psi's own params are outside the argnums and receive no gradient.
-        Qs = (self.psi(obs, u_a, u_a) * w).sum(-1)  # (P, B)
+        Qs = (self.psi(obs, w, u_a) * w).sum(-1)  # (P, B)
         qmean, qunc = targets_uncertainty(Qs, c["num_parallel"])
         Q = qmean - c["actor_pessimism_penalty"] * qunc
         q_loss = -Q.mean() / jax.lax.stop_gradient(jnp.abs(Qs).mean() + 1e-8)
@@ -178,15 +187,15 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         target_phi = polyak_update(phi.params, self.target_phi, tau)
         target_psi = polyak_update(psi.params, self.target_psi, tau)
         new = self.replace(phi=phi, psi=psi, target_phi=target_phi, target_psi=target_psi)
-        if self.config["actor"]["enabled"]:
-            # Actor branch at the PRE-update psi (PSM's no-interleave convention).
-            (_, a_info), (g_a, g_vf) = jax.value_and_grad(
-                self.flow_actor_loss, argnums=(2, 3), has_aux=True)(
-                batch, sampled, self.actor.params, self.actor_vf.params)
-            new = new.replace(actor=new.actor.apply_gradients(grads=g_a),
-                              actor_vf=new.actor_vf.apply_gradients(grads=g_vf))
-            info = {**info, **a_info}
-        return new, info
+        # Actor branch at the PRE-update psi (PSM's no-interleave convention). The actor
+        # is load-bearing: the measure backup bootstraps its latent at s', so it always
+        # trains (no enable switch).
+        (_, a_info), (g_a, g_vf) = jax.value_and_grad(
+            self.flow_actor_loss, argnums=(2, 3), has_aux=True)(
+            batch, sampled, self.actor.params, self.actor_vf.params)
+        new = new.replace(actor=new.actor.apply_gradients(grads=g_a),
+                          actor_vf=new.actor_vf.apply_gradients(grads=g_vf))
+        return new, {**info, **a_info}
 
     @jax.jit
     def update(self, batch):
@@ -202,7 +211,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         loss, info = self.measure_loss(batch, sampled, self.phi.params, self.psi.params)
         return loss, info
 
-    # ---- inference (Rung 1: flow-GPI) ----
+    # ---- inference ----
     def infer_z(self, next_observations, rewards):
         phi = self.phi(next_observations)
         z = (rewards.reshape(1, -1) @ phi).reshape(-1) / phi.shape[0]
@@ -227,36 +236,29 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
 
     @jax.jit
     def gpi_select(self, observations, seed=None):
-        """argmax_u max_u' [mean_P - pess * unc](psi(s, u', u)^T w) over sampled latents.
+        """Per-step latent argmax: argmax_u [mean_P - pess * unc](psi(s, w, u)^T w) over
+        K clipped prior draws. The actor-free acting path (ablation vs acting=actor);
+        re-run every step, so this is per-step reselection, not a fixed index.
 
         Single observation (ob_dims,) — the eval/acting path."""
         c = self.config
         assert observations.ndim == 1, "gpi_select acts on a single observation"
-        K, Mi, d_a = c["gpi_num_u"], c["gpi_num_uprime"], c["action_dim"]
+        K, d_a = c["gpi_num_u"], c["action_dim"]
         seed = self.rng if seed is None else seed
-        r_u, r_idx = jax.random.split(seed)
-        u_cand = jnp.clip(jax.random.normal(r_u, (K, d_a)), -c["u_clip"], c["u_clip"])
-        u_idx = jnp.clip(jax.random.normal(r_idx, (Mi, d_a)), -c["u_clip"], c["u_clip"])
-        obs = jnp.broadcast_to(observations, (K * Mi, *observations.shape))
-        # repeat/tile must pair with the (K, Mi) reshape below: repeat varies SLOWEST so
-        # candidate k occupies rows [k*Mi, (k+1)*Mi), which is what reshape(K, Mi) reads
-        # as row k. Swapping repeat and tile still yields a valid-looking matrix and a
-        # valid latent, so it fails silently — pinned by
-        # test_gpi_select_returns_a_candidate_it_actually_scored.
-        uc = jnp.repeat(u_cand, Mi, axis=0)
-        ui = jnp.tile(u_idx, (K, 1))
-        qpsis = self.psi(obs, ui, uc)                       # (P, K*Mi, z_dim)
-        Qs = (qpsis * self.task_z).sum(-1)                  # (P, K*Mi)
+        u_cand = jnp.clip(jax.random.normal(seed, (K, d_a)), -c["u_clip"], c["u_clip"])
+        obs = jnp.broadcast_to(observations, (K, *observations.shape))
+        w = jnp.broadcast_to(self.task_z, (K, *self.task_z.shape))
+        qpsis = self.psi(obs, w, u_cand)                    # (P, K, z_dim)
+        Qs = (qpsis * self.task_z).sum(-1)                  # (P, K)
         qmean, qunc = targets_uncertainty(Qs, c["num_parallel"])
-        Q = (qmean - c["actor_pessimism_penalty"] * qunc).reshape(K, Mi)
-        return u_cand[jnp.argmax(Q.max(axis=1))]
+        Q = qmean - c["actor_pessimism_penalty"] * qunc
+        return u_cand[jnp.argmax(Q)]
 
     @jax.jit
     def sample_actions(self, observations, seed=None, temperature=1.0):
         seed = self.rng if seed is None else seed
         if self.config["acting"] == "actor":
-            # Rung 3: one shot through the amortized latent actor, then decode.
-            assert self.config["actor"]["enabled"], "acting=actor needs actor.enabled=true"
+            # One shot through the amortized latent actor, then decode (default).
             noise = jax.random.normal(seed, (1, self.config["action_dim"]))
             u_star = self.config["u_clip"] * self.actor(
                 observations[None], self.task_z[None], noise)[0]
@@ -272,6 +274,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         action_dim = ex_actions.shape[-1]
         z_dim = config["z_dim"]
         ex_u = jnp.zeros((ex_observations.shape[0], action_dim))
+        ex_w = jnp.zeros((ex_observations.shape[0], z_dim))
 
         phi_def = PhiMap(z_dim=z_dim, hidden_dim=config["phi"]["hidden_dim"],
                          hidden_layers=config["phi"]["hidden_layers"], norm=True)
@@ -281,14 +284,13 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
                          hidden_layers=config["sf"]["hidden_layers"])
         phi = TrainState.create(phi_def, phi_def.init(rphi, ex_observations)["params"],
                                 tx=optax.adam(config["lr_phi"]))
-        psi = TrainState.create(psi_def, psi_def.init(rpsi, ex_observations, ex_u, ex_u)["params"],
+        # psi z-slot carries the task vector w (z_dim), action slot the latent u (d_a).
+        psi = TrainState.create(psi_def, psi_def.init(rpsi, ex_observations, ex_w, ex_u)["params"],
                                 tx=optax.adam(config["lr_sf"]))
 
-        # Amortized latent actor (flowBC recipe over latents). Always created so the
-        # checkpoint tree shape does not depend on actor.enabled; only updated/acted with
-        # when enabled.
+        # Amortized latent actor (flowBC recipe over latents). Load-bearing: the measure
+        # backup bootstraps its latent at s'.
         rng, ractor, ravf = jax.random.split(rng, 3)
-        ex_w = jnp.zeros((ex_observations.shape[0], z_dim))
         actor_def = NoiseConditionedActor(
             action_dim=action_dim, hidden_dim=config["actor"]["hidden_dim"],
             hidden_layers=config["actor"]["hidden_layers"],
@@ -382,7 +384,8 @@ def get_config():
             discount=0.98,
             tau=0.01,
             ortho_coef=1000.0,       # reference PSM sweep winner
-            pessimism_penalty=0.0,
+            # 0.5 with num_parallel=2 = exact min-Q in the TD target; see the yaml note.
+            pessimism_penalty=0.5,
             actor_pessimism_penalty=0.5,
             norm_z=True,
             lr_phi=1.0e-5,
@@ -391,12 +394,13 @@ def get_config():
             lr_actor_vf=3.0e-4,
             phi=dict(hidden_dim=256, hidden_layers=2),
             sf=dict(hidden_dim=1024, hidden_layers=1, embedding_layers=2),
-            # amortized latent actor (flowBC recipe over latents, Rung 3). Off by default:
-            # v1 inference is flow-GPI; enable for the actor ablation / deployment path.
-            actor=dict(enabled=False, hidden_dim=512, hidden_layers=2, embedding_layers=2,
+            mix_ratio=0.5,           # P(w from phi(next_obs[perm])) vs random unit z
+            # amortized latent actor (flowBC recipe over latents). Load-bearing: the
+            # measure backup bootstraps its latent at s'; always trained.
+            actor=dict(hidden_dim=512, hidden_layers=2, embedding_layers=2,
                        vf_hidden_dim=512, vf_hidden_layers=4, flow_steps=10,
-                       bc_coeff=1.0, task_mix_ratio=0.5),
-            acting="gpi",            # gpi | actor
+                       bc_coeff=1.0),
+            acting="actor",          # actor | gpi (per-step latent argmax, actor-free)
             # frozen behavior flow (must match the Stage-A fql bc_only run)
             flow=dict(hidden_dims=(512, 512, 512, 512), value_hidden_dims=(512, 512, 512, 512),
                       layer_norm=False, critic_layer_norm=True),
@@ -405,12 +409,9 @@ def get_config():
             allow_untrained_flow=False,
             preimage_path=ml_collections.config_dict.placeholder(str),
             use_point_preimage=False,
-            # latent-family knobs
-            index_mix_ratio=0.5,     # P(u' from behavior preimages) vs N(0, I)
             u_clip=3.0,              # typical-set clamp on all latent draws
-            # flow-GPI inference
+            # acting=gpi (per-step latent argmax) inference
             gpi_num_u=64,
-            gpi_num_uprime=16,
             gpi_decode="onestep",    # onestep | ode
             flow_decode_steps=10,    # Euler steps for gpi_decode=ode
             ob_dims=ml_collections.config_dict.placeholder(list),

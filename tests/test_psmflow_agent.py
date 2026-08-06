@@ -1,9 +1,10 @@
-"""Task 3: PSMFlowAgent core — flow-indexed measure loss, frozen flow, jitted update.
+"""PSMFlowAgent core — latent-space PSM over a frozen flow, jitted update.
 
-The defining property of this agent versus PSM: the policy family is indexed by a
-LATENT u' under a frozen behaviour flow, and the TD backup uses that same latent as the
-continuation index, so every action the backup implies is a flow decode (in-support).
-No decoded action appears anywhere in training.
+The defining property of this agent versus PSM: actions live in the LATENT space of a
+frozen behaviour flow (u_data = Stage-B preimages), so every action training or acting
+implies is a flow decode (in-support). Since the 08-05 redesign (PAPER/decisions.tex),
+policy identity lives in the task vector w and the TD backup bootstraps the AMORTIZED
+ACTOR's latent at s' — policy improvement in latent space, not a fixed-index family.
 """
 import math
 import os
@@ -68,16 +69,17 @@ def test_flow_params_are_frozen():
         np.testing.assert_array_equal(np.asarray(b), np.asarray(a))
 
 
-def test_psi_slots_are_asymmetric():
-    """z-slot (policy index u') and action-slot (current latent u) must be wired
-    to different towers — swapping them must change the output."""
+def test_psi_slots_take_w_and_u():
+    """z-slot carries the task vector w (z_dim), action-slot the latent u (d_a);
+    both slots must be live inputs."""
     agent = _agent()
     obs = np.zeros((4, OBS), np.float32)
-    u1 = np.full((4, ACT), 0.5, np.float32)
-    u2 = np.full((4, ACT), -0.5, np.float32)
-    out12 = np.asarray(agent.psi(obs, u1, u2))
-    out21 = np.asarray(agent.psi(obs, u2, u1))
-    assert not np.allclose(out12, out21)
+    w = np.full((4, 16), 0.1, np.float32)
+    u = np.full((4, ACT), 0.5, np.float32)
+    out = np.asarray(agent.psi(obs, w, u))
+    assert out.shape[-2:] == (4, 16)
+    assert not np.allclose(out, np.asarray(agent.psi(obs, -w, u))), "w slot is dead"
+    assert not np.allclose(out, np.asarray(agent.psi(obs, w, -u))), "u slot is dead"
 
 
 def test_loss_decreases_on_fixed_batch():
@@ -115,41 +117,34 @@ def test_untrained_flow_requires_explicit_optin():
         assert "flow_ckpt_path" in str(e)
 
 
-def test_continuation_index_is_the_policy_index():
-    """The TD target must evaluate psi(s', u', u') — the continuation latent IS the
-    index. Using the dataset latent u in the action slot instead would bootstrap off a
-    different policy than the one being indexed, which is the whole point of the method.
-
-    Checked structurally: the target reads psi(next_obs, u_index, u_index), so making
-    u_data differ from u_index must NOT change the target term, while perturbing
-    u_index must.
-    """
+def test_bootstrap_latent_comes_from_the_actor():
+    """The TD bootstrap action must be the ACTOR's latent at s' under task_w — policy
+    improvement in latent space. Bootstrapping a fixed index instead was the root cause
+    of the flat-value failure (decisions.tex 08-05): psi then faithfully represents a
+    family with no goal-reaching member."""
     agent = _agent()
     batch = _batch()
-    rng = jax.random.PRNGKey(0)
-    sampled = agent.sample_step_inputs(batch, rng)
-
-    tphi = agent.phi(batch["next_observations"], params=agent.target_phi)
-    target_with = np.asarray(
-        agent.psi(batch["next_observations"], sampled.u_index, sampled.u_index,
-                  params=agent.target_psi) @ tphi.T)
-    # Swapping in u_data on the action slot must give a DIFFERENT matrix, proving the
-    # two slots are not accidentally fed the same thing.
-    target_wrong = np.asarray(
-        agent.psi(batch["next_observations"], sampled.u_index, sampled.u_data,
-                  params=agent.target_psi) @ tphi.T)
-    assert not np.allclose(target_with, target_wrong)
+    sampled = agent.sample_step_inputs(batch, jax.random.PRNGKey(0))
+    # Perturbing actor params must change u_next — the target is actor-coupled...
+    bumped = jax.tree_util.tree_map(lambda p: p + 0.1, agent.actor.params)
+    agent2 = agent.replace(actor=agent.actor.replace(params=bumped))
+    sampled2 = agent2.sample_step_inputs(batch, jax.random.PRNGKey(0))
+    assert not np.allclose(np.asarray(sampled.u_next), np.asarray(sampled2.u_next)), (
+        "u_next ignores the actor — the backup is not bootstrapping the actor's policy")
+    # ...while the dataset latent is untouched by it.
+    np.testing.assert_array_equal(np.asarray(sampled.u_data), np.asarray(sampled2.u_data))
 
 
-def test_index_latents_are_clipped_to_the_typical_set():
-    """u' draws are clamped to +-u_clip. Unclamped Gaussian tails are exactly where the
-    flow diverges (see tests/test_flow_inversion.py), so the index family must stay in
-    the region the flow can actually decode."""
-    agent = _agent(u_clip=1.0, index_mix_ratio=0.0)  # pure Gaussian draws
+def test_latent_draws_respect_the_typical_set_box():
+    """All latents entering the measure loss are clamped to +-u_clip: u_data by clip,
+    u_next by tanh * u_clip. Unclamped Gaussian tails are exactly where the flow
+    diverges (see tests/test_flow_inversion.py)."""
+    agent = _agent(u_clip=1.0)
     batch = _batch()
     sampled = agent.sample_step_inputs(batch, jax.random.PRNGKey(3))
-    u = np.asarray(sampled.u_index)
-    assert u.max() <= 1.0 + 1e-6 and u.min() >= -1.0 - 1e-6
+    for name, u in (("u_data", sampled.u_data), ("u_next", sampled.u_next)):
+        u = np.asarray(u)
+        assert u.max() <= 1.0 + 1e-6 and u.min() >= -1.0 - 1e-6, name
 
 
 @pytest.mark.skipif(not os.path.isdir(STAGE_A_CKPT),
@@ -285,13 +280,7 @@ def test_acts_through_the_real_eval_call_path():
 
 
 def test_gpi_select_returns_a_candidate_it_actually_scored():
-    """u* must be one of the sampled candidates, not an index into the wrong axis.
-
-    Q is reshaped (K, M) from a (K*M,) flat score built with repeat(u_cand, M) /
-    tile(u_idx, K). Getting repeat and tile the wrong way round still produces a
-    plausible-looking (K, M) matrix and a valid latent, so the bug is invisible unless
-    the returned u* is checked against the candidate set.
-    """
+    """u* must be one of the sampled candidates, not an index into the wrong axis."""
     agent = _agent()
     agent, _ = agent.update(_batch())
     ob = _batch(1)["observations"][0]
@@ -299,9 +288,9 @@ def test_gpi_select_returns_a_candidate_it_actually_scored():
 
     # Reconstruct the candidate draw the method makes.
     c = agent.config
-    r_u, _ = jax.random.split(jax.random.PRNGKey(0))
     cand = np.asarray(jnp.clip(
-        jax.random.normal(r_u, (c["gpi_num_u"], c["action_dim"])), -c["u_clip"], c["u_clip"]))
+        jax.random.normal(jax.random.PRNGKey(0), (c["gpi_num_u"], c["action_dim"])),
+        -c["u_clip"], c["u_clip"]))
     assert np.any(np.all(np.isclose(cand, u_star[None, :]), axis=1)), \
         "gpi_select returned a latent that is not among the sampled candidates"
 
