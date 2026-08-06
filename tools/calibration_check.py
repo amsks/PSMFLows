@@ -44,16 +44,16 @@ MAX_STEPS = 200
 
 
 def _score(agent, obs, u_cand, rng):
-    """Predicted value per candidate, exactly gpi_select's statistic."""
+    """Predicted value per candidate, exactly gpi_select's statistic (08-05 semantics:
+    psi(s, w, u)^T w with the inferred task w in the z-slot)."""
     from agents.psm import targets_uncertainty
     c = agent.config
-    k, mi = u_cand.shape[0], c["gpi_num_uprime"]
-    u_idx = jnp.clip(jax.random.normal(rng, (mi, c["action_dim"])), -c["u_clip"], c["u_clip"])
-    obs_b = jnp.broadcast_to(obs, (k * mi, *obs.shape))
-    uc, ui = jnp.repeat(u_cand, mi, axis=0), jnp.tile(u_idx, (k, 1))
-    Qs = (agent.psi(obs_b, ui, uc) * agent.task_z).sum(-1)
+    k = u_cand.shape[0]
+    obs_b = jnp.broadcast_to(obs, (k, *obs.shape))
+    w_b = jnp.broadcast_to(agent.task_z, (k, *agent.task_z.shape))
+    Qs = (agent.psi(obs_b, w_b, u_cand) * agent.task_z).sum(-1)
     qmean, qunc = targets_uncertainty(Qs, c["num_parallel"])
-    return np.asarray((qmean - c["actor_pessimism_penalty"] * qunc).reshape(k, mi).max(axis=1))
+    return np.asarray(qmean - c["actor_pessimism_penalty"] * qunc)
 
 
 def _pearson(a, b):

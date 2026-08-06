@@ -105,6 +105,19 @@ def repair_invalid_preimages(dataset, max_invalid_frac=MAX_INVALID_PREIMAGE_FRAC
     return dataset, valid
 
 
+def _with_skills(obs, skills):
+    """Concat `skills` onto `obs` before either hits the flow nets, in ONE place.
+
+    Stage-A's hindsight-skill conditioning turns the flow into `G(s, c, u)` with
+    `c = skills` fed to the actor nets as `concat([obs, skills], -1)` in place of `obs`
+    (see agents/fql.py once `skill_cond` lands). `skills=None` is a no-op — returns
+    `obs` unchanged — so every caller stays byte-identical to the unconditioned flow.
+    """
+    if skills is None:
+        return obs
+    return jnp.concatenate([obs, skills], axis=-1)
+
+
 def sample_preimage_noise(means, covs, weights, rng=None):
     """Sample one preimage-noise vector per transition from its EM Gaussian mixture.
 
@@ -140,7 +153,7 @@ def sample_preimage_noise(means, covs, weights, rng=None):
     return noise.astype(np.float32)
 
 
-def augment_dataset_with_preimage_distribution(agent, dataset, config):
+def augment_dataset_with_preimage_distribution(agent, dataset, config, skills=None):
     """Precompute the noise preimage of each action under the BC flow model.
 
     For every transition the preimage of `action` (in the latent noise space) is fit with a
@@ -151,6 +164,12 @@ def augment_dataset_with_preimage_distribution(agent, dataset, config):
         agent: A trained agent exposing `compute_full_proposal_distribution_em`.
         dataset: A dataset (dict-like) with `observations` and `actions`.
         config: Inversion config (its own namespaced group; read via `.get`).
+        skills: Optional (N, skill_dim) hindsight-skill targets (Stage-A's `c`; see
+            `_with_skills`). None (default) reproduces the unconditioned flow exactly;
+            `agent` must have been built with matching `skill_cond`/`skill_window`.
+            Raw per-row skills are threaded into
+            `compute_full_proposal_distribution_em(..., skills=)`, which widens
+            conditioned inputs itself — never pre-concatenate here.
 
     Returns:
         The dataset (plain dict) with the noise-preimage slots populated.
@@ -178,28 +197,28 @@ def augment_dataset_with_preimage_distribution(agent, dataset, config):
     # flow_steps setting, so treat a much lower value as the anomaly, not 7 itself.
     dataset['preimage_ess'] = np.zeros((size,), np.float32)
 
-    def _em_single(state, action, rng):
-        return agent.compute_full_proposal_distribution_em(
-            state, action, rng,
-            num_samples=num_samples,
-            n_steps=n_steps,
-            n_initial_steps=n_initial_steps,
-            alpha=alpha,
-            n_components=num_clusters,
-        )
-
-    _em_batch = jax.jit(jax.vmap(_em_single))
+    _kw = dict(num_samples=num_samples, n_steps=n_steps,
+               n_initial_steps=n_initial_steps, alpha=alpha, n_components=num_clusters)
+    # The agent widens conditioned inputs itself (agents/fql.py `_actor_obs`), so raw
+    # observations + per-row skills go in — pre-concatenating here would double-concat.
+    if skills is None:
+        _em_batch = jax.jit(jax.vmap(
+            lambda state, action, rng: agent.compute_full_proposal_distribution_em(
+                state, action, rng, **_kw)))
+    else:
+        _em_batch = jax.jit(jax.vmap(
+            lambda state, action, rng, sk: agent.compute_full_proposal_distribution_em(
+                state, action, rng, skills=sk, **_kw)))
 
     rng = jax.random.PRNGKey(seed)
     for start in trange(0, size, batch_size, desc='Inverting flow'):
         end = min(start + batch_size, size)
         rng, batch_rng = jax.random.split(rng)
         keys = jax.random.split(batch_rng, end - start)
-        means, covs, weights, ess = _em_batch(
-            dataset['observations'][start:end],
-            dataset['actions'][start:end],
-            keys,
-        )
+        args = (dataset['observations'][start:end], dataset['actions'][start:end], keys)
+        if skills is not None:
+            args = args + (skills[start:end],)
+        means, covs, weights, ess = _em_batch(*args)
         dataset['noise_preimage_mean'][start:end] = np.asarray(means)
         dataset['noise_preimage_cov'][start:end] = np.asarray(covs)
         dataset['noise_preimage_weights'][start:end] = np.asarray(weights)
@@ -211,7 +230,7 @@ def augment_dataset_with_preimage_distribution(agent, dataset, config):
     return dataset
 
 
-def augment_dataset_with_point_preimage(agent, dataset, config):
+def augment_dataset_with_point_preimage(agent, dataset, config, skills=None):
     """Store the exact backward-ODE preimage of each action and its decode round-trip error.
 
     Adds `noise_preimage_point (N, A)` and `preimage_roundtrip (N,)`. The point preimage
@@ -232,6 +251,9 @@ def augment_dataset_with_point_preimage(agent, dataset, config):
         agent: A trained agent exposing `_get_preimage_and_jacobian` and `compute_flow_actions`.
         dataset: A dataset (dict-like) with `observations` and `actions`.
         config: Inversion config (its own namespaced group; read via `.get`).
+        skills: Optional (N, skill_dim) hindsight-skill targets (Stage-A's `c`; see
+            `_with_skills`). None (default) reproduces the unconditioned flow exactly;
+            `agent` must have been built with matching `skill_cond`/`skill_window`.
 
     Returns:
         A new dict: the input dataset plus the point-preimage and round-trip slots.
@@ -250,9 +272,18 @@ def augment_dataset_with_point_preimage(agent, dataset, config):
     for start in trange(0, size, batch_size, desc='Point preimages'):
         end = min(start + batch_size, size)
         obs = dataset['observations'][start:end]
+        skills_batch = None if skills is None else skills[start:end]
         act = dataset['actions'][start:end]
-        x0 = _points(obs, act)
-        recon = agent.compute_flow_actions(obs, noises=x0)
+        # `_get_preimage_and_jacobian` talks to the actor nets directly and has no `skills`
+        # kwarg of its own (agents/fql.py did not add one), so it needs the concat done
+        # externally to match the (possibly skill_cond-widened) net input fixed at
+        # `agent.create()` time.
+        x0 = _points(_with_skills(obs, skills_batch), act)
+        # `compute_flow_actions`, unlike the inverter above, concatenates skills onto obs
+        # INTERNALLY (`agent._actor_obs`) whenever the agent was built with `skill_cond`.
+        # Feeding it the already-concatenated array from the `_points` call above would
+        # double-concat, so this call takes the RAW obs plus the `skills=` kwarg instead.
+        recon = agent.compute_flow_actions(obs, noises=x0, skills=skills_batch)
         point[start:end] = np.asarray(x0)
         # Compare against the CLIPPED action: compute_flow_actions clips its output to
         # [-1, 1], so an unclipped target would charge the inverter for the clip.

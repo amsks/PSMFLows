@@ -187,8 +187,8 @@ def test_em_ess_survives_a_diverging_flow_sample(monkeypatch):
     # one sample of the proposal batch integrates to a non-finite action.
     real_compute_flow_actions = FQLAgent.compute_flow_actions
 
-    def diverging(self, observations, noises):
-        actions = real_compute_flow_actions(self, observations, noises)
+    def diverging(self, observations, noises, skills=None):
+        actions = real_compute_flow_actions(self, observations, noises, skills=skills)
         return actions.at[0].set(jnp.nan)
 
     monkeypatch.setattr(FQLAgent, "compute_flow_actions", diverging)
@@ -228,7 +228,7 @@ def test_ess_reports_zero_not_num_samples_when_every_sample_is_rejected(monkeypa
     # Every sample non-finite == the all-rejected case the fallback exists for.
     monkeypatch.setattr(
         FQLAgent, "compute_flow_actions",
-        lambda self, observations, noises: jnp.full_like(jnp.asarray(noises), jnp.nan))
+        lambda self, observations, noises, skills=None: jnp.full_like(jnp.asarray(noises), jnp.nan))
 
     keys = jax.random.split(jax.random.PRNGKey(0), obs.shape[0])
     num_samples = 24

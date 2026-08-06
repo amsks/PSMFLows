@@ -42,6 +42,7 @@ import utils.xla_guard  # noqa: F401  -- MUST precede jax (see module docstring)
 
 import hydra
 import ml_collections
+import numpy as np
 from omegaconf import OmegaConf
 
 from agents.fql import FQLAgent
@@ -72,6 +73,26 @@ def main(cfg):
     assert cfg.agent.agent_name == 'fql', 'run with agent=fql (Stage-A flow shapes)'
     agent_cfg = ml_collections.ConfigDict(
         _lists_to_tuples(OmegaConf.to_container(cfg.agent, resolve=True)))
+
+    # Hindsight-skill conditioning (Stage A, `skill_cond`/`skill_window`): the checkpoint's
+    # own config says whether its flow is G(s, u) or G([s; c], u), so read it from there
+    # rather than a separate flag — a mismatched skills array would silently corrupt every
+    # preimage in the npz. `skill_cond` is absent from configs predating skill conditioning,
+    # hence the default-False `.get`.
+    skill_cond = bool(agent_cfg.get('skill_cond', False))
+    skill_window = int(agent_cfg.get('skill_window', 0)) if skill_cond else None
+    skills = None
+    if skill_cond:
+        # Lazy import: `add_skill_targets` belongs to the parallel Stage-A hindsight-skill
+        # workstream (utils/datasets.py) and may not have landed yet. Importing only inside
+        # this branch keeps the skill_cond=False path (today's default) working regardless.
+        from utils.datasets import add_skill_targets
+        skills = add_skill_targets(ds, window=skill_window)
+        ds = {**ds, 'skills': skills}
+
+    # `FQLAgent.create` widens the actor nets' example input itself (agents/fql.py:
+    # `actor_ex_obs = concat([ex_observations, ex_observations])` when `skill_cond`), so the
+    # RAW (un-concatenated) example observations go in here regardless of skill_cond.
     agent = FQLAgent.create(cfg.seed, ds['observations'][:1], ds['actions'][:1], agent_cfg)
 
     # The point preimage is inverted at inversion.n_initial_steps but decoded at the
@@ -98,8 +119,8 @@ def main(cfg):
             'set restore_path=<stage-A ckpt dir> '
             '(or inversion.allow_untrained=true for plumbing smokes)')
 
-    out = augment_dataset_with_preimage_distribution(agent, ds, dict(cfg.inversion))
-    out = augment_dataset_with_point_preimage(agent, out, dict(cfg.inversion))
+    out = augment_dataset_with_preimage_distribution(agent, ds, dict(cfg.inversion), skills=skills)
+    out = augment_dataset_with_point_preimage(agent, out, dict(cfg.inversion), skills=skills)
 
     # The flow inverse can diverge on individual transitions and NaN spreads from there
     # through every product built on it. Record which rows are trustworthy BEFORE writing,
@@ -108,16 +129,27 @@ def main(cfg):
     out, valid = repair_invalid_preimages(out)
     n_bad = int((valid < 0.5).sum())
 
+    if skill_cond:
+        # `skills` itself is already in `out` (both augment_* pass unknown dataset keys
+        # through untouched); `skill_window` is added here, AFTER repair/validity, as a
+        # scalar sidecar — get_size()/compute_preimage_validity() call len() on every
+        # dataset value, which a bare scalar array would break.
+        out['skill_window'] = np.asarray(skill_window, np.int32)
+
     out_path = cfg.get('preimage_out', 'preimages.npz')
     save_augmented_dataset(out_path, out)
     # Sidecar: which flow produced these latents. Without it an npz is unusable — the
     # preimages are only meaningful for the exact checkpoint and discretization below.
+    # skill_cond/skill_window are recorded here too (not just in the npz) so Stage C's
+    # pairing guard can catch a checkpoint/preimage skill-conditioning mismatch without
+    # loading the full npz.
     with open(out_path + '.meta.json', 'w') as f:
         json.dump(dict(env_name=cfg.env_name, restore_path=str(cfg.restore_path),
                        restore_epoch=cfg.restore_epoch, flow_steps=int(agent_cfg['flow_steps']),
                        inversion=OmegaConf.to_container(cfg.inversion, resolve=True),
                        num_transitions=int(out['actions'].shape[0]),
-                       num_invalid_preimages=n_bad), f, indent=2)
+                       num_invalid_preimages=n_bad,
+                       skill_cond=skill_cond, skill_window=skill_window), f, indent=2)
     print(f"Wrote {out_path} (+ .meta.json), n={out['actions'].shape[0]}, "
           f"invalid={n_bad}")
 
