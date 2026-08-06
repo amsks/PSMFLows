@@ -8,6 +8,9 @@ dist/
 .ruff_cache/
 
 # Virtual environments
+# `.venv` is a SYMLINK to /data-local here, and a trailing-slash pattern never matches a
+# symlink -- hence the bare entry as well, or `git status` lists the whole venv.
+.venv
 .venv/
 .venv*/
 venv/
@@ -26,3 +29,9 @@ wandb/
 *.out
 *.toc
 *.synctex.gz
+*.bbl
+*.blg
+
+# Diagnostic figures the tools drop in the repo root (viz_*, calibration_check,
+# latent_reachability, ...). Curated figures live in assets/ and PAPER/ and stay tracked.
+/*.png

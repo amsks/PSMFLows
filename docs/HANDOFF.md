@@ -18,7 +18,83 @@ hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RES
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
 Branch: `feat/psm-integration` · Machine: `midi-01` (UT CS)
-Date: **2026-08-04** (latest) · prior: 2026-07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+Date: **2026-08-05** (latest) · prior: 2026-08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+
+---
+
+<!-- _class: lead -->
+
+## 2026-08-05 session — ROOT CAUSE: the fixed-u family is structurally non-goal-covering; Rung-1 is dead on navigate data
+
+All Stage-C variants (pointpre x2, mixture, pointpre1M, mix0 audit — 11 runs) read **0.0
+success** on pointmaze task1; cube Stage-C floors at 0.02–0.06. D1–D3 pass. This session
+root-caused it. **It is not a bug anywhere — the policy family itself has no goal-reaching
+member, so even a perfect psi gives GPI a flat landscape.** Three measurements:
+
+### 1. Exhaustive reachability: 0 of 233 latents ever reach the goal
+
+`tools/latent_reachability.py` (new). d_a=2 ⇒ a 13x13 grid covers the ENTIRE box
+[-3,3]^2 — no sampling escape — plus 32 dataset preimages + 32 preimages of actual
+goal-reaching transitions, each rolled 2 full 1000-step episodes (kills the 200-step
+confound in `calibration_check`). **num_success_any = 0.** 75% of latents never get
+closer than ~23.5 (maze is ~30 across); best is 1.32 at the saturated corner u≈[2,2.5].
+Goal-transition preimages do NO better than random ones — a preimage decodes to its
+action only in its own state. Report:
+`/data-local/amsks/PSMFLows/logs/latent_reachability_pointmaze.json` + `latent_reachability.png`.
+
+### 2. The expert's route is latent WHITE NOISE — no fixed u encodes a route
+
+From the npz alone: within-episode preimage variance / marginal variance = **0.99**
+(1.0 = zero episode-level identity); lag-1 autocorr 0.27, ~0 by lag 50; goal-reaching
+segments identical (0.987). The BC flow factorizes behavior as (state → conditional,
+u → quantile); the expert's direction choice is driven by a goal that is NOT in the
+observation (obs = xy only), so that variance is forced into u independently each step.
+Routes exist only as latent *sequences*; Rung-1 assumed u is a persistent policy index,
+but Stage A/B construct it as per-step noise. **D2's "pass" measured coherence+diversity,
+not usefulness — it could not see this.**
+
+### 3. What the family actually contains: orbiters and constant headings
+
+`tools/viz_fixed_u_field.py` (new): quiver of a = G(xy, u) over the maze per fixed u +
+rollout overlay (`fixed_u_fields.png`). Two degenerate regimes and nothing else:
+- **Typical u** (prior bulk, e.g. [0,0]): state-dependent field that follows corridors
+  but with per-cell arbitrary direction choices → circulation → the rollout ORBITS near
+  start (path length 164, net displacement 1.4). heading circ_var 0.83.
+- **Saturated u** (box corners): tanh saturation ⇒ near-constant heading everywhere
+  (circ_var 0.01–0.03) → wall-sliding diagonal marches. The up-right one gets to 1.32
+  from the goal and slides past — it cannot turn, by construction.
+Per-cell coverage is FINE: angle circ_var across 512 draws at fixed cells = 0.45–0.78 —
+every direction stays available per state. The deficiency is purely temporal.
+
+### Why Stage C then behaves exactly as observed
+
+`agents/psmflow.py` TD target (line ~79) bootstraps `psi(next_obs, u_idx, u_idx)` — the
+continuation latent IS the index, faithful to the fixed-u semantics. Since no pi_u
+reaches the goal, true V^{pi_u}(task) is the same "never" value for every u → psi^T w is
+flat (Q spread ~10% of mean, `viz_latent_value.png`), gpi argmax is noise and drifts to
+the saturated corners (the only occupancy-distinct members), calibration reads
+predicted 85–212 / realized all-0. Every symptom follows from the one cause.
+
+### Where this leaves the method (decision needed)
+
+The paper's support constraint (every considered action is a flow decode, C=1) survives;
+the "fixed noise = policy index" premise does not. Candidate directions, in rough order:
+1. **Latent-space PSM (Rung-3 completed properly):** keep the frozen flow; make the
+   index a task vector w conditioning a per-step latent actor u(s,w) (already built,
+   08-04), and change the psi backup to bootstrap the ACTOR's latent at s'
+   (psi(s', ·, u(s',w))) instead of u_idx — policy improvement in latent space, still
+   in-support, per-cell coverage measured sufficient. Aligns with in-sample TD Prop 7.2.
+2. **Trajectory-level latent in Stage A** (skill-VAE/OPAL-style G(s,u;w_traj), invert w
+   per trajectory) — makes fixed-w routes exist by construction; biggest retool.
+3. Report as a negative-result finding for flow-noise-indexed families + pivot envs
+   where behavior modes ARE single-step-consistent (cube floor says probably not).
+
+### In flight / artifacts
+
+- tmux `audit_psm_pm` (PSM baseline, pointmaze task1): 0.0 through 200k, ETA ~5h — the
+  control for whether an RL-optimized family navigates pointmaze at all.
+- tmux `audit_psmflow_mix0`: finished flat 0.0 (as the root cause predicts).
+- New tools: `tools/latent_reachability.py`, `tools/viz_fixed_u_field.py` (uncommitted).
 
 ---
 
