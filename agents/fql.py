@@ -78,20 +78,26 @@ class FQLAgent(flax.struct.PyTreeNode):
         cov = (eigvecs * cov_eigvals[None, :]) @ eigvecs.T
         return x_0, cov
     
-    def compute_full_proposal_distribution(self, state, action, rng, num_samples=100, n_steps=10, n_initial_steps=100, alpha=1.0):
+    def compute_full_proposal_distribution(self, state, action, rng, num_samples=100, n_steps=10, n_initial_steps=100, alpha=1.0, skills=None):
         """Refine the preimage proposal toward pi(x) ~ exp(-alpha * ||flow(x) - action||) by importance sampling.
 
         alpha is an inverse temperature (1/T): larger alpha => sharper target.
+        `state` is the RAW observation; with skill_cond the hindsight target `skills`
+        must be passed and is threaded to every flow call (never pre-concatenate).
         """
-        x_0, cov = self._get_predistribution_proposal(state, action, n_initial_steps, alpha)
+        if self.config['skill_cond']:
+            assert skills is not None, 'skill_cond=True: pass the raw state plus skills'
+        x_0, cov = self._get_predistribution_proposal(
+            self._actor_obs(state, skills), action, n_initial_steps, alpha)
         state_b = jnp.broadcast_to(state, (num_samples, *state.shape))
+        skills_b = None if skills is None else jnp.broadcast_to(skills, (num_samples, *skills.shape))
 
         def _step(carry, _):
             x_0, cov, rng = carry
             prop_dist = distrax.MultivariateNormalFullCovariance(loc=x_0, covariance_matrix=cov)
             rng, sample_rng = jax.random.split(rng)
             samples, log_prob = prop_dist.sample_and_log_prob(seed=sample_rng, sample_shape=(num_samples,))
-            actions = self.compute_flow_actions(state_b, noises=samples)
+            actions = self.compute_flow_actions(state_b, noises=samples, skills=skills_b)
             dist = alpha * jnp.linalg.norm(actions - action[None], axis=-1)
             # Same exposure as the EM variant: the flow diverges to NaN when integrated
             # from a tail sample at flow_steps>=100, and one NaN makes the whole softmax
@@ -113,14 +119,19 @@ class FQLAgent(flax.struct.PyTreeNode):
         (x_0, cov, rng), ess = jax.lax.scan(_step, (x_0, cov, rng), None, length=n_steps)
         return x_0, cov, ess
 
-    def compute_full_proposal_distribution_em(self, state, action, rng, num_samples=100, n_steps=10, n_initial_steps=100, alpha=1.0, n_components=3):
+    def compute_full_proposal_distribution_em(self, state, action, rng, num_samples=100, n_steps=10, n_initial_steps=100, alpha=1.0, n_components=3, skills=None):
         """Importance-weighted EM fit of a Gaussian mixture to pi(x) ~ exp(-alpha * ||flow(x) - action||).
 
         Samples are drawn from the current mixture; per-sample IS weights w_n ~ pi/q
         carry the energy, membership responsibilities r_{k,n} assign them to components,
         and the M-step uses gamma_{k,n} = w_n * r_{k,n}. alpha is an inverse temperature.
+        `state` is the RAW observation; with skill_cond pass `skills` (as in the IS
+        variant above), never a pre-concatenated state.
         """
-        x_0, cov = self._get_predistribution_proposal(state, action, n_initial_steps, alpha)
+        if self.config['skill_cond']:
+            assert skills is not None, 'skill_cond=True: pass the raw state plus skills'
+        x_0, cov = self._get_predistribution_proposal(
+            self._actor_obs(state, skills), action, n_initial_steps, alpha)
         action_dim = x_0.shape[-1]
 
         rng, init_rng = jax.random.split(rng)
@@ -140,7 +151,8 @@ class FQLAgent(flax.struct.PyTreeNode):
             samples = component_samples.reshape((-1, action_dim))
 
             state_b = jnp.broadcast_to(state, (samples.shape[0], *state.shape))
-            actions = self.compute_flow_actions(state_b, noises=samples)
+            skills_b = None if skills is None else jnp.broadcast_to(skills, (samples.shape[0], *skills.shape))
+            actions = self.compute_flow_actions(state_b, noises=samples, skills=skills_b)
             log_energy = -alpha * jnp.linalg.norm(actions - action[None], axis=-1)
 
             log_likelihoods = jax.vmap(
@@ -228,6 +240,18 @@ class FQLAgent(flax.struct.PyTreeNode):
         (means, covs, weights, rng), ess = jax.lax.scan(_em_step, (means, covs, weights, rng), None, length=n_steps)
         return means, covs, weights, ess
 
+    def _actor_obs(self, observations, skills):
+        """Condition actor-network inputs on the hindsight skill target.
+
+        No-op (returns `observations` unchanged) when skill_cond is off. When on, `skills`
+        must be an array shaped like `observations`; concatenation is the ONLY mechanism
+        (GCBC-style), never a latent sample. `skill_cond` is a static config value, so the
+        branch resolves at trace time and stays jit-compatible.
+        """
+        if not self.config['skill_cond']:
+            return observations
+        return jnp.concatenate([observations, skills], axis=-1)
+
     def critic_loss(self, batch, grad_params, rng):
         """Compute the FQL critic loss."""
         rng, sample_rng = jax.random.split(rng)
@@ -264,14 +288,15 @@ class FQLAgent(flax.struct.PyTreeNode):
         x_t = (1 - t) * x_0 + t * x_1
         vel = x_1 - x_0
 
-        pred = self.network.select('actor_bc_flow')(batch['observations'], x_t, t, params=grad_params)
+        actor_obs = self._actor_obs(batch['observations'], batch.get('skills'))
+        pred = self.network.select('actor_bc_flow')(actor_obs, x_t, t, params=grad_params)
         bc_flow_loss = jnp.mean((pred - vel) ** 2)
 
         # Distillation loss.
         rng, noise_rng = jax.random.split(rng)
         noises = jax.random.normal(noise_rng, (batch_size, action_dim))
-        target_flow_actions = self.compute_flow_actions(batch['observations'], noises=noises)
-        actor_actions = self.network.select('actor_onestep_flow')(batch['observations'], noises, params=grad_params)
+        target_flow_actions = self.compute_flow_actions(batch['observations'], noises=noises, skills=batch.get('skills'))
+        actor_actions = self.network.select('actor_onestep_flow')(actor_obs, noises, params=grad_params)
         distill_loss = jnp.mean((actor_actions - target_flow_actions) ** 2)
 
         if self.config['bc_only']:
@@ -363,8 +388,14 @@ class FQLAgent(flax.struct.PyTreeNode):
         observations,
         seed=None,
         temperature=1.0,
+        skills=None,
     ):
-        """Sample actions from the one-step policy."""
+        """Sample actions from the one-step policy.
+
+        `skills` is required (raises otherwise) when skill_cond is on; unused when off.
+        """
+        if self.config['skill_cond'] and skills is None:
+            raise ValueError('skill_cond=True requires `skills` in sample_actions().')
         action_seed, noise_seed = jax.random.split(seed)
         noises = jax.random.normal(
             action_seed,
@@ -373,7 +404,8 @@ class FQLAgent(flax.struct.PyTreeNode):
                 self.config['action_dim'],
             ),
         )
-        actions = self.network.select('actor_onestep_flow')(observations, noises)
+        actor_obs = self._actor_obs(observations, skills)
+        actions = self.network.select('actor_onestep_flow')(actor_obs, noises)
         actions = jnp.clip(actions, -1, 1)
         return actions
 
@@ -382,8 +414,10 @@ class FQLAgent(flax.struct.PyTreeNode):
         self,
         observations,
         noises,
+        skills=None,
     ):
         """Compute actions from the BC flow model using the Euler method."""
+        observations = self._actor_obs(observations, skills)
         if self.config['encoder'] is not None:
             observations = self.network.select('actor_bc_flow_encoder')(observations)
         actions = noises
@@ -418,6 +452,13 @@ class FQLAgent(flax.struct.PyTreeNode):
         ob_dims = ex_observations.shape[1:]
         action_dim = ex_actions.shape[-1]
 
+        # skill_cond: actor networks take concat([observations, skills], -1). Skills live
+        # in observation space, so ex_observations doubles as the init-time skills example
+        # -- only its shape matters here, not its content.
+        actor_ex_obs = ex_observations
+        if config['skill_cond']:
+            actor_ex_obs = jnp.concatenate([ex_observations, ex_observations], axis=-1)
+
         # Define encoders.
         encoders = dict()
         if config['encoder'] is not None:
@@ -449,12 +490,12 @@ class FQLAgent(flax.struct.PyTreeNode):
         network_info = dict(
             critic=(critic_def, (ex_observations, ex_actions)),
             target_critic=(copy.deepcopy(critic_def), (ex_observations, ex_actions)),
-            actor_bc_flow=(actor_bc_flow_def, (ex_observations, ex_actions, ex_times)),
-            actor_onestep_flow=(actor_onestep_flow_def, (ex_observations, ex_actions)),
+            actor_bc_flow=(actor_bc_flow_def, (actor_ex_obs, ex_actions, ex_times)),
+            actor_onestep_flow=(actor_onestep_flow_def, (actor_ex_obs, ex_actions)),
         )
         if encoders.get('actor_bc_flow') is not None:
             # Add actor_bc_flow_encoder to ModuleDict to make it separately callable.
-            network_info['actor_bc_flow_encoder'] = (encoders.get('actor_bc_flow'), (ex_observations,))
+            network_info['actor_bc_flow_encoder'] = (encoders.get('actor_bc_flow'), (actor_ex_obs,))
         networks = {k: v[0] for k, v in network_info.items()}
         network_args = {k: v[1] for k, v in network_info.items()}
 
@@ -493,6 +534,11 @@ def get_config():
             # Q term, keeping bc_flow_loss + alpha*distill_loss. The param tree is unchanged
             # (critic present but untrained) so checkpoints restore into a default FQL agent.
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
+            skill_cond=False,  # True => actor flow is G(s, c, u): concat the hindsight-window
+            # skill target c (batch['skills']) onto observations for actor_bc_flow and
+            # actor_onestep_flow (GCBC-style, not a latent-variable skill VAE). False is a
+            # byte-identical no-op; the critic path is unaffected either way.
+            skill_window=100,  # Steps ahead for the hindsight skill target, clipped at episode end.
         )
     )
     return config

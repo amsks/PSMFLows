@@ -16,7 +16,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from agents import agents
 from envs.env_utils import make_env_and_datasets
-from utils.datasets import Dataset, ReplayBuffer
+from utils.datasets import Dataset, ReplayBuffer, add_skill_targets
 from utils.evaluation import evaluate, flatten
 from utils.flax_utils import restore_agent, save_agent
 from utils.log_utils import CsvLogger, get_exp_name, get_wandb_video, setup_wandb
@@ -55,6 +55,19 @@ def main(cfg: DictConfig):
         assert 'singletask' in cfg.env_name, 'Rendering is currently only supported for OGBench environments.'
     if cfg.online_steps > 0:
         assert 'visual' not in cfg.env_name, 'Online fine-tuning is currently not supported for visual environments.'
+
+    if config.get('skill_cond', False):
+        # Hindsight-window skill conditioning (fql only): attach batch['skills'] before
+        # Dataset.create freezes the arrays. make_env_and_datasets may already hand back a
+        # frozen Dataset (OGBench path), so unfreeze to a plain dict first.
+        train_dataset = dict(train_dataset)
+        train_dataset['skills'] = add_skill_targets(train_dataset, config['skill_window'])
+        if val_dataset is not None:
+            val_dataset = dict(val_dataset)
+            val_dataset['skills'] = add_skill_targets(val_dataset, config['skill_window'])
+            # train_dataset is re-frozen by Dataset.create below; val_dataset is not, so
+            # re-wrap it here or it stays a plain dict when p_aug/frame_stack are set.
+            val_dataset = Dataset.create(**val_dataset)
 
     if config['agent_name'] == 'psmflow':
         # psmflow trains on the preimage-augmented dataset (latents per transition).

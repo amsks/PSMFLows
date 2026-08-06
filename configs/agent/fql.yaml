@@ -16,3 +16,7 @@ normalize_q_loss: false
 bc_only: false         # true => reward-free behaviour-flow pretraining for psmflow
                        # (no critic, no Q term, never reads rewards/masks)
 encoder: null          # visual encoder name (None, 'impala_small', ...)
+skill_cond: false      # true => actor flow is G(s, c, u): concat the hindsight-window
+                       # skill target c onto observations (GCBC-style); false is a
+                       # byte-identical no-op. Critic path is unaffected either way.
+skill_window: 100      # steps ahead for the hindsight skill target (clipped at episode end)

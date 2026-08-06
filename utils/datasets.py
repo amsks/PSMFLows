@@ -31,6 +31,27 @@ def batched_random_crop(imgs, crop_froms, padding):
     return jax.vmap(random_crop, (0, 0, None))(imgs, crop_froms, padding)
 
 
+def add_skill_targets(dataset_dict, window):
+    """Hindsight-window skill target: skill[i] = observations[min(i + window, end_of_episode(i))].
+
+    end_of_episode(i) is the last index of the episode containing i, from episode
+    boundaries in `terminals` (> 0.5). Vectorized via searchsorted over episode-end
+    indices -- no python loop over the dataset. Returns the (N, *ob_dims) array; the
+    caller stores it as dataset['skills'] so sampled batches carry batch['skills'].
+    """
+    observations = np.asarray(dataset_dict['observations'])
+    terminals = np.asarray(dataset_dict['terminals'])
+    n = terminals.shape[0]
+    ends = np.nonzero(terminals > 0.5)[0]
+    if ends.size == 0 or ends[-1] != n - 1:
+        # The dataset may not mark the final row as terminal; it still ends an episode.
+        ends = np.concatenate([ends, [n - 1]])
+    idx = np.arange(n)
+    end_of_episode = ends[np.searchsorted(ends, idx, side='left')]
+    skill_idx = np.minimum(idx + window, end_of_episode)
+    return observations[skill_idx]
+
+
 def get_noise_preimage_dataset(dataset, num_clusters=1):
     """Return a dataset with placeholders for the noise preimage."""
     size = get_size(dataset)
