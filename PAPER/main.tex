@@ -496,8 +496,8 @@ chance level $(m-1)/m$, then a fixed $u$ selects modes essentially at random acr
 the successor measures $\{M^{\pi_u}\}$ all concentrate near $M^{\muhat}$, the family spans
 a low-dimensional and uninformative set, and the basis dimension $d_z$ needed to
 distinguish useful policies grows. The quantity $\varepsilon$ in \eqref{eq:coherence} is
-directly estimable from rollouts (diagnostic D2), so Assumption~\ref{ass:coherence} is
-falsifiable before any representation is trained. If it fails, the mitigation is to
+directly estimable from rollouts, so Assumption~\ref{ass:coherence} is falsifiable
+before any representation is trained. If it fails, the mitigation is to
 re-index the family --- learn $\nu_\eta(u\mid s,z)$ for a low-dimensional $z$ with a
 mutual-information term --- which preserves every result in
 \S\ref{sec:family} because those results hold for arbitrary $\nu$.
@@ -736,8 +736,7 @@ $\Eth(s,\cdot)=\Gth(s,\cdot)^{-1}$ returns $p_0$.
 \end{proof}
 
 \noindent
-Lemma~\ref{lem:typicality} turns diagnostic D3 into a direct test of
-Assumption~\ref{ass:exact}: comparing the empirical distribution of $\|\Eth(s,a)\|^2$
+Lemma~\ref{lem:typicality} gives a direct test of Assumption~\ref{ass:exact}: comparing the empirical distribution of $\|\Eth(s,a)\|^2$
 against $\chi^2_{d_a}$ tests exactness of the flow, not merely numerical health of the
 integrator. If inverted latents are atypical under $p_0$, then the latents seen at training
 time and the samples $u'\sim p_0$ used at evaluation time come from different
@@ -922,9 +921,7 @@ In \eqref{eq:loss-empirical} the bootstrap term evaluates $\bar\psi$ at the succ
 $s_i'$ with continuation index $u'$, whose decoded action is $\Gth(s_i',u')$ --- a sample
 from $\muhat(\cdot\mid s_i')$ by Proposition~\ref{prop:insample}. \emph{Every action the
 backup ever evaluates is a flow decode.} The corresponding line in PSM evaluates a uniform
-random action; in FB, an unconstrained actor maximiser. Holding everything else fixed and
-swapping only this line is the cleanest single-variable comparison available, and is the
-ablation the experimental programme should run first.
+random action; in FB, an unconstrained actor maximiser.
 \end{remark}
 
 \begin{remark}[Role of $\mathcal L_{\mathrm{ortho}}$]
@@ -956,8 +953,7 @@ regulariser tuned for stability.
 \noindent
 Freezing $\theta$ after Stage A means the representation is trained against a
 \emph{stationary} policy family. FB trains against a moving actor, so its measure targets
-chase a family that changes underneath them; the resulting non-stationarity is a plausible
-contributor to FB's seed variance and is worth measuring directly.
+chase a family that changes underneath them.
 
 % ==============================================================================
 \section{Zero-shot inference: a three-rung ladder}
@@ -1029,9 +1025,7 @@ scheme is most fragile: the outer maximisation over $u$ is an adversarial search
 the learned $\psi$, and an unconstrained search will find latents where $\psi$ is
 optimistic and the flow is unreliable. Confining the search to $\Udelta$ is therefore not
 a numerical convenience --- it is what converts Corollary~\ref{cor:mass} into a guarantee
-about the deployed action. Diagnostic: report the gap between predicted
-$\psi(s,\hat u,\cdot)^\top w$ and realised return; a widening gap as $K$ grows is the
-signature of this failure.
+about the deployed action.
 \end{remark}
 
 \subsection{Rung 2 --- in-sample latent \texorpdfstring{$Q$}{Q}-iteration}
@@ -1064,6 +1058,109 @@ Distil $s\mapsto\argmax_{u\in\Udelta}Q_w(s,u)$ into $\pi_\eta(s,w)$ by regressio
 sampled tasks $w$, giving single-forward-pass action selection at deployment. This rung
 adds no guarantee; it trades a small distillation error for inference cost, and is the
 behaviour-foundation-model interface.
+
+% ==============================================================================
+\section{LatentFlowPSM}
+\label{sec:latentflowpsm}
+
+This is the algorithm that is trained and evaluated. The behaviour flow is frozen and used
+only as a decoder; PSM is then run in the flow's latent space. A policy maps a state and a
+task vector to a latent, and the executed action is the decoded latent, so every action
+that is taken, evaluated, or bootstrapped is a flow decode.
+
+\subsection{Objects}
+
+\textbf{Frozen.} The decoder $\Gth(s,u)$, behaviour-cloned by conditional flow matching
+(\S\ref{sec:flow}) and never updated afterwards. Latents are clipped to the box
+$\|u\|_\infty\le c$ (we use $c=3$).
+
+\textbf{Learned.}
+\begin{itemize}
+\item $\varphi(x)\in\R^{d}$ --- features of a future state.
+\item $\psi(s,u,w)\in\R^{d}$ --- successor features at $s$ after emitting latent $u$ and
+      then following the policy for task $w$. The successor measure is
+      $m(s,u,w,x)=\psi(s,u,w)^\top\varphi(x)$ and the action value is
+      $Q_w(s,u)=\psi(s,u,w)^\top w$. Trained as an ensemble of size $P$.
+\item $\pi_\eta(s,w,\epsilon)$ --- the actor, mapping state, task vector and Gaussian
+      noise $\epsilon$ to a latent in the clip box (a $\tanh$ output scaled by $c$).
+\item $v_\xi(s,u_t,t)$ --- a conditional flow matching velocity field over dataset
+      latents, used only as the actor's behaviour-cloning target.
+\end{itemize}
+
+The policy index is the task vector $w$; the second slot of $\psi$ is the latent emitted
+now, and takes the role that the action takes in an ordinary critic.
+
+\subsection{Dataset latents}
+
+For each transition $(s_i,a_i,s_i')$ we precompute a latent $u_i$ with
+$\Gth(s_i,u_i)\approx a_i$ by inverting the flow (\S\ref{sec:preimage}), once, before
+training. These are the in-sample latents used on the left-hand side of the backup.
+
+\subsection{Task vectors}
+
+Per batch element, $w_i$ is drawn as in PSM: with probability $1-p$ a Gaussian vector, and
+otherwise $\varphi(s_j')$ for a randomly permuted index $j$; both are projected to the
+sphere of radius $\sqrt{d}$. The same $w_i$ is used by the measure and the actor. The
+sampling takes no gradient.
+
+\subsection{Losses}
+
+\textbf{Measure.} Identical to \eqref{eq:loss-empirical} except for the bootstrap action:
+the continuation latent at $s_i'$ is the actor's, not a fixed index.
+\begin{equation}
+\label{eq:latent-sm-loss}
+\boxed{\;
+\begin{aligned}
+  \mathcal L_{\mathrm{SM}}
+  =\;&\frac{1}{B^2}\sum_{i,j}\Big(\psi(s_i,u_i,w_i)^\top\varphi(s_j')
+      -\gamma\,\bar\psi(s_i',u_i^{+},w_i)^\top\bar\varphi(s_j')\Big)^2\\
+   &-\frac{2}{B}\sum_i \psi(s_i,u_i,w_i)^\top\varphi(s_i')
+   \;+\;\lambda_\perp\,\mathcal L_{\mathrm{ortho}}(\varphi),
+  \qquad u_i^{+}=\pi_\eta(s_i',w_i,\epsilon_i),
+\end{aligned}\;}
+\end{equation}
+with target networks $\bar\psi,\bar\varphi$ updated by Polyak averaging, and the ensemble
+target taken as its mean minus $\kappa$ times its standard deviation.
+
+\textbf{Actor.} Deterministic policy gradient with a behaviour-cloning anchor, in latent
+space. With $u^a_i=\pi_\eta(s_i,w_i,\epsilon_i)$ and $\tilde u_i$ the Euler rollout of
+$v_\xi$ from $\epsilon_i$,
+\begin{equation}
+\label{eq:latent-actor-loss}
+  \mathcal L_{\mathrm{actor}}
+  =\;-\frac{\frac1B\sum_i Q_{w_i}(s_i,u^a_i)}{\big|\frac1B\sum_i Q_{w_i}(s_i,u^a_i)\big|}
+   \;+\;\lambda_{\mathrm{bc}}\,\frac1B\sum_i\|u^a_i-\tilde u_i\|^2
+   \;+\;\frac1B\sum_i\big\|v_\xi(s_i,u_{i,t},t_i)-(u_i-u_{i,0})\big\|^2 ,
+\end{equation}
+where $Q$ again uses the ensemble mean minus $\kappa$ standard deviations. The third term
+is conditional flow matching toward the \emph{dataset latents} $u_i$; $\psi$ receives no
+gradient from \eqref{eq:latent-actor-loss}, and $\Gth$ receives none from either loss.
+
+\begin{algorithm}[t]
+\caption{LatentFlowPSM pretraining (reward-free)}
+\label{alg:latentflowpsm}
+\begin{algorithmic}[1]
+\Require dataset $\D$, frozen decoder $\Gth$, cached latents $\{u_i\}$, discount $\gamma$
+\State \textbf{repeat}
+\State \quad sample a batch $\{(s_i,a_i,s_i',u_i)\}$ and task vectors $\{w_i\}$
+\State \quad $u_i^{+}\gets\pi_\eta(s_i',w_i,\epsilon_i)$
+\State \quad update $(\psi,\varphi)$ on \eqref{eq:latent-sm-loss}; Polyak-update
+       $\bar\psi,\bar\varphi$
+\State \quad update $(\pi_\eta,v_\xi)$ on \eqref{eq:latent-actor-loss} at the pre-update
+       $\psi$
+\State \textbf{until} converged
+\Ensure $\varphi$, $\psi$, $\pi_\eta$, and the frozen $\Gth$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Deployment}
+
+Given a reward $r$, set $w=\E_\D[r(x)\varphi(x)]$ and project it to the sphere. At each
+state act with
+\[
+  a \;=\; \Gth\big(s,\;\pi_\eta(s,w,\epsilon)\big),\qquad \epsilon\sim\mathcal N(0,I).
+\]
+No test-time training is required.
 
 % ==============================================================================
 \section{Conjectures and open problems}
@@ -1159,8 +1256,8 @@ bound on the volume of $\{|\det J|>c\}$ should suffice.
 \label{conj:coherence}
 \NOTPROVED, \emph{and plausibly not provable.} Whether conditional flow matching produces
 $\varepsilon$-coherent decoders (Definition~\ref{def:coherence}) with small $\varepsilon$ is
-a property of the trained network and the data, not a theorem. It must be measured
-(diagnostic D2). If it fails, Remark~\ref{rem:coherence-role} gives the mitigation.
+a property of the trained network and the data, not a theorem. If it fails,
+Remark~\ref{rem:coherence-role} gives the mitigation.
 \end{conjecture}
 
 \paragraph{Open problem: state-distribution shift.}
@@ -1171,89 +1268,12 @@ typical actions into a trajectory that leaves the region $\rho$ covers, and the 
 measure is then queried at states the basis has never seen. This is the state half of
 offline distribution shift and it is shared with every offline method; what
 Proposition~\ref{prop:insample} removes is the \emph{action} half, which is the half that
-temporal-difference backups amplify multiplicatively. Any experimental claim must therefore
-report an occupancy-divergence diagnostic (D6) alongside returns, or it will be impossible
-to attribute failures correctly.
+temporal-difference backups amplify multiplicatively.
 
 \paragraph{Open problem: is the successor measure doing work?}
 Rung~1 with $K$ samples resembles critic-weighted resampling of behaviour samples (IDQL).
 The representation earns its cost only if it beats a per-task critic that ranks the same
-$K$ decoded actions. This is an ablation, not a theorem, but it is the one a sceptical
-reader will ask for first.
-
-% ==============================================================================
-\appendix
-\section{Assumptions, dependencies, and diagnostics}
-\label{app:assumptions}
-
-\begin{center}
-\begin{tabular}{p{0.13\textwidth}p{0.28\textwidth}p{0.30\textwidth}p{0.17\textwidth}}
-\toprule
-Assumption & Content & Used by & Falsified by \\
-\midrule
-\ref{ass:lipschitz} & $v_\theta$ Lipschitz and $C^1$ in $u$, uniformly in $t$
-  & Lem.~\ref{lem:diffeo}, \ref{lem:cov}; Prop.~\ref{prop:isometry},
-    \ref{prop:laplace}; Cor.~\ref{cor:mass}--\ref{cor:resolution}
-  & architecture audit; $\det J$ near $0$ \\
-\addlinespace
-\ref{ass:exact} & $\muhat=\mu$ (exact flow)
-  & Prop.~\ref{prop:insample}; Lem.~\ref{lem:typicality}; the $\mu$-versions of
-    Prop.~\ref{prop:isometry} and Cor.~\ref{cor:mass}
-  & D1 (mode/MMD), D3 ($\chi^2$ typicality of $\Eth(s,a)$) \\
-\addlinespace
-\ref{ass:coherence} & $\Gth$ is $\varepsilon$-coherent
-  & \emph{no proposition}; statistical efficiency of the basis only
-    (Rem.~\ref{rem:coherence-role})
-  & D2 (index consistency) \\
-\addlinespace
-\ref{ass:affine} & affine SM form, basis independent of $u'$
-  & Prop.~\ref{prop:bilinear}; constrained inference (Rem.~\ref{rem:tradeoff})
-  & Conj.~\ref{conj:span}; fit residual of \eqref{eq:affine} \\
-\addlinespace
-\ref{ass:factorised} & $\Phi=A(s,u)\varphi(x)$, $b=\beta^\top\varphi$
-  & Prop.~\ref{prop:bilinear} (the implemented bilinear form)
-  & rank of learned $\Phi$ across $x$ \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\noindent
-Every assumption above is either an architectural choice under our control
-(\ref{ass:lipschitz}, \ref{ass:factorised}), an idealisation known to be approximate with a
-measurable residual (\ref{ass:exact}, \ref{ass:affine}), or an empirical hypothesis with a
-pre-registered test (\ref{ass:coherence}). None of them is load-bearing and unfalsifiable,
-which is the property the experimental programme is designed to preserve.
-
-\section{Summary of results}
-\label{app:summary}
-
-\begin{center}
-\begin{tabular}{llp{0.42\textwidth}}
-\toprule
-Result & Status & Statement \\
-\midrule
-Lem.~\ref{lem:diffeo}   & proved & $\Gth(s,\cdot)$ is a diffeomorphism onto $\R^{d_a}$; $\det J=\exp\int\tr\partial_uv>0$ \\
-Prop.~\ref{prop:isometry} & proved (exact flow) & $D_f(\pi_\nu\|\muhat)=D_f(\nu\|p_0)$ at every state \\
-Cor.~\ref{cor:mass}     & proved & $\muhat(\Gth(s,U)\mid s)=p_0(U)$; the ball $\Udelta$ works at all states \\
-Cor.~\ref{cor:resolution}& proved & $|\det J|=p_0(u)/\muhat(\Gth(s,u)\mid s)$ \\
-Prop.~\ref{prop:bilinear}& proved & affine $+$ factorised $\Rightarrow$ bilinear $\psi^\top\varphi$ \\
-Prop.~\ref{prop:sf-identity}& proved & $\psi(s,u,u')=\E_{s'}[\varphi(s')+\gamma\psi(s',u',u')]$ \\
-Cor.~\ref{cor:latent-q} & proved & latent $Q$-iteration is an ordinary Bellman optimality equation \\
-Lem.~\ref{lem:typicality}& proved & $\Eth(s,a)\sim p_0$ on data; D3 tests A\ref{ass:exact} \\
-Prop.~\ref{prop:laplace}& proved & $\Sigma_\alpha=(I+2\alpha J^\top J)^{-1}$ \\
-Prop.~\ref{prop:insample}& proved (exact flow) & bootstrap law $=\rho\otimes\mu$; $C=1$ \\
-Prop.~\ref{prop:contraction}& proved & $\gamma$-contraction; $\|\hat m-m\|\le\epsilon_{\mathrm{TD}}/(1-\gamma)$ \\
-Prop.~\ref{prop:gpi}    & proved & GPI bound with $\epsilon$ decomposed into three measurable terms \\
-Prop.~\ref{prop:rung2}  & proved (finite) & Rung 2 dominates Rung 1 \\
-\midrule
-Conj.~\ref{conj:perturbation} & \NOTPROVED & flow-error perturbation of the isometry \\
-Conj.~\ref{conj:span}   & \NOTPROVED & affine span over the fixed-index family \\
-Conj.~\ref{conj:insample-bound} & \NOTPROVED & continuous bound with state coverage only \\
-Conj.~\ref{conj:compact}& \NOTPROVED & exact flow unattainable for singular $\mu$ \\
-Conj.~\ref{conj:coherence}& \NOTPROVED & coherence of trained flows (empirical) \\
-\bottomrule
-\end{tabular}
-\end{center}
+$K$ decoded actions.
 
 % ==============================================================================
 \begin{thebibliography}{99}
