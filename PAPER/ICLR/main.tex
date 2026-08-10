@@ -348,6 +348,22 @@ $[0.936,0.960]$ on the same task, so LatentFlowPSM recovers about a quarter of w
 reward-supervised learner obtains, and its curve is flat from $50$k steps---it converges to
 that level rather than being budget-limited.
 
+\textbf{Finding 5 (open): the measure still does not rank.} Recording $60$ episodes per
+seed of the deployed policy (Figure~\ref{fig:anatomy}) settles the support claim and
+sharpens the open problem. The latents the actor emits are comfortably inside the prior's
+typical set---mean $\|u\|^2 = 3.87$ on cube against $d_a{=}5$, $5.64$ on antmaze against
+$d_a{=}8$, narrower than even the dataset latents ($5.59$, $8.49$), with no mass on the
+clip boundary---so every executed action is a decode of a typical latent, as constructed.
+But the value the actor was trained against does not predict what happens: the predicted
+$\psi(s,w,u)^\top w$ at the initial state separates successful from failed episodes with
+AUC $0.588$ $[0.480, 0.694]$ on cube ($180$ episodes, $33$ successes) and $0.354$
+$[0.168, 0.567]$ on antmaze, both intervals covering chance. This is the same defect the
+GPI ablation exposes, measured a second way: $\psi^\top w$ is a serviceable gradient signal
+for the actor and an unreliable estimate of value. Why deterministic policy gradient on an
+uninformative critic nonetheless produces a policy that beats its behavior prior by
+$3.5\times$ is, as far as we can tell, unexplained, and is the first thing the next round
+of work should isolate.
+
 \begin{figure}[t]
 \centering
 \includegraphics[width=\linewidth]{figures/fig_actor_comparison.pdf}
@@ -367,8 +383,8 @@ training: a ceiling, not a peer.}
 (b)~The latents the actor emits stay inside the prior's typical set, beside the dataset
 latents and the $\chi^2_{d_a}$ density---the in-support claim, measured rather than
 asserted. (c)~Predicted $\psi(s,w,u)^\top w$ at the initial state against the outcome of
-that episode; reported as AUC against binary success because failed episodes all return the
-same value.}
+that episode, as AUC against binary success (failed episodes all return the same value, so
+a rank correlation over that tie mass is uninterpretable). Both intervals cover chance.}
 \label{fig:anatomy}
 \end{figure}
 

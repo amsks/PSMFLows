@@ -1,0 +1,68 @@
+{
+  "inputs": {},
+  "panels": {
+    "a": {
+      "n_episodes": 40,
+      "n_success": 11,
+      "success_rate": 0.275,
+      "mean_episode_length": 915.3
+    },
+    "b": {
+      "cube": {
+        "d_a": 5,
+        "n_steps": 33317,
+        "actor_mean_norm2": 3.873158895271489,
+        "dataset_mean_norm2": 5.588244689855751,
+        "prior_expected_norm2": 5,
+        "actor_median_norm2": 3.4228954398180544
+      },
+      "antmaze": {
+        "d_a": 8,
+        "n_steps": 36612,
+        "actor_mean_norm2": 5.638555396112786,
+        "dataset_mean_norm2": 8.48870848340328,
+        "prior_expected_norm2": 8,
+        "actor_median_norm2": 5.216675051161253
+      }
+    },
+    "c": {
+      "cube": {
+        "auc_per_seed": [
+          0.5900621118012422,
+          0.5815972222222222,
+          0.5525606469002695
+        ],
+        "auc_pooled": 0.588332302618017,
+        "auc_ci95": [
+          0.4800783496262219,
+          0.6941987200355533
+        ],
+        "beats_chance": false,
+        "n_episodes": 180,
+        "n_success": 33,
+        "spearman_per_seed": [
+          0.12018113785146736,
+          0.11219876737858457,
+          0.04495502119092525
+        ]
+      },
+      "antmaze": {
+        "auc_per_seed": [
+          0.3542319749216301
+        ],
+        "auc_pooled": 0.3542319749216301,
+        "auc_ci95": [
+          0.16798956043956045,
+          0.5666666666666667
+        ],
+        "beats_chance": false,
+        "n_episodes": 40,
+        "n_success": 11,
+        "spearman_per_seed": [
+          -0.22413376122054826
+        ]
+      }
+    }
+  },
+  "missing": []
+}

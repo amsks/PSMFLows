@@ -4,10 +4,11 @@ Four panels, all grounded in the real cube artifacts — the 1M-row preimage npz
 stored quantities, the Stage-A checkpoint for the flow map itself:
 
   A  the preimage BASIN. A 2D slice of latent space at one real dataset transition, shaded
-     by the inversion target exp(-alpha*||G(s,u) - a||) at the as-run alpha=1. The stored
+     by the inversion target exp(-alpha*||G(s,u) - a||) at alpha=1. The stored
      point preimage, the stored posterior mean and its 2-sigma ellipse, the N(0,I) prior and
      the u_clip bound are drawn on top. The point of the panel: the preimage is a broad
-     BASIN, not a point, and at alpha=1 it is far wider than the prior.
+     BASIN, not a point, and at alpha=1 it is far wider than the prior. Every preimage
+     archive is built at alpha=20, the right-hand column.
   B  the same slice, same geometry, at alpha=20. The basin contracts to prior scale. A and B
      together are the whole alpha argument.
   C  the aggregate view over all 1M rows: ||u|| for the point arm and for the posterior mean,
@@ -187,8 +188,8 @@ def main():
         ax.plot(*mu_xy, marker='X', ms=9, color=S2, mec=SURFACE, mew=1.5, zorder=6)
         ax.plot(0, 0, marker='*', ms=15, color=INK, mec=SURFACE, mew=1.5, zorder=6)
 
-        title = (f'{tag}.  the preimage is a basin, not a point   ·   $\\alpha$ = 1 (as run)'
-                 if k == 0 else f'{tag}.  the same basin at $\\alpha$ = 20')
+        title = (f'{tag}.  the preimage is a basin, not a point   ·   $\\alpha$ = 1'
+                 if k == 0 else f'{tag}.  the same basin at $\\alpha$ = 20 (as run)')
         _style(ax, title, 'latent offset along the flattest direction of $J$',
                'offset along the 2nd-flattest direction' if k == 0 else None)
         ax.set_xlim(-GRID_HALF, GRID_HALF); ax.set_ylim(-GRID_HALF, GRID_HALF)
@@ -292,8 +293,8 @@ def main():
     ax.set_xticklabels([f'{a:g}' for a in SWEEP_ALPHAS])
     ax.grid(axis='y', color=GRID, lw=0.7); ax.set_axisbelow(True)
     ax.set_ylim(0, max(max(ess_m) * 1.30, 28))
-    ax.annotate('as run', (SWEEP_ALPHAS[0], ess_m[0]), textcoords='offset points',
-                xytext=(15, -3), color=INK2, fontsize=8)
+    ax.annotate('the original setting', (SWEEP_ALPHAS[0], ess_m[0]),
+                textcoords='offset points', xytext=(15, -3), color=INK2, fontsize=8)
     ax.annotate('first $\\alpha$ where the posterior is\nnarrower than its prior — i.e.\n'
                 'finally behaves like a posterior',
                 (ALPHA_HI, ess_m[list(SWEEP_ALPHAS).index(ALPHA_HI)]),

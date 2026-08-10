@@ -40,6 +40,45 @@ def chi2_pdf(x, k):
                       - (k / 2) * log(2.0) - lgamma(k / 2))
 
 
+def _auc(scores, pos):
+    """P(score of a positive > score of a negative), ties counted as half."""
+    n_pos, n_neg = int(pos.sum()), int((~pos).sum())
+    if not n_pos or not n_neg:
+        return None
+    order = scores.argsort(kind='stable')
+    r = np.empty(len(scores), dtype=np.float64)
+    r[order] = np.arange(len(scores), dtype=np.float64)
+    srt = scores[order]
+    i = 0
+    while i < len(scores):
+        j = i
+        while j + 1 < len(scores) and srt[j + 1] == srt[i]:
+            j += 1
+        if j > i:
+            r[order[i:j + 1]] = (i + j) / 2.0
+        i = j + 1
+    r = r + 1.0
+    return float((r[pos].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
+
+
+def _auc_ci(scores, pos, n_boot=4000, seed=0):
+    """Percentile bootstrap over episodes. Seeded, so the figure is reproducible."""
+    point = _auc(scores, pos)
+    if point is None:
+        return None, None, None
+    rng = np.random.default_rng(seed)
+    n = len(scores)
+    vals = []
+    for _ in range(n_boot):
+        idx = rng.integers(0, n, n)
+        a = _auc(scores[idx], pos[idx])
+        if a is not None:
+            vals.append(a)
+    if not vals:
+        return point, None, None
+    return point, float(np.percentile(vals, 2.5)), float(np.percentile(vals, 97.5))
+
+
 def load(name):
     p = f'{LOG_DIR}/{name}.json'
     if not os.path.exists(p):
@@ -154,9 +193,14 @@ def main():
                    linewidths=0, label=label)
         aucs = [r['calibration'].get('auc_predicted_vs_success') for r in reps]
         aucs = [a for a in aucs if a is not None]
+        # Pooled AUC with a bootstrap interval. The question this panel asks is whether
+        # the value beats chance at all, and a point estimate off ~40 successes cannot
+        # answer it -- so the interval is computed, not omitted.
+        pooled_auc, auc_lo, auc_hi = _auc_ci(pred, succ)
         pc[label] = {
             'auc_per_seed': aucs,
-            'auc_mean': float(np.mean(aucs)) if aucs else None,
+            'auc_pooled': pooled_auc, 'auc_ci95': [auc_lo, auc_hi],
+            'beats_chance': (auc_lo is not None and auc_lo > 0.5),
             'n_episodes': int(len(succ)), 'n_success': int(succ.sum()),
             'spearman_per_seed': [r['calibration'].get('spearman_predicted_vs_realised')
                                   for r in reps],
@@ -164,10 +208,11 @@ def main():
     ax.axhline(0.5, color=INK_MUTED, lw=0.5, linestyle=':')
     ax.set_yticks([0, 1])
     ax.set_yticklabels(['fail', 'success'])
-    ax.set_xlabel('predicted $\\psi(s,w,u)^\\top w$ (standardised)')
+    ax.set_xlabel('predicted $\\psi^\\top w$ at $s_0$ (std.)')
     ax.set_title('(c) does the value predict\nthe outcome?', loc='left', fontsize=7)
-    txt = '\n'.join(f"{k}: AUC {v['auc_mean']:.2f}" for k, v in pc.items()
-                    if v['auc_mean'] is not None)
+    txt = '\n'.join(
+        f"{k}: AUC {v['auc_pooled']:.2f} [{v['auc_ci95'][0]:.2f}, {v['auc_ci95'][1]:.2f}]"
+        for k, v in pc.items() if v['auc_pooled'] is not None)
     if txt:
         ax.text(0.03, 0.55, txt + '\n(0.5 = chance)', transform=ax.transAxes,
                 fontsize=5.5, color=INK)

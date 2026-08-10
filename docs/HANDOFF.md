@@ -84,6 +84,21 @@ prior, which is why pointmaze zeros never discriminated between methods.
   episode returns the identical value, so most of the sample is one tie group and
   arbitrary tie-breaking manufactures a correlation out of array order.
 
+### Finding 5: the measure does not rank, measured a second way
+
+`tools/viz_policy_rollouts.py`, 60 episodes x 3 cube seeds + 40 antmaze:
+- **Support claim holds, with room to spare.** Actor latents mean ||u||^2 = 3.87 (cube,
+  d_a=5) and 5.64 (antmaze, d_a=8) — narrower than the prior AND narrower than the dataset
+  latents (5.59 / 8.49), 0% on the clip boundary. Every executed action is a decode of a
+  typical latent.
+- **The value does not predict the outcome.** Predicted psi(s,w,u)^T w at s0 separates
+  success from failure with AUC **0.588 [0.480, 0.694]** on cube (180 ep, 33 successes) and
+  **0.354 [0.168, 0.567]** on antmaze. Both cover chance. Bootstrap CI, seeded.
+
+So the GPI-below-BC result is not an artifact of the argmax: the critic genuinely carries
+little outcome information. The unexplained part is why DPG on it still produces a policy
+3.5x better than its behavior prior. That is the next thing to isolate.
+
 ### Open
 
 - Why does GPI underperform the prior? If psi cannot rank latents at a state, the
