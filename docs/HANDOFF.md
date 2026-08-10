@@ -24,6 +24,67 @@ Date: **2026-08-10** (latest) · prior: 2026-08-05, 08-04, 07-29, 07-28, 07-26, 
 
 <!-- _class: lead -->
 
+## 2026-08-10 (later) — diagnosis: the gain is in-support latent BC + pessimism, not value improvement
+
+Ran §B of `docs/plans/2026-08-10-critic-diagnosis-and-baselines.md`. Three diagnostics,
+three verdicts, and they agree. Reports: `logs/d1_policy_ranking.json`,
+`logs/d2_task_projection_{cube,antmaze}.json`, `logs/d3_q_landscape_cube.json`.
+
+### D1 — H0 REJECTED. The critic cannot rank policies either.
+
+Ten cube policies spanning 0.068–0.320 measured success (5 final seeds, sd2 at
+50k/150k/250k/400k, and the BC prior), all scored by ONE frozen representation (sd0) at 64
+seeded start states. **Spearman 0.10 (permutation p = 0.78).** Predicted values span
+−1816 to −1832 — a **0.9% spread** — while realised success varies 4.7×. So panel (c) of F4
+was not a confounded diagnostic: the critic is uninformative at the ranking job too.
+
+### D2 — H1 RELOCATED. Inference is fine; the basis is weak.
+
+Closed-form w = E[r·φ] achieves R² **0.129** on held-out cube transitions against a ridge
+topline of **0.127** on the same features — the estimator extracts everything φ contains,
+so task inference is NOT lossy. But the topline itself is low: the best linear read-out of
+φ explains ~13% of reward variance. Antmaze is the same (0.135 / 0.134), so **no
+cube-vs-antmaze asymmetry** — H5 (horizon myopia) gets no support from this. w_inf is
+stable across disjoint relabel batches (min pairwise cosine 0.93). Fix direction, if this
+is pursued: a φ-grounding auxiliary, not a better estimator.
+
+### D3 — H2 SUPPORTED, decisively. H3 not supported.
+
+At 64 states, Q over 512 prior latent draws has relative spread **0.011 of |Q|** — flat.
+Around the actor's own latent it is flatter still (0.0038). Two details that settle the
+story:
+- **The actor sits at the 44th percentile of the prior-Q distribution** (median 38th). If
+  Q meant anything the actor would be near the top; it is below the middle.
+- **Actor gradient is BC-dominated 5:1**: ‖∇q-term‖ 0.168 vs ‖∇distill‖ 0.839.
+  (bc_flow reads 0.0 w.r.t. actor params by construction — it only touches the vf.)
+- **Dispersion does NOT collapse** over training (‖u‖² 4.66 → 4.54 across 50k–500k), so
+  H3's co-collapse signature is absent. The flatness is not a shrinking-support artifact.
+
+### What this means
+
+The honest reading: **LatentFlowPSM's 3.5× over BC is explained by in-support latent
+behaviour cloning plus ensemble pessimism, not by value-driven improvement.** Every piece
+fits — flat curves after 50k, chance-level calibration, GPI *below* the BC control (argmax
+over a flat noisy Q is worse than sampling), and an actor whose gradient is 5:1 imitation.
+
+Per the plan's decision tree §E this is the "flat-Q" branch, and its own C-tier gating says
+bc_coeff↓ runs only if "D3 shows bc-term dominance **AND** Q has relief". Q has no relief
+(1.1%), so **the bc_coeff sweep is not indicated** — do not run it reflexively. The
+remaining candidate is backup exploration (mix p0 latents into the bootstrap), which
+targets the flatness itself rather than the actor's weighting.
+
+### In flight
+
+Baselines from §D, three tmux queues (`base_q0/1/3`, ~2.5–4 h): PSM cube ×3 seeds
+(`psm_cube_flow_20260810`), FB cube ×3 (`fb_cube_ortho1000_20260810`, ortho_coef=1000 —
+the reference value, repo default is 1.0), antmaze LatentFlowPSM seeds 1,2. R3 is the one
+that matters for framing: if action-space PSM matches 0.236, the headline narrows to the
+support/coverage story.
+
+---
+
+<!-- _class: lead -->
+
 ## 2026-08-10 session — LatentFlowPSM measured end to end; ICLR figures F1-F4
 
 Executed `docs/plans/2026-08-10-iclr-figures.md`. Everything below is a 500-episode
