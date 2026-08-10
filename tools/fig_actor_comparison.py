@@ -84,7 +84,7 @@ def main():
     bc = load_eval('eval500_bcflow_cube')
     if bc:
         p, lo, hi = wilson(bc['num_success'], bc['num_episodes'])
-        bars.append(dict(key='bc', label='behaviour\ncloning', value=p, ci=(lo, hi),
+        bars.append(dict(key='bc', label='BC', value=p, ci=(lo, hi),
                          color=PALETTE[5], per_seed=[], group='fixed'))
         report['bars']['bc'] = {'success': p, 'ci': [lo, hi],
                                 'num_episodes': bc['num_episodes']}
@@ -99,7 +99,7 @@ def main():
         steps, succ = r1
         val = float(np.mean(succ[-4:]))
         lo, hi = float(np.min(succ[-4:])), float(np.max(succ[-4:]))
-        bars.append(dict(key='rung1_gpi', label='flow-GPI over\nfixed $u$', value=val,
+        bars.append(dict(key='rung1_gpi', label='flow-GPI\nfixed $u$', value=val,
                          ci=(lo, hi), color=PALETTE[4], per_seed=[], group='fixed',
                          note='50-ep in-loop evals, late window'))
         report['bars']['rung1_gpi'] = {
@@ -110,8 +110,8 @@ def main():
         report['missing'].append('rung1 eval.csv')
 
     for key, suffix, label, color in [
-            ('latent_gpi', '_gpi', 'LatentFlowPSM\nacting=gpi', PALETTE[2]),
-            ('latent_actor', '', 'LatentFlowPSM\nacting=actor', PALETTE[0])]:
+            ('latent_gpi', '_gpi', 'LFPSM\ngpi', PALETTE[2]),
+            ('latent_actor', '', 'LFPSM\nactor', PALETTE[0])]:
         reps, miss = [], []
         for s in SEEDS:
             r = load_eval(f'eval500_latentpsm_cube_sd{s}{suffix}')
@@ -127,7 +127,7 @@ def main():
     fql_reps = [r for r in (load_eval(f'eval500_fql_cube_sd{s}') for s in (0, 1, 2)) if r]
     if fql_reps:
         agg = pooled(fql_reps)
-        bars.append(dict(key='fql', label='FQL\n(per-task)', value=agg['success'],
+        bars.append(dict(key='fql', label='FQL\nper-task', value=agg['success'],
                          ci=tuple(agg['ci']), color=INK_MUTED,
                          per_seed=agg['per_seed'], group='ceiling'))
         report['bars']['fql'] = agg
@@ -135,8 +135,8 @@ def main():
         report['missing'] += [f'eval500_fql_cube_sd{s}' for s in (0, 1, 2)]
 
     # ------------------------------------------------------------------------ figure
-    fig = plt.figure(figsize=(6.4, 2.7))
-    gs = fig.add_gridspec(1, 2, wspace=0.28, width_ratios=[1.15, 1.0])
+    fig = plt.figure(figsize=(6.6, 3.0))
+    gs = fig.add_gridspec(1, 2, wspace=0.26, width_ratios=[1.25, 1.0])
 
     ax = fig.add_subplot(gs[0, 0])
     xs = np.arange(len(bars))
@@ -170,10 +170,11 @@ def main():
     if any(b['group'] == 'ceiling' for b in bars):
         div = min(i for i, b in enumerate(bars) if b['group'] == 'ceiling') - 0.5
         ax.axvline(div, color=INK_MUTED, linestyle=':', linewidth=0.8)
-        ax.text(div + 0.06, ax.get_ylim()[1] * 0.97, 'sees reward\nat train time',
-                fontsize=5, color=INK_MUTED, va='top')
+        ax.text(div - 0.06, 1.02, 'sees reward at train time $\\rightarrow$',
+                fontsize=5, color=INK_MUTED, va='bottom', ha='right')
     ax.set_xticks(xs)
-    ax.set_xticklabels([b['label'] for b in bars], fontsize=5.5)
+    ax.set_xticklabels([b['label'] for b in bars], fontsize=6)
+    ax.set_ylim(0, 1.10)
     ax.set_ylabel('success (500 episodes)')
     ax.set_title('(a) cube-single, Wilson 95% intervals', loc='left', fontsize=7)
 
@@ -200,7 +201,9 @@ def main():
     if bc:
         ax.axhline(report['bars']['bc']['success'], color=PALETTE[5], linestyle='--',
                    linewidth=1.0, label='behaviour cloning')
-    ax.set_xlabel('gradient steps')
+    ax.set_xlabel('gradient steps (thousands)')
+    ax.xaxis.set_major_formatter(
+        plt.FuncFormatter(lambda v, _: f'{v / 1000:.0f}'))
     ax.set_ylabel('success (50 episodes)')
     ax.set_title('(b) training curves, mean $\\pm$ 95% CI', loc='left', fontsize=7)
     ax.legend(fontsize=5.5, loc='upper left', handletextpad=0.4, labelspacing=0.25)
