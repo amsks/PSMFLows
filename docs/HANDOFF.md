@@ -18,7 +18,81 @@ hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RES
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
 Branch: `feat/psm-integration` · Machine: `midi-01` (UT CS)
-Date: **2026-08-05** (latest) · prior: 2026-08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+Date: **2026-08-10** (latest) · prior: 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+
+---
+
+<!-- _class: lead -->
+
+## 2026-08-10 session — LatentFlowPSM measured end to end; ICLR figures F1-F4
+
+Executed `docs/plans/2026-08-10-iclr-figures.md`. Everything below is a 500-episode
+evaluation with a Wilson interval, quoted beside the per-step-prior BC control from the
+same frozen flow. Reports in `/data-local/amsks/PSMFLows/logs/eval500_*.json`; every
+figure has a sidecar JSON in `PAPER/ICLR/figures/data/`.
+
+### Headline: the actor works, the value function still does not rank
+
+| cube-single, 500 ep | success | Wilson 95% |
+|---|---:|---|
+| BC control (frozen flow, per-step prior) | 0.068 | [0.049, 0.093] |
+| flow-GPI over fixed u (Rung 1) | 0.015 | 50-ep in-loop |
+| LatentFlowPSM `acting=gpi` | 0.055 | [0.047, 0.064] |
+| **LatentFlowPSM `acting=actor`** | **0.236** | [0.219, 0.253] |
+| FQL per-task (alpha=300) | 0.949 | [0.936, 0.960] |
+
+Across 5 seeds the actor is **0.236 ± 0.071** (mean ± 95% CI); per-seed 0.318 / 0.236 /
+0.176 / 0.260 / 0.188. Antmaze: LatentFlowPSM **0.222** [0.188, 0.261] vs BC **0.090**
+[0.068, 0.118]. Pointmaze BC control is **0.002** — the env is near-unreachable from the
+prior, which is why pointmaze zeros never discriminated between methods.
+
+**Three findings, in order of how much they should change what we do next.**
+
+1. **The F1 prediction landed to three decimals.** Fixed-u flow-GPI scores 0.015 against a
+   measured family ceiling of 2/128 = 0.0156. GPI was extracting exactly what the family
+   contained — the 08-05 root cause is now quantitative, not argued.
+2. **`acting=gpi` (0.055) is BELOW the BC control (0.068)**, non-overlapping intervals, on
+   the *same* representations the actor uses. So psi is a usable training signal for the
+   actor but not a reliable ranker of latents. The Finding-3 weakness survived the
+   redesign; it moved rather than disappeared. This is the open problem now.
+3. **FQL reaches 0.949 with alpha=300** — the FQL reference's per-env value; the repo
+   default of 10 would have understated the topline badly. LatentFlowPSM recovers ~25% of
+   per-task performance, and its curve is flat from 50k, so it is converged, not
+   budget-limited.
+
+### What was run
+
+- **WP0**, 17 evals: cube sd0-4 x {actor, gpi}, antmaze sd0, BC controls for all three
+  envs. `scripts/eval500.sh` wraps the invocation (psmflow and `bc` modes).
+- **WP1**, cube FQL 3 seeds, `fqlbaseline_cube_a300_20260810`. **34 min per seed**, not the
+  3-4 h the plan budgeted — the tqdm ETA during JIT warmup is what mislead the estimate.
+- **D1 re-runs**, 6 (3 envs x trained/random). Pointmaze reproduced the historical numbers
+  exactly (MMD 3.0e-4 vs 4.0e-3).
+- **Figures** `tools/fig_{reachability,flow_fit,actor_comparison,policy_anatomy}.py` +
+  `tools/figstyle.py` (Okabe-Ito order, run through a colorblind validator).
+  `tools/viz_policy_rollouts.py` records per-step (state, actor latent, action, reward)
+  and the initial-state predicted score.
+
+### Corrections to the plan, from the data
+
+- Antmaze family ceiling is **5/64 = 8%**, not the ~4% the plan cites. Figures compute it
+  from the JSON rather than quoting prose.
+- The Rung-1 GPI bar **cannot** get a 500-episode rerun: that checkpoint predates the
+  latent-PSM redesign, so its parameter tree will not load in the current agent. F3 uses
+  its in-loop 50-episode late window and labels the bar as such.
+- Calibration needs **AUC against binary success**, not Spearman on returns: every failed
+  episode returns the identical value, so most of the sample is one tie group and
+  arbitrary tie-breaking manufactures a correlation out of array order.
+
+### Open
+
+- Why does GPI underperform the prior? If psi cannot rank latents at a state, the
+  representation is not doing the job the method claims for it, and the actor is
+  succeeding for a reason we have not isolated.
+- Antmaze is 1 seed. Cube seed spread (0.176-0.318) is wide enough that 5 seeds pins
+  "beats BC" but not the level.
+- Antmaze mixture-arm preimages remain unusable (ESS 7.6, 6% > 20); alpha was tuned at
+  d_a=5. Point arm is what every run uses.
 
 ---
 

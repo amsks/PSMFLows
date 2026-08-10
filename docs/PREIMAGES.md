@@ -9,13 +9,14 @@ its output is published so you do not have to run it.
 | inversion | finds, per transition, the `u` that decodes to the recorded action | 4-19 h | **no, output published** |
 | representation | trains `phi` / `psi` / the latent actor on those latents | ~3 h | yes |
 
-`HF_REPO` below is the Hugging Face dataset repo holding the published artifacts.
+The artifacts live in the Hugging Face dataset repo `amsks/psmflows-preimages` (private;
+ask for access).
 
 ## 1. Download
 
 ```bash
 pip install huggingface_hub
-export HF_REPO=<user>/<name>          # private repo: also `hf auth login`
+export HF_REPO=amsks/psmflows-preimages   # private repo: also `hf auth login`
 export PSM_DATA=/path/for/big/files   # ~1.1 GB for all three environments
 
 python - <<'EOF'
@@ -170,4 +171,4 @@ lists what it would push; drop `--dry-run` to upload.
 
 Each `.npz` carries the OGBench transitions plus the preimage arrays, so it is a drop-in
 training input. Array shapes and per-environment quality numbers are in the dataset card
-on Hugging Face.
+on Hugging Face (`amsks/psmflows-preimages`).

@@ -213,12 +213,28 @@ concentrability $C=1$ w.r.t.\ the behavior policy.
 \subsection{Inference}
 Given rewards on relabeled data, $w=\frac1N\sum_i r(s'_i)\varphi(s'_i)$ is the
 least-squares task projection (exact under orthonormal $\varphi$), and
-$\psi(s,u',u)^\top w$ estimates the corresponding $Q$. Rung~1 (used here) is sampled
-GPI: draw $K$ candidate latents and $M$ indices, take
-$\hat u=\arg\max_k\max_m\psi(s,u'_m,u_k)^\top w$, act $a=G_\theta(s,\hat u)$. Rungs 2--3
-(in-sample latent $Q$-iteration; an amortized latent actor trained with a flow-BC anchor
-in latent space) are implemented but not yet part of the evaluated protocol.
+$\psi(s,u',u)^\top w$ estimates the corresponding $Q$. Sampled GPI over the fixed-index
+family draws $K$ candidate latents and $M$ indices, takes
+$\hat u=\arg\max_k\max_m\psi(s,u'_m,u_k)^\top w$, and acts $a=G_\theta(s,\hat u)$.
+Section~\ref{sec:exp} shows this is bounded by what the family contains, which motivates
+the variant below.
 % TODO(method): algorithm float, cf. the plain-terms companion (PAPER/pipeline.tex).
+
+\subsection{LatentFlowPSM}
+\label{sec:latentflowpsm}
+The support construction does not require that a \emph{fixed} latent be the policy---only
+that every executed action be a flow decode. LatentFlowPSM keeps the frozen decoder and
+moves policy identity into the task vector. Learned are features $\varphi(x)$, successor
+features $\psi(s,u,w)$ with $m(s,u,w,x)=\psi(s,u,w)^\top\varphi(x)$ and
+$Q_w(s,u)=\psi(s,u,w)^\top w$, an actor $\pi_\eta(s,w,\epsilon)$ emitting a latent in the
+clip box, and a flow-matching field over dataset latents used as the actor's
+behavior-cloning anchor. The measure loss is the usual measure-matching objective with one
+change: the continuation latent at $s'$ is the actor's, $u^{+}=\pi_\eta(s',w,\epsilon)$,
+rather than a fixed index, so policy improvement happens in latent space while every
+bootstrapped action remains a decode. The actor is trained by deterministic policy gradient
+on $Q_w$ with the flow-matching anchor and ensemble pessimism; $\psi$ takes no actor
+gradient and $G_\theta$ takes none at all. At deployment $w=\mathbb E_{\mathcal D}[r\varphi]$
+and $a=G_\theta(s,\pi_\eta(s,w,\epsilon))$, with no test-time training.
 
 \section{Experiments and current findings}
 \label{sec:exp}
@@ -226,9 +242,12 @@ in latent space) are implemented but not yet part of the evaluated protocol.
 \textbf{Protocol.} OGBench \citep{park2024ogbench} \texttt{pointmaze-medium-navigate} and
 \texttt{cube-single-play} (state-based, single-task rewards); FQL
 \citep{park2025fql} as the per-task topline; in-repo, parity-verified PSM and FB as
-zero-shot baselines. All reported numbers use $\ge 3$ seeds, 50-episode evaluations on a
-50k-step grid, mean $\pm$ 95\% CI; gates D1--D4 must pass in order, which localizes any
-failure to a single stage.
+zero-shot baselines, and \texttt{antmaze-medium-navigate} for the latent-actor results.
+Headline numbers are 500-episode evaluations of the final checkpoint with Wilson 95\%
+intervals; across-seed summaries are mean $\pm$ 95\% CI over $\ge3$ seeds. Every
+zero-shot number is quoted beside the per-step-prior behavior-cloning control decoded from
+the same frozen flow, since that is the baseline the method must beat. Gates D1--D4 run in
+order, which localizes any failure to a single stage.
 
 \begin{table}[h]
 \centering\small
@@ -237,16 +256,32 @@ failure to a single stage.
 Gate & Question & Result (pointmaze / cube) & Status\\
 \midrule
 D1 & flow reproduces data actions & MMD $3\cdot10^{-4}$ / $1.5\cdot10^{-4}$ (ctrl.\ $\times13$ / $\times10^3$) & \textbf{pass}\\
-D2 & fixed $u$ = distinct, repeatable policy & consistency ratio $0.53$ / $0.51$ & \textbf{pass}\\
+D2 & fixed $u$ = distinct, repeatable policy & consistency ratio $0.53$ / $0.51$ & \textbf{pass}$^\dagger$\\
 D3 & inversion trustworthy & ESS $91$ / $82$; roundtrip $\sim10^{-4}$; typicality $\ge0.99$ & \textbf{pass}\\
 D4 & oracle-reward control $\ge50\%$ of FQL & $0.00$ vs.\ FQL peak $0.687\pm0.201$ & \textbf{fail}\\
 \bottomrule
 \end{tabular}
 \caption{\textbf{Staged diagnostics (current state).} The generative substrate certifies
 cleanly; control does not yet. The point of the protocol is that the failure is
-localized: it lies in the representation/inference stage, not the flow or the inversion.}
+localized: it lies in the policy family itself, not the flow or the inversion.
+$^\dagger$D2 measures whether fixed-$u$ policies are repeatable and mutually distinct. They
+are; that is not the same as being \emph{useful}, and \S\ref{sec:exp} shows the gate cannot
+see the difference.}
 \label{tab:gates}
 \end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig_flow_fit.pdf}
+\caption{\textbf{The generative substrate certifies.} (a)~The trained flow is one to three
+orders of magnitude closer to the behavior distribution than a random-flow control on both
+metrics. (b)~Inverted latents follow the $\chi^2_{d_a}$ law they should follow under the
+prior in all three environments. The mixture arm is the one exception and is labeled as
+such: at $d_a{=}8$ its ESS collapses, so the point preimage is used throughout.
+(c)~Decoding the recovered latent reproduces the recorded action to $\sim10^{-4}$.
+Whatever fails downstream, it is not inversion quality.}
+\label{fig:flowfit}
+\end{figure}
 
 \textbf{Finding 1: the substrate works.} The behavior flow beats random controls by
 1--3 orders of magnitude on distribution match (D1); fixed-latent policies are
@@ -261,19 +296,81 @@ means leave the typical set, and ESS $\approx$ 10; at $\alpha{=}20$ posterior me
 the $\chi_{d_a}$ radius and ESS exceeds the gate five-fold (Figure~\ref{fig:preimage}).
 Latents computed at the wrong temperature are quantifiably noise.
 
-\textbf{Finding 3 (negative, diagnosed): the measure discriminates indices it does not
-ground.} First representation runs (3 seeds, 500k--1M steps, both preimage modes) reach
-$0.00$ success even with oracle rewards. Gradient probing of the trained
-$\psi^\top w$ shows sensitivity $386$ to the index slot $u'$ and $115$ to the state, but
-only $12.6$ to the action slot $u$ that GPI selects and decodes; the value landscape over
-candidate latents is flat to $\pm2.5\%$, and predicted scores are uncorrelated with the
-realized returns of the corresponding fixed-$u$ policies (Spearman $-0.13$). Meanwhile the
-\emph{state}-value $V(s)=\max_{u}\psi(s,u,u)^\top w$ correlates $0.89$ with negative
-distance-to-goal: the representation learns \emph{where} the task is, but not
-\emph{which policy index} realizes it---TD grounds the index slot only through
-bootstrap chains, never against the actual rollouts of $\pi_{u'}$.
-% TODO(exp): resolution experiments — index-grounding losses, Rung-2 latent Q-iteration,
-% the u'-codebook ablation, longer training; then the coverage ladder + VC-FB comparison.
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig_reachability.pdf}
+\caption{\textbf{The fixed-latent family contains no goal-reaching policy.} (a)~With
+$d_a{=}2$ a $13\times13$ grid covers the \emph{entire} latent box, so this is the whole
+family, not a sample: none of the 233 candidates reaches the goal in $2\times1000$ steps
+and the best approach is $1.32$ in a maze $\sim\!30$ across. (b)~The family collapses into
+two regimes: saturated latents give a near-constant heading, typical latents give a field
+that circulates (path length $164$, net displacement $1.4$). (c)~Dataset latents are
+temporally white, so no fixed $u$ encodes a route. (d)~What flow-GPI scored equals what
+the family contains.}
+\label{fig:reach}
+\end{figure}
+
+\textbf{Finding 3 (negative, root-caused): the fixed-latent family has no goal-reaching
+member.} Representation runs over the fixed-index family reach $0.00$ success on
+pointmaze and $0.02$--$0.06$ on cube even with oracle rewards. This is not a training
+failure: it is a property of the family. Rolling \emph{every} latent on a grid that covers
+the whole box---plus dataset preimages and the preimages of goal-reaching
+transitions---for full episodes, $0$ of $233$ candidates ever reach the pointmaze goal,
+$2$ of $128$ on cube, $5$ of $64$ on antmaze (Figure~\ref{fig:reach}). The mechanism is
+temporal, not per-state: at a fixed state the decoded action covers every direction
+(angular circular variance $0.45$--$0.78$), but within an episode the inverted latents are
+white (lag-1 autocorrelation $0.25$, decaying to zero by lag $50$; within-episode variance
+is $0.99$ of the marginal). The behavior flow factorizes behavior into a state-conditional
+and a per-step quantile, and the expert's route depends on a goal that is not in the
+observation, so route identity is pushed into the latent \emph{sequence} and never into any
+single $u$. Consequently every $\pi_u$ has the same value under any goal-reaching reward,
+$\psi^\top w$ is flat over candidates ($\pm2.5\%$), and GPI's argmax drifts to the
+saturated corners. The prediction this makes is quantitative and it holds: flow-GPI over
+fixed $u$ scores $0.015$ on cube against a measured family ceiling of $2/128 = 0.0156$.
+GPI was already extracting everything the family contained.
+
+\textbf{Finding 4: moving the policy index into a task vector recovers most of the loss.}
+The support construction survives Finding 3---every action is still a flow decode---but the
+premise that a fixed noise vector \emph{is} a policy does not. We therefore keep the frozen
+flow and make the index a task vector $w$, with an amortized actor $u_\eta(s,w)$ emitting a
+latent per step and the measure backup bootstrapping the actor's latent at $s'$ rather than
+a fixed index (\emph{LatentFlowPSM}, \S\ref{sec:method}). On cube-single this reaches
+$0.236$ success ($500$ episodes/seed, $5$ seeds, Wilson $[0.219,0.253]$; across seeds
+$0.236\pm0.071$) against a behavior-cloning control of $0.068$ $[0.049,0.093]$ measured
+from the same frozen flow---a $3.5\times$ improvement with non-overlapping intervals
+(Figure~\ref{fig:actor}). On antmaze-medium it reaches $0.222$ $[0.188,0.261]$ against a
+control of $0.090$ $[0.068,0.118]$. Two results temper this. First, the actor-free
+ablation---the same representations acting by per-step latent argmax---scores $0.055$
+$[0.047,0.064]$, \emph{below} the behavior-cloning control: $\psi$ is a usable training
+signal for the actor but not a reliable ranker of latents, which is the same weakness
+Finding 3 diagnosed, surviving the redesign. Second, per-task FQL reaches $0.949$
+$[0.936,0.960]$ on the same task, so LatentFlowPSM recovers about a quarter of what a
+reward-supervised learner obtains, and its curve is flat from $50$k steps---it converges to
+that level rather than being budget-limited.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig_actor_comparison.pdf}
+\caption{\textbf{Which way of choosing a latent earns its keep} (cube-single, 500-episode
+evaluations, Wilson 95\% intervals, per-seed dots). Selection over fixed latents sits at the
+family ceiling measured in Figure~\ref{fig:reach}. The amortized latent actor clears the
+behavior-cloning control by $3.5\times$; the actor-free ablation on identical
+representations falls below it. FQL is separated because it sees the reward during
+training: a ceiling, not a peer.}
+\label{fig:actor}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig_policy_anatomy.pdf}
+\caption{\textbf{What the deployed policy does.} (a)~Antmaze rollouts, colored by time.
+(b)~The latents the actor emits stay inside the prior's typical set, beside the dataset
+latents and the $\chi^2_{d_a}$ density---the in-support claim, measured rather than
+asserted. (c)~Predicted $\psi(s,w,u)^\top w$ at the initial state against the outcome of
+that episode; reported as AUC against binary success because failed episodes all return the
+same value.}
+\label{fig:anatomy}
+\end{figure}
 
 \section{Related work}
 \label{sec:related}

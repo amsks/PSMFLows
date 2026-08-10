@@ -12,3 +12,4 @@ gym == 0.23.1  # For d4rl.
 numpy == 1.26.4  # For d4rl.
 shimmy[gym-v21,gym-v26]  # For d4rl.
 Cython < 3  # For d4rl.
+huggingface_hub>=0.30
