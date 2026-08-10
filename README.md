@@ -26,7 +26,7 @@ The algorithm is written up in [`PAPER/main.tex`](PAPER/main.tex) (section
 | representation | trains the features, successor features and latent actor | ~3 h | `agent=psmflow` |
 
 The first two steps are **published, so you can skip them** — checkpoints and preimages are
-on Hugging Face.
+on Hugging Face as `amsks/psmflows-preimages` (private; ask for access).
 
 ## Quickstart
 
