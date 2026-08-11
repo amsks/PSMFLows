@@ -69,10 +69,12 @@ def main(cfg: DictConfig):
             # re-wrap it here or it stays a plain dict when p_aug/frame_stack are set.
             val_dataset = Dataset.create(**val_dataset)
 
-    if config['agent_name'] == 'psmflow':
-        # psmflow trains on the preimage-augmented dataset (latents per transition).
+    if config['agent_name'] in ('psmflow', 'latentrl'):
+        # These train on the preimage-augmented dataset (latents per transition).
         from utils.flow_inversion import load_augmented_dataset, repair_invalid_preimages
-        assert config.get('preimage_path'), 'psmflow requires agent.preimage_path (tools/precompute_preimages.py)'
+        assert config.get('preimage_path'), (
+            f"{config['agent_name']} requires agent.preimage_path "
+            "(tools/precompute_preimages.py)")
         aug = load_augmented_dataset(config['preimage_path'])
         assert aug['observations'].shape[0] == train_dataset['observations'].shape[0], (
             'preimage npz size mismatch vs env dataset — wrong env or stale file?')
@@ -140,7 +142,7 @@ def main(cfg: DictConfig):
                 # than of its state, and the TD bootstrap target is re-randomized on every
                 # resample. affine_psm was missing from this list.
                 dataset.return_index = True
-            if config['agent_name'] == 'psmflow':
+            if config['agent_name'] in ('psmflow', 'latentrl'):
                 # Emit u_0 / u_0' per transition: either a draw from the stored EM mixture
                 # or the exact backward-ODE point, per the point-vs-mixture ablation.
                 dataset.return_preimage_noise = True

@@ -17,6 +17,26 @@ Ground rules: identical to the previous two plans (§0 of `2026-08-10-iclr-figur
 or seed mean ± 95% CI, BC control quoted next to every Stage-C number, every tool writes
 `report_out` JSON to `/data-local/amsks/PSMFLows/logs/`.
 
+## Sequencing (decided 2026-08-10 after P0 returned Branch B)
+
+P0 said Branch B, which pre-commits to promoting LatentFB. That promotion is HELD pending
+two cheaper reads, because Branch B's inference ("the improvement loop is the
+differentiator, so transplant our actor into FB's loop") carries an untested assumption:
+that the latent action space can support a working improvement loop **at all**.
+
+1. **P2 first.** It tests exactly that assumption in one night with no new architecture.
+   Lands high (~0.7) ⇒ the latent space is innocent, build LatentFB with confidence, and
+   P2's critic additionally calibrates what an alive latent critic's Q relief looks like —
+   a number we do not currently have. Caps low (~0.3) ⇒ LatentFB would have capped there
+   too, and the bottleneck is the frozen flow / latent action space, which is a different
+   fix and a different paper sentence.
+2. **Then read P1b** (backup exploration, already running). If it wakes the critic we stay
+   inside PSM, which is the stated priority, and LatentFB stays parked.
+3. **Then commit** to LatentFB or not.
+
+Building P3 before P2 risks spending the build on a ceiling that a GPU-night already in
+the plan as unconditional could have measured.
+
 ## P0 — the deciding probe: does FB's B carry the reward? (no training, ~1 h, DO FIRST)
 
 Extend `tools/diag_task_projection.py` to accept `agent=fb` and read features from the
@@ -86,9 +106,14 @@ Run the existing diagnostic trio on the best arm (they are all built):
 
 1. `diag_task_projection`: held-out R² ≥ **0.5 × (FB's B R² from P0)** — the basis now
    carries the task signal.
-2. `diag_q_landscape`: Q relative spread over prior draws ≥ **5%** of |Q| (vs 1.1%),
-   and actor percentile in the Q distribution ≥ 0.7 (it exploits the relief).
+2. `diag_q_landscape`: Q relative spread over prior draws **inside FB's measured band
+   (2.3–3.1%)** — the original ≥5% bar was a guess that FB itself fails, so it cannot be
+   the definition of an alive critic. Actor percentile in the Q distribution ≥ 0.7 (it
+   exploits whatever relief exists).
 3. `diag_policy_ranking` (judge = new ckpt, same 10-policy set): Spearman ≥ **0.6**.
+   **This is the load-bearing gate.** Relief is necessary but not sufficient — a critic
+   with spread that still cannot order policies is no more usable than a flat one, and
+   R^2 of a linear read-out has already been shown (P0) not to track success at all.
 4. Only if 1–3 pass: 500-ep evals, quote vs BC 0.068 and FB's 500-ep numbers (which
    the leftover-evals WP below produces).
 

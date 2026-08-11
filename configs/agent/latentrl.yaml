@@ -1,0 +1,38 @@
+# Per-task offline RL in the flow's latent space -- the ceiling probe (P2 of the
+# psm-fix roadmap). NOT zero-shot: it trains on the actual task reward. It answers
+# whether the latent action space can support a working improvement loop at all,
+# which bounds the headroom of any zero-shot method built on the same substrate.
+agent_name: latentrl
+
+lr: 3.0e-4
+batch_size: 256
+value_hidden_dims: [512, 512, 512, 512]
+layer_norm: true
+num_parallel: 2
+discount: 0.99          # FB's value; 0.98 gives a ~50-step horizon, myopic for these tasks
+tau: 0.005
+pessimism_penalty: 0.5
+actor_pessimism_penalty: 0.5
+alpha: 10.0             # BC weight toward the dataset latent u*
+z_dim: 8                # width of the constant vector fed to the actor's z-slot (unused)
+u_clip: 3.0
+
+actor:
+  hidden_dim: 512
+  hidden_layers: 2
+  embedding_layers: 2
+
+# FROZEN behavior flow -- must be the same Stage-A ckpt psmflow decodes through.
+flow:
+  hidden_dims: [512, 512, 512, 512]
+  value_hidden_dims: [512, 512, 512, 512]
+  layer_norm: false
+  critic_layer_norm: true
+flow_ckpt_path: null
+flow_ckpt_epoch: null
+preimage_path: null
+use_point_preimage: true
+
+ob_dims: null
+action_dim: null
+encoder: null
