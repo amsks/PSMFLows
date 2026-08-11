@@ -42,6 +42,11 @@ actor:
   bc_coeff: 1.0            # distillation weight (reference cube value is 3.0)
 acting: actor              # actor | gpi (per-step latent argmax, actor-free ablation)
 
+# Fraction of TD bootstrap latents drawn from p0 instead of the actor. 0.0 = the backup as
+# published (it only ever evaluates the actor's own latent). Raising it makes psi see the
+# wider family: the fix direction for the flat-Q finding in logs/d3_q_landscape_cube.json.
+backup_explore_frac: 0.0
+
 # FROZEN behavior flow — must match the Stage-A `agent=fql agent.bc_only=true` run.
 flow:
   hidden_dims: [512, 512, 512, 512]

@@ -124,6 +124,23 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         # sf_next_action). NoiseConditionedActor is tanh-bounded; scale to the u box.
         u_next = c["u_clip"] * self.actor(batch["next_observations"], task_w,
                                           jax.random.normal(r_next, (B, adim)))
+        # Backup exploration (default off). The backup otherwise only ever evaluates the
+        # actor's own latent, so psi is fit on the slice of latent space the actor already
+        # occupies — measured on cube at 500k, Q then varies by ~1% of |Q| across the whole
+        # prior, which is too flat for the -Q term to say anything (D3). Replacing a
+        # fraction of bootstrap latents with prior draws makes the backup evaluate the
+        # family it is supposed to be a measure over. Prior draws stay in-support: they
+        # decode through the same frozen flow, so C=1 is untouched.
+        #
+        # The extra keys are drawn INSIDE the branch, and `frac` is a static config value,
+        # so at the default 0.0 every random draw above keeps the key it had before this
+        # feature existed — the published runs stay bit-reproducible.
+        if c["backup_explore_frac"] > 0.0:
+            r_expl, r_emask = jax.random.split(r_next)
+            u_prior = jnp.clip(jax.random.normal(r_expl, (B, adim)),
+                               -c["u_clip"], c["u_clip"])
+            emask = (jax.random.uniform(r_emask, (B,)) < c["backup_explore_frac"])[:, None]
+            u_next = jnp.where(emask, u_prior, u_next)
         return StepInputs(
             u_data=u_data, u_next=u_next, task_w=task_w,
             flow_x0=jax.random.normal(r_x0, (B, adim)),
@@ -395,6 +412,9 @@ def get_config():
             phi=dict(hidden_dim=256, hidden_layers=2),
             sf=dict(hidden_dim=1024, hidden_layers=1, embedding_layers=2),
             mix_ratio=0.5,           # P(w from phi(next_obs[perm])) vs random unit z
+            # Fraction of TD bootstrap latents drawn from the prior instead of the actor.
+            # 0.0 reproduces the as-published backup exactly.
+            backup_explore_frac=0.0,
             # amortized latent actor (flowBC recipe over latents). Load-bearing: the
             # measure backup bootstraps its latent at s'; always trained.
             actor=dict(hidden_dim=512, hidden_layers=2, embedding_layers=2,

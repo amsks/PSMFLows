@@ -24,6 +24,58 @@ Date: **2026-08-10** (latest) · prior: 2026-08-05, 08-04, 07-29, 07-28, 07-26, 
 
 <!-- _class: lead -->
 
+## 2026-08-10 (evening) — P0 says BRANCH B: FB's basis is WORSE than ours, and it still wins
+
+`docs/plans/2026-08-10-psm-fix-roadmap.md` P0, the deciding probe. Report:
+`logs/p0_fb_basis_probe.json`. New tool `tools/diag_fb_basis_probe.py`.
+
+| cube, 500k | linear reward read-out (ridge R^2, held out) | Q relief (spread / |Q|) | 500-ep success |
+|---|---:|---:|---:|
+| LatentFlowPSM (our phi) | **0.129** | 0.011 | 0.236 |
+| FB (3 seeds) | **0.069** | 0.023-0.031 | **0.716 / 0.730 / 0.716** |
+
+**FB's backward map carries LESS reward signal than our phi -- at z_dim=50 against our 128,
+so it is worse per-dimension too -- and FB still scores 3x our success.** The premise
+behind P1 (copy FB's measure objective so the basis carries the task) is therefore not
+supported: the property we were going to import is one FB does not have either.
+
+FB's Q relief is 2-3x ours (2.3-3.1% vs 1.1%) but nowhere near the >=5% Branch-A bar, so
+that is not the explanation on its own either.
+
+**Consequence, per the plan's pre-registered decision rule: P1a (the loss swap) is NOT
+indicated; LatentFB (P3) is promoted to the primary path, and the PSM-internal work
+narrows to P1b (backup exploration + actor unshackling).** The differentiator has to be
+the improvement loop -- FB's actor optimizes F^T z from step one against a critic trained
+on ITS OWN visitation -- not the reward read-out of the basis.
+
+Caveat worth carrying into the paper: R^2 of a linear read-out on a 2%-sparse reward is a
+weak instrument in absolute terms for both methods. The comparison is meaningful because
+it is like-for-like; the absolute levels are not evidence that either basis is "good".
+
+### Peer baselines, 500 episodes
+
+| cube-single | success | 95% CI |
+|---|---:|---|
+| BC control | 0.068 | [0.049, 0.093] |
+| LatentFlowPSM (5 seeds pooled) | 0.236 | [0.219, 0.253] |
+| **FB sd0/1/2** | **0.716 / 0.730 / 0.716** | [0.675,0.754] / [0.689,0.767] / [0.675,0.754] |
+| FQL per-task | 0.949 | [0.936, 0.960] |
+
+FB is a ZERO-SHOT peer, not a per-task topline: same env, dataset, budget, flow actor, no
+reward at train time. This is the bar, and we are far from it. Antmaze LatentFlowPSM is now
+3 seeds (0.22 / 0.26 / 0.22 in-loop @500k) vs its 0.090 control.
+
+### In flight
+
+- `abl_be_sd{0,1}`: backup exploration `backup_explore_frac=0.5`, cube, 2 seeds (P1b).
+  Implemented config-gated with a test pinning that the default 0.0 path is BIT-IDENTICAL
+  (the extra RNG keys are split inside the branch, so published runs stay reproducible).
+- PSM cube sd1 finishing, sd2 queued; 500-ep PSM evals after.
+
+---
+
+<!-- _class: lead -->
+
 ## 2026-08-10 (later) — diagnosis: the gain is in-support latent BC + pessimism, not value improvement
 
 Ran §B of `docs/plans/2026-08-10-critic-diagnosis-and-baselines.md`. Three diagnostics,
