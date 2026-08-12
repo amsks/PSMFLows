@@ -24,6 +24,64 @@ Date: **2026-08-10** (latest) · prior: 2026-08-05, 08-04, 07-29, 07-28, 07-26, 
 
 <!-- _class: lead -->
 
+## 2026-08-12 — the interface ceiling is a SUPPORT fact, not a decoder fact
+
+Chain: P0 Branch B → differentiation probe → P2 ceiling → W1 coverage → W3 gate failure →
+C1. Reports in `logs/diag_action_coverage_cube{,_fs100,_c123}.json`.
+
+### C1 — the reframe. Read this before quoting any interface number.
+
+| cube, 64 states, normalized by action scale | |
+|---|---:|
+| a_FQL → the dataset's OWN 32-NN actions | **0.577** |
+| a_FQL → our best decode (512 candidates) | **0.187** |
+
+**FQL's actions sit 0.577 from the dataset's own nearest neighbours while our decoder gets
+within 0.187 of them — the flow interpolates closer to the winning actions than the
+empirical data itself does.** Therefore 0.187 was never a decoder failure, and no retrain
+could have closed it: the actions FQL uses are not in the distribution being cloned.
+Capacity/retrain arm **cancelled** (automatically, by the pre-committed rule); **W3
+retired**.
+
+This is easy to garble later, so state it in this order: (1) the winning policy is
+off-support, (2) by 3x more than our decode gap, (3) hence the ceiling is a property of
+the data + support constraint, not of the flow.
+
+### W1 / W3 / C2 / C3, briefly
+
+- **W1:** coverage 0.415–0.418 across all six decode × radius settings on the deployed
+  flow. ODE gain +0.002, radius gain +0.001 — doubling the latent radius changes nothing,
+  so the decoder saturates rather than being clipped too tightly. W2 arms A and B both
+  eliminated without training either.
+- **W3:** retraining Stage-A at `flow_steps=100` lifted coverage 0.42 → **0.63** — the
+  07-29 caveat about the fs10 checkpoint was correct — but left the FQL-action distance at
+  0.187, unmoved to three decimals. Gate (<0.10) failed; the flow was NOT inverted.
+- **C2:** residual spreads evenly across all 5 action dims (max 23%) ⇒ blanket ε.
+- **C3:** aleatoric coverage ceiling 0.936, so fs100 is at **67% of achievable**, fs10 at
+  44%. Coverage was being judged against the wrong reference (1.0).
+- Tool debt closed: the ODE step count now reads the flow's `flags.json` (fixing the
+  `gpi_decode=ode` step mismatch for all envs), and the knob-sweep verdict is scoped to
+  the flow under test — the fs100 report had reprinted the fs10 recommendation verbatim.
+
+### Peer bar, 500 episodes — PSM does NOT survive its in-loop numbers
+
+PSM cube in-loop finals were 0.38 / 0.02 / 0.58; at 500 episodes sd0 reads **0.156**
+[0.127, 0.190] and sd1 **0.056** [0.039, 0.080] (sd2 pending). Do not quote the in-loop
+numbers. FB at **0.716–0.730** remains the real peer bar; BC control 0.068.
+
+### In flight
+
+W4 residual sweep on the instrument: ε ∈ {0, 0.05, 0.1, 0.2, 0.4}, 2 seeds each, tmux
+`w4_q0` / `w4_q1`. The W4 critic scores executed ACTIONS, not latents — a residual head
+gets no gradient from a latent critic — so ε=0 is its own anchor arm and the P2 numbers
+are NOT its left endpoint. Gate: any arm ≥ 0.40 at 500 episodes ⇒ port to LatentFlowPSM.
+Per-arm off-support budget (executed-action distance to k-NN dataset actions) is the
+x-axis of the headline tradeoff figure, not a side stat.
+
+---
+
+<!-- _class: lead -->
+
 ## 2026-08-10 (evening) — P0 says BRANCH B: FB's basis is WORSE than ours, and it still wins
 
 `docs/plans/2026-08-10-psm-fix-roadmap.md` P0, the deciding probe. Report:

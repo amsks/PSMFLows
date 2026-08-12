@@ -17,6 +17,15 @@ alpha: 10.0             # BC weight toward the dataset latent u*
 z_dim: 8                # width of the constant vector fed to the actor's z-slot (unused)
 u_clip: 3.0
 
+# W4 bounded residual head: executed action = clip(decode(u) + residual_eps * delta(s,u)),
+# delta tanh-bounded. 0.0 leaves the head inert (but the critic still scores executed
+# actions, so eps=0 is its own anchor arm, not a rerun of the latent-critic P2 agent).
+residual_eps: 0.0
+residual:
+  hidden_dim: 512
+  hidden_layers: 2
+  embedding_layers: 2
+
 actor:
   hidden_dim: 512
   hidden_layers: 2
