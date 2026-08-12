@@ -24,6 +24,45 @@ Date: **2026-08-10** (latest) · prior: 2026-08-05, 08-04, 07-29, 07-28, 07-26, 
 
 <!-- _class: lead -->
 
+## 2026-08-12 (L0) — the ordering survives, but it is 1.7x and not 3x
+
+`logs/diag_action_coverage_cube_robust.json`, `tools/diag_geometry_robustness.py`.
+
+C1 compared a minimum over **512** decodes against a minimum over **32** neighbours. That
+is a combinatorial advantage, not a geometric one. Matching the candidate counts:
+
+| | k=16 | k=32 | k=64 |
+|---|---:|---:|---:|
+| d_flow, 512 candidates (C1's number) | 0.183 | 0.183 | 0.183 |
+| d_flow, matched to k | 0.370 | **0.345** | 0.296 |
+| d_data over k neighbours | 0.649 | **0.577** | 0.521 |
+| ratio (matched) | 1.75 | **1.67** | 1.76 |
+
+**The ordering survives in all six geometry x k settings (raw and per-dim standardized
+observations), ratio 1.64-1.80 — but the magnitude roughly halves, from ~3x to ~1.7x.**
+Quote the matched pair (0.577 vs 0.345 at k=32), never C1's 512-vs-32 pair.
+
+The conditioning asymmetry that matching CANNOT remove: d_flow conditions on exactly s,
+d_data on a neighbourhood of s. So the defensible claim is "the decoder interpolates at
+least as close to the task-optimal action as nearby data does", not a statement about the
+behaviour conditional at s.
+
+Everything downstream of C1 stands: the winning policy is still off-support, the capacity
+arm stays cancelled, W3 stays retired. Only the number changes.
+
+Two smaller reads: coverage is mildly k-dependent (0.38-0.48) and its split-half reference
+moves with it (0.92-1.11), so coverage must always be quoted relative to that reference.
+And the coverage statistic is numerically unstable at k=16 under standardized observations
+(one cell read 364 — an action dim with near-zero sd in a 16-neighbour set); use k>=32 for
+coverage, the distance statistics are unaffected.
+
+note.tex updated: the abstract's "3x" is now "1.7x", Hypothesis B carries the matched
+numbers and the residual asymmetry, and the provisional-geometry caveat is resolved.
+
+---
+
+<!-- _class: lead -->
+
 ## 2026-08-12 — the interface ceiling is a SUPPORT fact, not a decoder fact
 
 Chain: P0 Branch B → differentiation probe → P2 ceiling → W1 coverage → W3 gate failure →
