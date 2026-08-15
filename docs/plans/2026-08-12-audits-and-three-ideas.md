@@ -151,3 +151,41 @@ Day 4: syntheses: audit doc, Idea-2 verdict, hybrid gate call, C-1 go/no-go to u
       before any porting/claims
 - [ ] C-1 report delivered BEFORE any LIBERO build; hard stop honored
 - [ ] L1 sweep untouched and its regime plot still delivered; tmux server killed
+
+## Launched (2026-08-13, three-track execution)
+
+- **A1 hpmatch**: `psmflow_hpmatch_20260813`, seeds 0/1, GPUs 0/1. Bundle as per the
+  audit doc MINUS the sf 512x2 shape (PsiMap hard-asserts embedding_layers=2/
+  hidden_layers=1 — a code change, out of scope for a launch arm; phi 512x4 IS applied).
+- **A2 FQL calibration**: done — `logs/diag_fql_calibration_cube.json`. Verdict:
+  calibrated with mild optimism (+2 to +8 on |G|~50, ratio 0.83–0.96); FQL 0.95 is not
+  riding overestimation. Spearman ~0 is uninformative (92–95% episode success leaves no
+  variance to rank). Tool patched to reach FQL's critic via network.select.
+- **B1 dataset_fraction**: `envs/env_utils.py:subsample_episodes` (episode-level, seeded,
+  pairing-safe) + config keys + main.py/precompute_preimages pass-through;
+  `tests/test_dataset_fraction.py` (3 tests green).
+- **B2 Idea-1 action branch**: `agents/psmflow.py` — psi_a(s,w,a) successor features
+  over EXECUTED actions (shared phi, vector TD, gamma 0.99, tau 0.005, **pessimism 0.0
+  by design** per the collapse forensics) + eps-bounded w-conditioned residual head;
+  acting applies the residual when enabled. `tests/test_psmflow_action_critic.py`
+  (3 tests green; shared branches byte-identical when disabled AND across the switch).
+- **C3 hybrid runs**: `psmflow_hybrid_20260813` seeds 0/1 QUEUED behind hpmatch on
+  GPUs 0/1 (tmux hybrid_sd{0,1} wait-loops), action_critic.enabled=true,
+  residual_eps=0.05, save/eval interval 25k.
+- **2b/2c chain** (GPU 3, tmux chain_frac10, sequential): FQL-10% (running) → its
+  500-ep eval → 10% BC flow (fs100) → 500-ep BC eval → 10% preimages (alpha=20 N=200)
+  → latentrl eps=0 → 500-ep eval. 2b's 25% arm DROPPED for now (3 GPUs; Idea 1
+  preempts, per plan).
+- **2c' zero-shot PSMFlow @10% (user priority addition, 08-13)**: `psmflow_frac10_20260813`
+  seeds 0/1 QUEUED (tmux psmflow_frac10_sd{0,1}): LatentFlowPSM recipe on the SAME 10%
+  episode subset (fraction seed 0), flow = bcflow_frac10, preimages = frac10 npz
+  (pairing-guarded). sd0 runs on GPU 3 after the 2c chain completes; sd1 on GPU 0 after
+  hybrid_sd1's slot frees. 500-ep evals -> eval500_psmflow_frac10_sd{0,1}.json, quoted
+  against PSMFlow@100%, FQL@10%, BC@10%, instrument@10%.
+- **frac50 chain (user addition 2, 08-13 evening)**: tmux chain_frac50, GPU 1, sequential:
+  fql_frac50 -> 500-ep eval -> bcflow_frac50 (fs100) -> eval -> frac50 preimages
+  (alpha=20 N=200, ~500k rows, overnight) -> psmflow_frac50 zero-shot -> eval. Same
+  fraction-seed (0) as frac10. Final deliverable: logs/table_dataset_fraction.json
+  ({FQL, PSMFlow, BC, instrument} x {10%, 50%, 100%}).
+- **eval queue (08-13 evening)**: tmux evalq_20260813, GPU 1 shared: 500-ep finals for
+  hybrid sd0/sd1 (gate check on sd1's in-loop 0.46) and hpmatch sd0/sd1.

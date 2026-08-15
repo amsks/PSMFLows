@@ -119,3 +119,23 @@ Day 3: L1 regime plot + gate call · L2/L3 readouts · port winner · HANDOFF + 
 - [ ] L2: weighted flow trained, probe-gated BEFORE inversion; no blind β iteration
 - [ ] L3: 3 arms × 2 seeds with plain-FB control, same regime logging
 - [ ] Nothing ported to LatentFlowPSM without a passed gate; tmux server killed
+
+## Retroactive documentation (2026-08-13, added during the analysis pass)
+
+Two launches happened outside this plan; recorded here so they stop being undocumented:
+
+- **`l1stab_res{0.05,0.1,0.15}_dense`** (12 runs, seeds 2–5, launched 08-12 ~18:27,
+  relaunched dense same evening): seed-stability replication of the W4 sweep after the
+  original arms showed peak-then-collapse. `save_interval=25000` (20 ckpts/run) per the
+  user's decision so peak checkpoints and same-run pre/post-collapse pairs exist.
+  ε=0.15 was added off-grid to probe between 0.1 and 0.2. RESULT: peaks 0.66–0.98
+  (ε=0.05 highest), collapse to ~0.00 by 200–450k in 9/12 runs; two runs dead from
+  start (res0.1 sd4, res0.15 sd4).
+- **`l1_pess0_e010`** (3 runs, seeds 2–4, launched 08-13 02:28): pessimism-off control
+  (`pessimism_penalty=0.0`, `actor_pessimism_penalty=0.0`, ε=0.1). RATIONALE (confirmed
+  by the collapse calibration, `logs/diag_calibration_collapse.json`): the collapse is
+  NOT an overestimation spiral — collapsed critics UNDERestimate (bias −19/−25, Q_mean
+  −49 → −105/−112 while realized fell only −56 → −87). Signature of a pessimism-driven
+  value collapse: exact-min pessimism compounds through the backup as ensemble
+  disagreement grows off-data. pess0 removes that term; if it collapses anyway, the
+  mechanism is elsewhere (e.g. actor runaway under the normalized −Q/|Q| gradient).

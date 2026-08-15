@@ -18,7 +18,154 @@ hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RES
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
 Branch: `feat/psm-integration` · Machine: `midi-01` (UT CS)
-Date: **2026-08-10** (latest) · prior: 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+Date: **2026-08-14** (latest) · prior: 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+
+---
+
+<!-- _class: lead -->
+
+## 2026-08-14 — the residual is DATA-DEPENDENT: it carries the low-data regime and costs on full data
+
+Full plan, every launch and every number: `docs/plans/2026-08-14-priority-stack.md`.
+Tables regenerate from the eval JSONs with `tools/make_tables.py`
+(`docs/tables/results.md`, `PAPER/ICLR/tables/*.tex`).
+
+### The result that reorganises the story
+
+Every hybrid checkpoint is now evaluated in BOTH acting modes — deployed (actor draw +
+ε-residual) and decode-only (`agent.action_critic.eval_rank_k=1`: same draw, no residual,
+no selection). The residual's sign flips with dataset size:
+
+| data | deployed | decode-only | plain PSMFlow | residual effect |
+|---|---|---|---|---|
+| 10% | **0.238** | 0.072 | 0.068 | **+0.166** |
+| 50% | **0.228** | 0.070 | 0.052 | **+0.158** |
+| 100% | 0.162 ± 0.168 (4 seeds) | 0.226 ± 0.068 | 0.236 ± 0.071 | **−0.065** |
+
+At 100% the residual helps on one seed of four (+0.102 on sd1) and hurts on the rest
+(−0.218, −0.126, −0.018), so the flagship 0.302 was the seed where the coin landed heads;
+the deployed arm's ±0.168 interval is the real headline. At 10–50% the opposite holds and
+the residual carries everything — decode-only sits exactly on the BC floor. At 10% the
+hybrid is also the best zero-shot method measured (0.238) while **FB collapses to 0.030**,
+below the BC control. One seed per fraction cell: replicate before claiming.
+
+Also: λ-rank acting (K=32 decoded candidates ranked by Q_a, no residual) is WORSE than
+decode-only on both seeds (0.004 / 0.162), so Q_a's ordering over reachable actions is not
+merely uninformative. 1M did not pay off (fresh 1M seeds 0.134/0.162; extending sd1
+500k→1M moved 0.302→0.284). HP-matching to FB buys nothing (0.276 / 0.192 vs 0.236 ± 0.071).
+
+### Two paper-bound claims failed their re-check
+
+1. **The radius claim was vacuous** — `clip(N(0,1), ±r)` never samples wider latents. With
+   scaled draws, coverage rises 0.63 → 0.99 → 1.41 at 1/1.5/2×, i.e. it DOES reach the
+   split-half reference, while the distance to FQL's action gets WORSE (0.19 → 0.23 → 0.28).
+   `note.tex` corrected in both places (body + figure caption).
+2. **C1's "FQL is off-support" had no yardstick.** Measured against the data-matches-itself
+   baseline it was missing: a_FQL sits 0.537 from its k-NN actions while real data sits
+   0.582 from its own (p95 1.165), and only 6.3% of FQL's actions exceed that p95. FQL is as
+   data-like as the data; what is anomalous is our decode at 0.187, ~3× TIGHTER. The
+   capacity/retrain arm was cancelled on the uncalibrated comparison. Verdict string left
+   unchanged in the tool, baseline now recorded beside it — this one still needs a call.
+
+### The preimage pipeline had a real bug (user-flagged, confirmed)
+
+The inversion target was π(u) ∝ exp(−α‖G(s,u)−a‖) with **no N(0,I) prior factor**, so it is
+flat wherever the decoder is insensitive and the EM fit runs away (covariance eigenvalue
+1→6→34→305→2281→6095 over 8 steps; in the shipped npz files 82–84% of cube rows and 50% of
+pointmaze rows are fitted WIDER than the prior, worst case 3.8e4, means to |μ|=206). The
+exact point preimages in the same files are prior-like (|u| mean 0.85), which identifies the
+target rather than the inverter. Fixed via `inversion.prior_scale` (default 1.0; 0.0
+reproduces legacy files) — on the real cube flow this puts 0% of rows outside the prior and
+lifts ESS 87 → 119 of 200.
+
+**But mixtures still are not worth switching to.** Sweeping α (`tools/diag_preimage_posterior_width.py`)
+shows the posterior's width IS the temperature, not decoder degeneracy: width, distance to
+the point inverse and decode error all shrink together (α=20/100/500 → per-dim var
+0.49/0.093/0.020, decode error 0.165/0.045/0.009), and samples only become faithful once the
+fit has collapsed onto the point inverse. The decoder is a near-uniform CONTRACTION
+(σ ≈ 0.07), which is injective — hence a point preimage — while still compressing the
+reachable action set 3× below the data's dispersion. Historical mixture arms trained on
+latents decoding 53% of an action scale away, so that ablation was never fair.
+
+### Everything else that landed
+
+- eval reproducibility: `evaluate` pinned the env's init RNG but drew ACTION noise from OS
+  entropy regardless of `seed`; now pinned, relabel batch seeded, false docstring fixed.
+- one k-NN protocol (`utils/geometry.NeighbourIndex`, standardized obs, k=32, exact
+  self-exclusion) shared by the three support probes; raw-geometry numbers kept, labeled.
+- ψ_a pessimism is now scalar-Q (blend toward the least-task-valued ensemble member);
+  the old per-feature penalty was sign-indefinite in Q-space and RAISED Q where w < 0.
+  Bit-identical at λ=0, i.e. every run to date.
+- 2a Q-gap probe + calibration penalty fix (actor knob, |q0−q1| not |q0−q1|/2): prior
+  collapse verdicts UNDERSTATED the over-estimation; directions unchanged.
+- pairing guard now records `dataset_fraction`/seed in the npz sidecar and spot-checks the
+  first/last 1k observation rows; `restore_agent` tolerates checkpoints predating a field
+  (the hpmatch checkpoints could not otherwise be loaded at all).
+- eval reports are self-identifying (`acting_mode`, `action_critic`, fraction, flow/npz
+  paths): three acting modes per checkpoint were distinguishable only by FILENAME.
+- P2 FB-graft built and running: ψ_a gets its own backward map B_a trained by the FB measure
+  loss, w_a inferred from B_a; ψ_u/φ/actor untouched. Tests pin byte-identity when off and
+  both-directions gradient isolation when on. Gate: 500-ep ≥ 0.45 ⇒ scale to 5 seeds.
+- **Run the test suite module-per-process** — all 29 modules pass (177 passed, 1 skipped),
+  but the whole suite in ONE process dies in the XLA CPU compiler at a moving victim
+  (pre-existing; reproduced with every one of today's tests excluded).
+
+---
+
+<!-- _class: lead -->
+
+## 2026-08-13 — the residual dial WORKS (0.90–0.91 at 500 ep, 3 seeds); the collapse is a PESSIMISM spiral, not optimism
+
+The W4/l1stab arc, verified end-to-end this session. All artifacts in
+`/data-local/amsks/PSMFLows/logs/`.
+
+### Peak checkpoints hold at 500 episodes
+
+`eval500_l1stab_*_peak*.json`, summary `eval500_l1stab_peaks_summary.json`:
+ε=0.05 → **0.910 / 0.910 / 0.896** (sd2@75k, sd3@50k, sd5@50k); ε=0.1 → 0.888 / 0.850.
+Anchors: ε=0 final 0.140/0.144 · BC 0.068 · FB 0.716–0.730 · FQL 0.949. A 5%-of-action-
+scale residual budget recovers ~95% of the per-task ceiling. The w4 finals table
+(`eval500_w4_res*_final.json`): ε=0.1 sd0 survivor **0.820** [0.784, 0.851]; everything
+else collapsed (0.000–0.144).
+
+### The collapse mechanism is pessimism-driven UNDERestimation
+
+`diag_calibration_collapse.json` (new `tools/diag_fql_calibration.py`), same-run
+peak-vs-collapsed pairs (res0.05 sd2 75k/250k, sd5 50k/300k): at the peak Q is mildly
+optimistic (bias **+6.6/+8.8**, Spearman 0.14–0.25); at collapse Q has crashed −49 →
+−105/−112 while realized return only fell −56 → −87 — bias **−18.7/−25.0**. Exact-min
+pessimism (0.5 backup + actor) compounds as ensemble disagreement grows off-data. The
+in-flight `l1_pess0_e010` wave (pessimism 0.0, ε=0.1, seeds 2–4) is the mechanism test.
+
+### The winning policies barely leave the data (regime verdict)
+
+`dist_res*.json` (new `tools/diag_action_distance.py`): executed-action distance to
+k=32 NN dataset actions, vs the data-matching-itself baseline (median 0.520, p95 1.036).
+ε=0.05 peak policies: median **0.504–0.509** — AT data-noise distance — with only
+10–12% of steps beyond the baseline p95. ε=0.1: median 0.710, 23% beyond. Pre-registered
+reading: improvement arrives while actions stay behavior-close ⇒ **decoder undercoverage
+(Hypothesis A) was the binding cost**; pushing further off-data buys nothing more. NB
+this also recalibrates C1: real data actions sit ~0.52 from their own neighbours, so
+FQL's 0.577 is near data-noise level under the matched statistic — the "off the data"
+framing in note.tex needs this baseline context.
+
+### Also this session
+
+- **Inversion re-cert PASSES** (`audit_inversion_recert.json`): ESS 81.3/94.6/7.6,
+  roundtrip 1e-4/1e-4/2e-4, invalid 13/0/881 — all matching the HF card.
+- Peer bar: PSM cube 3-seed 500-ep spread **0.056 / 0.156 / 0.532** — quote the spread,
+  never a mean (n=3 CI is wider than the range).
+- Audit 0a/0b (commit `1df9594`): FB run-config clean, 0.72 stands; HP shortlist top
+  suspect is pessimism 0.5-vs-0.0 — now directly implicated by the collapse forensics.
+- T1/T2 flow tests (`diag_preimage_sampling_*.json`, `diag_generated_pair_support_*.json`)
+  — see those JSONs for the mixture-arm decode fidelity and the generated-pair support
+  verdicts.
+- New tools: `diag_fql_calibration.py`, `diag_action_distance.py`,
+  `diag_preimage_sampling_fidelity.py`, `diag_generated_pair_support.py`.
+
+NEXT: read pess0 (does removing pessimism stop the collapse?); if yes, the stabilized
+recipe (ε=0.05, pessimism tuned down, or early-stopping on the calibration bias signal)
+is the port target for zero-shot via the w-conditioned action critic (Idea 1).
 
 ---
 
