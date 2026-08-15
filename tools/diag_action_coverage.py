@@ -48,11 +48,11 @@ from envs.env_utils import make_env_and_datasets
 from main import _lists_to_tuples
 from utils.datasets import Dataset
 from utils.flax_utils import restore_agent
+from utils.geometry import INDEX_ROWS, K_NEIGHBOURS, NeighbourIndex
 from utils.log_utils import write_report
 
 N_STATES = 64
 N_LATENTS = 512
-K_NEIGHBOURS = 32       # same protocol as the 07-29 conditional-spread measurement
 RADII = [3.0, 4.5, 6.0]
 SEED = 0
 FQL_RUN = '/data-local/amsks/PSMFLows/exp/PSMFLows/fqlbaseline_cube_a300_20260810/sd000_20260810_042228'
@@ -98,16 +98,29 @@ def main(cfg):
     idx = rng_np.integers(0, ds.size, N_STATES)
     states = obs_all[idx]
 
-    # Behaviour conditional at each state, estimated from its k nearest dataset states.
+    # Behaviour conditional at each state, from its k nearest dataset states under the
+    # SHARED geometry protocol (utils/geometry: per-dimension standardized observations,
+    # k=32, seeded index). The published numbers here used RAW observation distances over
+    # a with-replacement 200k pool; cube observations mix position and velocity scales, so
+    # that geometry selects different neighbours than the support probes do and the two
+    # could not be quoted on one figure. Both are computed below: the standardized one is
+    # what the report and the verdicts quote, the raw one is kept alongside — labeled
+    # `*_raw_geometry` — for continuity with the already-published support curve.
+    index = NeighbourIndex(obs_all, act_all, index_rows=INDEX_ROWS, seed=SEED)
+    nn32 = index.neighbour_actions(states, k=K_NEIGHBOURS)   # (N_STATES, 32, d_a)
+    nn8 = index.neighbour_actions(states, k=8)
+    data_sd = nn32.std(axis=1)                               # (N_STATES, d_a)
+
     # Subsample the pool: exact k-NN over 1M rows is not needed for an sd estimate.
     pool_idx = rng_np.integers(0, ds.size, 200000)
     pool_obs, pool_act = obs_all[pool_idx], act_all[pool_idx]
-    data_sd = []
+    nn32_raw, nn8_raw = [], []
     for s in states:
         d = np.linalg.norm(pool_obs - s, axis=1)
-        nn = np.argpartition(d, K_NEIGHBOURS)[:K_NEIGHBOURS]
-        data_sd.append(pool_act[nn].std(0))
-    data_sd = np.stack(data_sd)                      # (N_STATES, d_a)
+        nn32_raw.append(pool_act[np.argpartition(d, K_NEIGHBOURS)[:K_NEIGHBOURS]])
+        nn8_raw.append(pool_act[np.argpartition(d, 8)[:8]])
+    nn32_raw, nn8_raw = np.stack(nn32_raw), np.stack(nn8_raw)
+    data_sd_raw = nn32_raw.std(axis=1)               # (N_STATES, d_a)
 
     rng = jax.random.PRNGKey(SEED)
     states_j = jnp.asarray(states, jnp.float32)
@@ -119,42 +132,82 @@ def main(cfg):
     # C1 is the discriminator: if a_FQL sits as far from the dataset's OWN nearest
     # neighbour actions as our decodes do, the task needs actions the behaviour
     # distribution does not contain, and no behaviour flow can decode them.
-    c1_dist, c2_resid, c3_ceiling, c3_k8 = [], [], [], []
-    for i, s_i in enumerate(states):
-        d = np.linalg.norm(pool_obs - s_i, axis=1)
-        nn = np.argpartition(d, K_NEIGHBOURS)[:K_NEIGHBOURS]
-        nn_acts = pool_act[nn]
-        c1_dist.append(float(np.min(np.linalg.norm(nn_acts - a_fql[i], axis=1))))
-        # C3: the aleatoric ceiling. Half the neighbourhood's action spread against the
-        # other half's -- coverage cannot exceed this, so 1.0 was never the reference.
-        h = K_NEIGHBOURS // 2
-        c3_ceiling.append(float(np.mean(nn_acts[:h].std(0) / (nn_acts[h:].std(0) + 1e-8))))
-        nn8 = np.argpartition(d, 8)[:8]
-        c3_k8.append(pool_act[nn8].std(0))
-    c1 = {'min_dist_fql_to_knn_actions_mean': float(np.mean(c1_dist)),
-          'min_dist_fql_to_knn_actions_median': float(np.median(c1_dist)),
-          'normalised_by_action_scale': float(np.mean(c1_dist) / a_scale),
-          'k': K_NEIGHBOURS}
-    c3 = {'aleatoric_coverage_ceiling_mean': float(np.mean(c3_ceiling)),
-          'aleatoric_coverage_ceiling_median': float(np.median(c3_ceiling)),
-          'knn_action_sd_k8_mean': float(np.mean(np.stack(c3_k8))),
-          'knn_action_sd_k32_mean': float(np.mean(data_sd))}
+    c2_resid = []
+
+    def c1_c3(nn_acts32, nn_acts8, interleaved_split):
+        """C1 and C3 from (N_STATES, k, d_a) neighbourhood action sets.
+
+        C3 splits each neighbourhood in two and scores one half's action spread against
+        the other's. The shared-geometry neighbours come back distance-SORTED, so a
+        first-half/second-half split would compare the 16 nearest against the 16 furthest
+        and understate the ceiling; the standardized protocol therefore splits by
+        even/odd rank, which is distance-balanced. The raw-geometry legacy numbers keep
+        the published contiguous split (argpartition order, unsorted).
+        """
+        c1_dist, c3_ceiling = [], []
+        for i in range(N_STATES):
+            acts_i = nn_acts32[i]
+            c1_dist.append(float(np.min(np.linalg.norm(acts_i - a_fql[i], axis=1))))
+            if interleaved_split:
+                lo, hi = acts_i[0::2], acts_i[1::2]
+            else:
+                h = K_NEIGHBOURS // 2
+                lo, hi = acts_i[:h], acts_i[h:]
+            c3_ceiling.append(float(np.mean(lo.std(0) / (hi.std(0) + 1e-8))))
+        c1 = {'min_dist_fql_to_knn_actions_mean': float(np.mean(c1_dist)),
+              'min_dist_fql_to_knn_actions_median': float(np.median(c1_dist)),
+              'normalised_by_action_scale': float(np.mean(c1_dist) / a_scale),
+              'k': K_NEIGHBOURS}
+        c3 = {'aleatoric_coverage_ceiling_mean': float(np.mean(c3_ceiling)),
+              'aleatoric_coverage_ceiling_median': float(np.median(c3_ceiling)),
+              'split': 'interleaved' if interleaved_split else 'contiguous',
+              'knn_action_sd_k8_mean': float(np.mean(nn_acts8.std(axis=1))),
+              'knn_action_sd_k32_mean': float(np.mean(nn_acts32.std(axis=1)))}
+        return c1, c3
+
+    c1, c3 = c1_c3(nn32, nn8, interleaved_split=True)
+    c1_raw, c3_raw = c1_c3(nn32_raw, nn8_raw, interleaved_split=False)
+
+    # The calibration C1 never had: how far is REAL data from its own neighbourhood's
+    # actions, under the identical statistic (each state excluded from its own
+    # neighbourhood)? Without it, "a_FQL sits 0.54 of action scale from the k-NN actions"
+    # has no yardstick — it was compared only against OUR decode's 0.19, which assumes our
+    # decode is the reference for what in-support looks like. The support probes
+    # (diag_action_distance, diag_generated_pair_support) have always quoted this baseline;
+    # C1 is the one that did not.
+    d_data = index.min_action_dist(states, act_all[idx], exclude_rows=idx)
+    d_fql = index.min_action_dist(states, a_fql, exclude_rows=idx)
+    c1_baseline = {
+        'data_self_match_mean': float(d_data.mean()),
+        'data_self_match_p95': float(np.percentile(d_data, 95)),
+        'fql_dist_mean': float(d_fql.mean()),
+        'frac_fql_beyond_data_p95': float((d_fql > np.percentile(d_data, 95)).mean()),
+        'note': ('a_FQL beyond the data-matches-itself p95 => genuinely off-support; '
+                 'inside it => FQL is as data-like as the data is, and the C1 verdict '
+                 'string above (which lacks this baseline) overstates its case'),
+    }
 
     results = []
     for decode_mode in ('onestep', 'ode'):
         for radius in RADII:
             a2 = agent.replace(config=agent.config.copy(
                 {'gpi_decode': decode_mode, 'flow_decode_steps': ode_steps}))
-            cover, mindist = [], []
+            cover, cover_raw, mindist = [], [], []
             for i in range(N_STATES):
                 rng, k = jax.random.split(rng)
-                u = jnp.clip(jax.random.normal(k, (N_LATENTS, agent.config['action_dim'])),
-                             -radius, radius)
+                # SCALED draws, not clipped ones. Clipping N(0,1) at +/-r leaves the
+                # distribution essentially untouched for r >= 3 (P(|z|>3) ~ 0.3%), so the
+                # published "tripling the radius does not move coverage" compared three
+                # nearly identical samples and was vacuous. Scale the prior instead, then
+                # clip at the box, so r genuinely widens the latent set explored.
+                u = jnp.clip((radius / RADII[0]) * jax.random.normal(
+                    k, (N_LATENTS, agent.config['action_dim'])), -radius, radius)
                 obs_b = jnp.broadcast_to(states_j[i], (N_LATENTS, states_j.shape[1]))
                 acts = np.asarray(a2.decode(obs_b, u))
                 cover.append(acts.std(0) / (data_sd[i] + 1e-8))
+                cover_raw.append(acts.std(0) / (data_sd_raw[i] + 1e-8))
                 mindist.append(float(np.min(np.linalg.norm(acts - a_fql[i], axis=1))))
-            cover = np.stack(cover)
+            cover, cover_raw = np.stack(cover), np.stack(cover_raw)
             if decode_mode == 'onestep' and radius == RADII[0]:
                 # C2: WHERE the residual lives. Cube's gripper dim is quasi-discrete and a
                 # BC flow smooths it; a residual concentrated there calls for a per-dim
@@ -162,8 +215,8 @@ def main(cfg):
                 per_dim = []
                 for i in range(N_STATES):
                     k2 = jax.random.PRNGKey(SEED + 500 + i)
-                    u2 = jnp.clip(jax.random.normal(k2, (N_LATENTS, agent.config['action_dim'])),
-                                  -radius, radius)
+                    u2 = jnp.clip((radius / RADII[0]) * jax.random.normal(
+                        k2, (N_LATENTS, agent.config['action_dim'])), -radius, radius)
                     ob_b = jnp.broadcast_to(states_j[i], (N_LATENTS, states_j.shape[1]))
                     acts2 = np.asarray(a2.decode(ob_b, u2))
                     j = int(np.argmin(np.linalg.norm(acts2 - a_fql[i], axis=1)))
@@ -171,12 +224,14 @@ def main(cfg):
                 per_dim = np.stack(per_dim)
                 c2_resid.append({
                     'per_dim_abs_residual_mean': per_dim.mean(0).tolist(),
+                    'per_dim_data_sd_raw_geometry': data_sd_raw.mean(0).tolist(),
                     'per_dim_share_of_total': (per_dim.mean(0) / per_dim.mean(0).sum()).tolist(),
                     'per_dim_data_sd': data_sd.mean(0).tolist()})
             results.append({
                 'decode': decode_mode, 'radius': radius, 'ode_steps': ode_steps,
                 'coverage_ratio_mean': float(cover.mean()),
                 'coverage_ratio_median': float(np.median(cover)),
+                'coverage_ratio_mean_raw_geometry': float(cover_raw.mean()),
                 'min_dist_to_fql_action_mean': float(np.mean(mindist)),
                 'min_dist_to_fql_action_median': float(np.median(mindist)),
                 'min_dist_normalised_by_action_scale': float(np.mean(mindist) / a_scale),
@@ -242,7 +297,7 @@ def main(cfg):
 
     report = {'env': cfg.env_name, 'flow_ckpt_path': str(config['flow_ckpt_path']),
               'ode_steps_from_flags': ode_steps, 'n_states': N_STATES,
-              'n_latents': N_LATENTS, 'k_neighbours': K_NEIGHBOURS, 'seed': SEED,
+              'n_latents': N_LATENTS, 'geometry': index.protocol(), 'seed': SEED,
               'fql_reference': {'run': FQL_RUN, 'epoch': FQL_EPOCH, 'alpha': FQL_ALPHA},
               'action_scale_mean_abs': a_scale,
               'deployed_setting': {'decode': 'onestep', 'radius': 3.0, **base},
@@ -250,10 +305,15 @@ def main(cfg):
               'radius_coverage_gain': rad_gain,
               'knob_sweep_verdict': knob_verdict,
               'c1_fql_offsupport': {**c1, 'our_best_decode_normalised': ours,
-                                    'capacity_arm': capacity_arm, 'verdict': c1_verdict},
+                                    'capacity_arm': capacity_arm, 'verdict': c1_verdict,
+                                    'data_self_match_baseline': c1_baseline},
               'c2_residual_by_dim': (c2_resid[0] if c2_resid else None),
               'c2_verdict': c2_verdict,
               'c3_aleatoric_ceiling': {**c3, 'verdict': c3_verdict},
+              # Legacy raw-observation-distance geometry, kept for continuity with the
+              # already-published support-curve figure. Not what the verdicts quote.
+              'c1_fql_offsupport_raw_geometry': c1_raw,
+              'c3_aleatoric_ceiling_raw_geometry': c3_raw,
               'verdict': verdict}
     print(f'\n{knob_verdict}\n\nC1: {c1_verdict}\n\nC2: {c2_verdict}\n\nC3: {c3_verdict}')
     write_report(report, cfg, 'diag_action_coverage.json')
