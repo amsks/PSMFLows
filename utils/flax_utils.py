@@ -195,7 +195,26 @@ def restore_agent(agent, restore_path, restore_epoch):
     with open(restore_path, 'rb') as f:
         load_dict = pickle.load(f)
 
-    agent = flax.serialization.from_state_dict(agent, load_dict['agent'])
+    # Backward compatibility across added agent FIELDS (not weights): a checkpoint
+    # written before a branch existed — e.g. every psmflow run predating the Idea-1
+    # action critic — has no entry for psi_a/target_psi_a/residual, and
+    # `from_state_dict` refuses a state dict that is missing any field of its target.
+    # Those runs also have the branch disabled, so its freshly-initialised params are
+    # never read; keep them and say so. The reverse case (checkpoint carries something
+    # the agent has no slot for) stays a hard error: that is trained state being dropped.
+    saved = dict(load_dict['agent'])
+    current = flax.serialization.to_state_dict(agent)
+    missing = [k for k in current if k not in saved]
+    extra = [k for k in saved if k not in current]
+    assert not extra, (
+        f'{restore_path} contains agent fields this agent has no slot for: {extra} — '
+        'wrong agent class or a removed branch; refusing to silently drop trained state')
+    if missing:
+        print(f'WARNING: {restore_path} predates the fields {missing}; keeping their '
+              'freshly-initialised values (valid only while those branches are disabled)')
+        saved.update({k: current[k] for k in missing})
+
+    agent = flax.serialization.from_state_dict(agent, saved)
 
     print(f'Restored from {restore_path}')
 

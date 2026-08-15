@@ -58,6 +58,9 @@ class StepInputs:
     flow_x0: Any
     flow_t: Any
     flow_noise: Any
+    # Task vector for the ACTION branch. Identical to task_w unless the P2 FB graft is on,
+    # in which case it is sampled against the branch's own basis B_a (see sample_step_inputs).
+    task_w_a: Any
 
 
 class PSMFlowAgent(flax.struct.PyTreeNode):
@@ -68,9 +71,25 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
     target_psi: Any
     actor: TrainState       # amortized LATENT actor (s, w, noise) -> u (flowBC recipe)
     actor_vf: TrainState    # CFM velocity field over preimage latents (the actor's BC anchor)
+    # Idea-1 action branch (config action_critic.enabled, default false): a SECOND
+    # successor-feature head over EXECUTED ACTIONS, psi_a(s, w, a), sharing phi and the
+    # w-machinery, plus a bounded residual head delta(s, w, u). Zero-shot port of the W4
+    # residual result: Q_a = psi_a^T w gives the value-directed gradient a latent critic
+    # cannot (Q(s,u) = Q(s, G(s,u)) is flat in u when the decode is narrow), and the
+    # executed action a = G(s,u) + eps*delta stays within an eps budget of the decode.
+    psi_a: TrainState
+    target_psi_a: Any
+    residual: TrainState
+    # P2 FB graft (config action_critic.fb_graft, default false): the action branch's OWN
+    # backward map B_a -- the basis psi_a's measure is written against and the source of
+    # w_a. Created always so the pytree is static; trained only when the graft is on.
+    phi_a: TrainState
+    target_phi_a: Any
     flow_vf: Any        # FROZEN params: multi-step BC velocity field (ODE decode)
     flow_onestep: Any   # FROZEN params: one-step distilled decoder (fast decode)
     task_z: Any         # (z_dim,) eval task vector w, set via infer_eval_z
+    task_z_a: Any       # (z_dim,) eval task vector for the ACTION branch: inferred from
+                        # B_a under the graft, else a copy of task_z
     config: Any = nonpytree_field()
     flow_vf_def: Any = nonpytree_field(default=None)
     flow_onestep_def: Any = nonpytree_field(default=None)
@@ -141,11 +160,25 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
                                -c["u_clip"], c["u_clip"])
             emask = (jax.random.uniform(r_emask, (B,)) < c["backup_explore_frac"])[:, None]
             u_next = jnp.where(emask, u_prior, u_next)
+        # P2 FB graft: the action branch gets its OWN task vector, sampled against its own
+        # backward map B_a exactly as FB samples z against B (Gaussian mixed with
+        # B_a(next_obs[perm]) at mix_ratio). Keys are folded out of `rng` inside the
+        # branch, so with the graft off not one draw above changes.
+        task_w_a = task_w
+        if c["action_critic"]["fb_graft"]:
+            r_wa, r_wamix, r_waperm = jax.random.split(jax.random.fold_in(rng, 104), 3)
+            gauss_wa = project_z(jax.random.normal(r_wa, (B, c["z_dim"])), c["norm_z"])
+            goal_wa = project_z(
+                jax.lax.stop_gradient(self.phi_a(batch["next_observations"]))[
+                    jax.random.permutation(r_waperm, B)], c["norm_z"])
+            wa_mask = (jax.random.uniform(r_wamix, (B,)) < c["mix_ratio"])[:, None]
+            task_w_a = jnp.where(wa_mask, goal_wa, gauss_wa)
         return StepInputs(
             u_data=u_data, u_next=u_next, task_w=task_w,
             flow_x0=jax.random.normal(r_x0, (B, adim)),
             flow_t=jax.random.uniform(r_t, (B, 1)),
-            flow_noise=jax.random.normal(r_noise, (B, adim)))
+            flow_noise=jax.random.normal(r_noise, (B, adim)),
+            task_w_a=task_w_a)
 
     def flow_actor_loss(self, batch, sampled, actor_params, vf_params):
         """flowBC actor (fb_flowbc recipe), transposed to LATENT space.
@@ -195,6 +228,149 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         return loss, {"actor_loss": loss, "actor_q": Q.mean(),
                       "actor_bc_flow_loss": bc_flow_loss, "actor_bc_error": distill}
 
+    # ---- Idea-1 action branch ----
+    def execute(self, observations, w, u, residual_params=None):
+        """Executed action: frozen decode plus the eps-bounded, w-conditioned residual.
+
+        a = clip(G(s, u) + eps * delta(s, w, u)). NoiseConditionedActor tanh-bounds its
+        output, so eps is a hard per-dimension budget on the distance from the decode.
+        Only used when action_critic.enabled; at eps=0 it reduces to the pure decode.
+        """
+        a = self.decode(observations, u)
+        eps = self.config["residual_eps"]
+        if eps > 0.0:
+            p = self.residual.params if residual_params is None else residual_params
+            a = a + eps * self.residual(observations, w, u, params=p)
+        return jnp.clip(a, -1.0, 1.0)
+
+    def action_critic_loss(self, batch, sampled, psi_a_params):
+        """Vector TD for psi_a(s, w, a): successor features of the SHARED phi under pi_w.
+
+        target = phi(s') + gamma_ac * psi_a_bar(s', w, a'_exec), with a'_exec the actor's
+        executed action at s' (decode + residual, stop-grad). Reward-free, so the branch
+        stays zero-shot: Q_a for any reward is psi_a^T w with w = E[r phi]. Pessimism on
+        this branch defaults to 0.0 — the collapse forensics (08-13 HANDOFF) showed
+        exact-min pessimism DRIVES the value collapse under a residual, so the disease is
+        not ported here.
+        """
+        c = self.config
+        ac = c["action_critic"]
+        obs, next_obs = batch["observations"], batch["next_observations"]
+        w = sampled.task_w
+        a_next = self.execute(next_obs, w, sampled.u_next)
+        pred = self.psi_a(obs, w, batch["actions"], params=psi_a_params)      # (P, B, z)
+        phi_next = jax.lax.stop_gradient(self.phi(next_obs, params=self.target_phi))
+        t_next = self.psi_a(next_obs, w, jax.lax.stop_gradient(a_next),
+                            params=self.target_psi_a)
+        tmean, tunc = targets_uncertainty(t_next, c["num_parallel"])
+        # Pessimism in Q-SPACE, not per-feature. psi_a predicts a VECTOR of successor
+        # features and the task value is Q = psi_a^T w with w of mixed sign, so
+        # subtracting a per-feature spread (what targets_uncertainty returns here) shifts
+        # Q by -pessimism * unc^T w, an expression whose SIGN depends on w: on every
+        # feature where w is negative the "penalty" RAISES the target. The knob was
+        # therefore optimistic on half the basis and is not a lower bound on anything.
+        # Instead blend the ensemble mean toward the member the task itself values least
+        # -- a genuine per-sample pessimistic estimate of Q for this w -- with
+        # `pessimism` as the blend weight lambda in [0, 1]. At lambda = 0 (the default,
+        # and every run to date) this is exactly the ensemble mean, i.e. bit-identical to
+        # the previous expression.
+        q_next = (t_next * w[None]).sum(-1)                                  # (P, B)
+        worst = jnp.argmin(q_next, axis=0)                                   # (B,)
+        t_worst = jnp.take_along_axis(t_next, worst[None, :, None], axis=0)[0]
+        lam = ac["pessimism"]
+        target = phi_next + ac["discount"] * ((1.0 - lam) * tmean + lam * t_worst)
+        loss = jnp.mean((pred - jax.lax.stop_gradient(target)[None]) ** 2)
+        q_data = (pred * w[None]).sum(-1).mean()
+        return loss, {"ac_loss": loss, "ac_q_data": q_data,
+                      "ac_target_q_gap": (q_next.mean(0) - jnp.min(q_next, axis=0)).mean(),
+                      "ac_feature_unc": tunc.mean()}
+
+    def action_critic_fb_loss(self, batch, sampled, psi_a_params, phi_a_params):
+        """P2 FB graft: train (psi_a, B_a) as a self-contained FB pair over EXECUTED actions.
+
+        The audit's one structural deviation is that phi is trained by a pessimistic,
+        actor-bootstrapped, proto-branch-less loss unlike every working implementation, and
+        w is inferred THROUGH that phi — so the hybrid's compass is built on a basis no
+        reference recipe produced. This severs that dependency for the action branch only:
+        B_a(s') is the branch's own backward map, trained by the FB measure loss verbatim
+        (contrastive off-diag/diag against the discounted target measure + ortho on B_a, no
+        pessimism, FB's tau on the target), and w_a is inferred from B_a. psi_u / phi / w_u
+        keep training exactly as before and act for the latent actor; only delta and Q_a
+        move to (psi_a, w_a).
+
+        Reads phi_a's params only through `phi_a_params` and the target, so no gradient
+        crosses between this branch and the shared measure in either direction.
+        """
+        c = self.config
+        ac = c["action_critic"]
+        obs, next_obs = batch["observations"], batch["next_observations"]
+        goal = next_obs                      # phi_input='s' convention, as the shared branch
+        off, off_sum = off_diagonal_mask(obs.shape[0])
+        w = sampled.task_w_a
+        a_next = jax.lax.stop_gradient(self.execute(next_obs, w, sampled.u_next))
+
+        tB = self.phi_a(goal, params=self.target_phi_a)
+        tM = self.psi_a(next_obs, w, a_next, params=self.target_psi_a) @ tB.T
+        tmean, _ = targets_uncertainty(tM, c["num_parallel"])
+        B_a = self.phi_a(goal, params=phi_a_params)
+        M = self.psi_a(obs, w, batch["actions"], params=psi_a_params) @ B_a.T
+        cl, cdiag, coff = contrastive_loss(M, jax.lax.stop_gradient(tmean),
+                                           ac["discount"], off, off_sum)
+        ol, odiag, ooff = ortho_loss(B_a, off, off_sum)
+        loss = cl + ac["ortho_coef"] * ol
+        q_data = (self.psi_a(obs, w, batch["actions"], params=psi_a_params)
+                  * w[None]).sum(-1).mean()
+        return loss, {"ac_loss": loss, "ac_fb_diag": cdiag, "ac_fb_offdiag": coff,
+                      "ac_orth_loss": ol, "ac_orth_diag": odiag, "ac_q_data": q_data}
+
+    def action_critic_spread(self, batch, sampled, key):
+        """Live "is the action critic awake?" signal, logged every eval.
+
+        Q_a(s, a) = psi_a(s, w, a)^T w evaluated over `spread_candidates` decoded
+        candidates at the SAME state. If that spread is ~0 the critic cannot rank the
+        actions the decoder can produce, the -Q_a gradient carries no direction, and the
+        residual head is climbing noise -- the D3 failure, which until now was only ever
+        found post-hoc by re-loading a finished checkpoint (one wasted run per discovery).
+        Reported relative to |Q| so it is comparable across tasks and training steps.
+        """
+        c = self.config
+        n = min(64, batch["observations"].shape[0])
+        obs, w = batch["observations"][:n], sampled.task_w_a[:n]
+        cand = c["action_critic"]["spread_candidates"]
+        u = jnp.clip(jax.random.normal(key, (cand, n, c["action_dim"])),
+                     -c["u_clip"], c["u_clip"])
+
+        def q_of(u_k):
+            a = self.execute(obs, w, u_k)
+            return (self.psi_a(obs, w, a) * w[None]).sum(-1).mean(0)         # (n,)
+
+        Q = jax.vmap(q_of)(u)                                                # (cand, n)
+        scale = jnp.abs(Q).mean() + 1e-8
+        return {"ac_q_spread": Q.std(0).mean(),
+                "ac_q_spread_rel": Q.std(0).mean() / scale,
+                "ac_q_range_rel": (Q.max(0) - Q.min(0)).mean() / scale}
+
+    def residual_loss(self, batch, sampled, residual_params):
+        """-Q_a on the executed action; the value-directed step the decoder cannot take.
+
+        The latent actor is read at stop-grad (its own training is untouched); only the
+        residual head chases Q_a, and only within its eps budget.
+        """
+        c = self.config
+        obs, w = batch["observations"], sampled.task_w_a
+        # The LATENT actor stays on the shared w (its own training is untouched); only the
+        # residual and Q_a move to the action branch's w_a, which differs under the graft.
+        u_a = jax.lax.stop_gradient(
+            c["u_clip"] * self.actor(obs, sampled.task_w, sampled.flow_noise))
+        a_exec = self.execute(obs, w, u_a, residual_params=residual_params)
+        Qs = (self.psi_a(obs, w, a_exec) * w[None]).sum(-1)                   # (P, B)
+        qmean, qunc = targets_uncertainty(Qs, c["num_parallel"])
+        Q = qmean - c["action_critic"]["pessimism"] * qunc
+        loss = -Q.mean() / jax.lax.stop_gradient(jnp.abs(Qs).mean() + 1e-8)
+        spend = jnp.mean(jnp.abs(a_exec - self.decode(obs, u_a)))
+        return loss, {"residual_loss": loss, "residual_q": Q.mean(),
+                      "residual_spend": spend}
+
     def apply_update(self, batch, sampled):
         tau = self.config["tau"]
         (_, info), (g_phi, g_psi) = jax.value_and_grad(self.measure_loss, argnums=(2, 3), has_aux=True)(
@@ -212,6 +388,37 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             batch, sampled, self.actor.params, self.actor_vf.params)
         new = new.replace(actor=new.actor.apply_gradients(grads=g_a),
                           actor_vf=new.actor_vf.apply_gradients(grads=g_vf))
+        # Idea-1 action branch — static config switch, so the disabled path traces to
+        # exactly the pre-existing computation (no extra rng, no shared-branch gradients).
+        if self.config["action_critic"]["enabled"]:
+            ac_cfg = self.config["action_critic"]
+            if ac_cfg["fb_graft"]:
+                # P2: psi_a and its OWN backward map B_a step together on the FB measure
+                # loss; B_a's target follows FB's separate tau.
+                (_, ac_info), (g_pa, g_ba) = jax.value_and_grad(
+                    self.action_critic_fb_loss, argnums=(2, 3), has_aux=True)(
+                    batch, sampled, new.psi_a.params, new.phi_a.params)
+                phi_a = new.phi_a.apply_gradients(grads=g_ba)
+                new = new.replace(phi_a=phi_a,
+                                  target_phi_a=polyak_update(phi_a.params, new.target_phi_a,
+                                                             ac_cfg["b_tau"]))
+            else:
+                (_, ac_info), g_pa = jax.value_and_grad(
+                    self.action_critic_loss, argnums=2, has_aux=True)(
+                    batch, sampled, new.psi_a.params)
+            psi_a = new.psi_a.apply_gradients(grads=g_pa)
+            target_psi_a = polyak_update(psi_a.params, new.target_psi_a,
+                                         self.config["action_critic"]["tau"])
+            (_, r_info), g_r = jax.value_and_grad(
+                self.residual_loss, argnums=2, has_aux=True)(
+                batch, sampled, new.residual.params)
+            new = new.replace(psi_a=psi_a, target_psi_a=target_psi_a,
+                              residual=new.residual.apply_gradients(grads=g_r))
+            # Diagnostic only. The key is folded out of the stored rng rather than split
+            # from it, so the branch's own random stream is untouched.
+            s_info = new.action_critic_spread(batch, sampled,
+                                              jax.random.fold_in(self.rng, 103))
+            a_info = {**a_info, **ac_info, **r_info, **s_info}
         return new, {**info, **a_info}
 
     @jax.jit
@@ -234,10 +441,22 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         z = (rewards.reshape(1, -1) @ phi).reshape(-1) / phi.shape[0]
         return project_z(z, self.config["norm_z"])
 
+    def infer_z_a(self, next_observations, rewards):
+        """w_a = E[r B_a(s')], the action branch's own reward inference (FB's z formula
+        against B_a). Without the graft B_a is untrained, so w_a falls back to w."""
+        b = self.phi_a(next_observations)
+        z = (rewards.reshape(1, -1) @ b).reshape(-1) / b.shape[0]
+        return project_z(z, self.config["norm_z"])
+
     def infer_eval_z(self, next_observations, rewards):
         """Copy of this agent with task_z set from rewards. Picked up generically by
-        main.py's eval hook (hasattr(agent, 'infer_eval_z'))."""
-        return self.replace(task_z=self.infer_z(next_observations, rewards))
+        main.py's eval hook (hasattr(agent, 'infer_eval_z')). Under the FB graft the
+        action branch gets its OWN task vector, inferred through B_a -- the whole point of
+        the graft is that delta and Q_a stop depending on the shared phi."""
+        z = self.infer_z(next_observations, rewards)
+        z_a = (self.infer_z_a(next_observations, rewards)
+               if self.config["action_critic"]["fb_graft"] else z)
+        return self.replace(task_z=z, task_z_a=z_a)
 
     def decode(self, observations, u):
         """Decode latents through the FROZEN flow. observations (B, ob), u (B, d_a)."""
@@ -271,9 +490,39 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         Q = qmean - c["actor_pessimism_penalty"] * qunc
         return u_cand[jnp.argmax(Q)]
 
+    def _acting_w_a(self):
+        """Task vector the ACTION branch acts on: its own w_a under the FB graft, the
+        shared w otherwise. Reading task_z_a unconditionally would silently zero Q_a for
+        any caller that sets task_z directly instead of going through infer_eval_z."""
+        return self.task_z_a if self.config["action_critic"]["fb_graft"] else self.task_z
+
+    def qa_rank_select(self, observations, seed):
+        """Eval-time ablation: RANK decoded candidates by Q_a instead of pushing on them.
+
+        K actor draws -> K decodes (NO residual) -> execute argmax_a psi_a(s, w, a)^T w.
+        Every action taken is therefore something the frozen flow could have produced,
+        and the only thing the action critic contributes is a preference order. Run
+        against the same checkpoint's residual acting, this separates "Q_a ranks better"
+        from "Q_a pushes better" -- the hybrid's gain is otherwise a single number with
+        two candidate causes. Off by default (eval_rank_k = 0); training never calls it.
+        """
+        c = self.config
+        K, d_a = c["action_critic"]["eval_rank_k"], c["action_dim"]
+        obs = jnp.broadcast_to(observations, (K, *observations.shape))
+        w = jnp.broadcast_to(self.task_z, (K, *self.task_z.shape))
+        noise = jax.random.normal(seed, (K, d_a))
+        w_a = jnp.broadcast_to(self._acting_w_a(), (K, *self.task_z.shape))
+        u_cand = c["u_clip"] * self.actor(obs, w, noise)
+        a_cand = self.decode(obs, u_cand)
+        Q = (self.psi_a(obs, w_a, a_cand) * w_a).sum(-1).mean(0)          # (K,)
+        return a_cand[jnp.argmax(Q)]
+
     @jax.jit
     def sample_actions(self, observations, seed=None, temperature=1.0):
         seed = self.rng if seed is None else seed
+        ac = self.config["action_critic"]
+        if ac["enabled"] and ac["eval_rank_k"] > 0:
+            return self.qa_rank_select(observations, seed)
         if self.config["acting"] == "actor":
             # One shot through the amortized latent actor, then decode (default).
             noise = jax.random.normal(seed, (1, self.config["action_dim"]))
@@ -281,6 +530,8 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
                 observations[None], self.task_z[None], noise)[0]
         else:
             u_star = self.gpi_select(observations, seed=seed)
+        if ac["enabled"]:
+            return self.execute(observations[None], self._acting_w_a()[None], u_star[None])[0]
         return self.decode(observations[None], u_star[None])[0]
 
     @classmethod
@@ -342,14 +593,48 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             flow_vf = vf_def.init(rvf, ex_observations, ex_actions, ex_times)["params"]
             flow_onestep = onestep_def.init(ronestep, ex_observations, ex_actions)["params"]
 
+        # Idea-1 action branch: psi_a is the same tower class as psi with the action slot
+        # carrying the RAW action (same width as the latent, d_a); the residual head is a
+        # NoiseConditionedActor read as delta(s, w, u). Keys come from fold_in so the
+        # stored rng stream — and therefore every draw of the pre-existing branches — is
+        # byte-identical to the pre-Idea-1 code whether or not the branch is enabled.
+        ac_cfg = config["action_critic"]
+        psi_a_def = PsiMap(output_dim=z_dim, hidden_dim=ac_cfg["hidden_dim"],
+                           num_parallel=config["num_parallel"],
+                           embedding_layers=ac_cfg["embedding_layers"],
+                           hidden_layers=ac_cfg["hidden_layers"])
+        psi_a = TrainState.create(
+            psi_a_def,
+            psi_a_def.init(jax.random.fold_in(rng, 101), ex_observations, ex_w, ex_actions)["params"],
+            tx=optax.adam(ac_cfg["lr"]))
+        residual_def = NoiseConditionedActor(
+            action_dim=action_dim, hidden_dim=config["residual"]["hidden_dim"],
+            hidden_layers=config["residual"]["hidden_layers"],
+            embedding_layers=config["residual"]["embedding_layers"])
+        residual = TrainState.create(
+            residual_def,
+            residual_def.init(jax.random.fold_in(rng, 102), ex_observations, ex_w, ex_u)["params"],
+            tx=optax.adam(ac_cfg["lr"]))
+        # B_a: same class and shape as the shared basis (BackwardMap IS PhiMap in this
+        # codebase), but a separate parameter set with its own optimizer and target.
+        phi_a_def = PhiMap(z_dim=z_dim, hidden_dim=config["phi"]["hidden_dim"],
+                           hidden_layers=config["phi"]["hidden_layers"], norm=True)
+        phi_a = TrainState.create(
+            phi_a_def,
+            phi_a_def.init(jax.random.fold_in(rng, 105), ex_observations)["params"],
+            tx=optax.adam(ac_cfg["lr"]))
+
         config = _plain_config(config)
         config["ob_dims"] = tuple(ex_observations.shape[1:])
         config["action_dim"] = action_dim
         return cls(rng=rng, phi=phi, psi=psi,
                    target_phi=copy.deepcopy(phi.params), target_psi=copy.deepcopy(psi.params),
                    actor=actor, actor_vf=actor_vf,
+                   psi_a=psi_a, target_psi_a=copy.deepcopy(psi_a.params), residual=residual,
+                   phi_a=phi_a, target_phi_a=copy.deepcopy(phi_a.params),
                    flow_vf=flow_vf, flow_onestep=flow_onestep,
                    task_z=jnp.zeros((z_dim,), jnp.float32),
+                   task_z_a=jnp.zeros((z_dim,), jnp.float32),
                    config=flax.core.FrozenDict(config),
                    flow_vf_def=vf_def, flow_onestep_def=onestep_def)
 
@@ -421,6 +706,21 @@ def get_config():
                        vf_hidden_dim=512, vf_hidden_layers=4, flow_steps=10,
                        bc_coeff=1.0),
             acting="actor",          # actor | gpi (per-step latent argmax, actor-free)
+            # Idea-1 action branch: w-conditioned successor features over EXECUTED
+            # actions + eps-bounded residual. Off by default; enabling changes only the
+            # new branch and the acting path (shared psi/phi/actor updates are untouched).
+            # `pessimism` is a BLEND WEIGHT in [0, 1] between the target ensemble's mean
+            # and its least-task-valued member (scalar-Q pessimism); it is not a
+            # multiplier on a per-feature spread. See action_critic_loss.
+            action_critic=dict(enabled=False, discount=0.99, tau=0.005, pessimism=0.0,
+                               lr=3.0e-4, hidden_dim=512, hidden_layers=1,
+                               embedding_layers=2, spread_candidates=16,
+                               eval_rank_k=0,
+                               # P2 graft: psi_a written against its OWN backward map B_a,
+                               # trained by the FB measure loss; w_a inferred from B_a.
+                               fb_graft=False, ortho_coef=1000.0, b_tau=0.005),
+            residual_eps=0.05,       # hard per-dim budget on |a_exec - decode|
+            residual=dict(hidden_dim=256, hidden_layers=2, embedding_layers=2),
             # frozen behavior flow (must match the Stage-A fql bc_only run)
             flow=dict(hidden_dims=(512, 512, 512, 512), value_hidden_dims=(512, 512, 512, 512),
                       layer_norm=False, critic_layer_norm=True),

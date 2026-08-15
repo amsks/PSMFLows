@@ -42,6 +42,41 @@ actor:
   bc_coeff: 1.0            # distillation weight (reference cube value is 3.0)
 acting: actor              # actor | gpi (per-step latent argmax, actor-free ablation)
 
+# Idea-1 action branch (2026-08-13): w-conditioned successor features over EXECUTED
+# actions (psi_a shares phi and the w machinery) + an eps-bounded residual head.
+# pessimism 0.0 on this branch by design: the collapse forensics showed exact-min
+# pessimism drives the value collapse under a residual.
+action_critic:
+  enabled: false
+  discount: 0.99
+  tau: 0.005
+  # Scalar-Q pessimism: BLEND WEIGHT in [0, 1] between the target ensemble's mean and its
+  # least-task-valued member. (Before 08-14 this multiplied a PER-FEATURE spread, which is
+  # sign-indefinite in Q-space -- it raised Q wherever w was negative. Do not read old
+  # sweep values of this knob as pessimism levels; there were none, it has only ever run
+  # at 0.0.)
+  pessimism: 0.0
+  lr: 3.0e-4
+  hidden_dim: 512
+  hidden_layers: 1
+  embedding_layers: 2
+  spread_candidates: 16    # candidates per state for the in-loop Q_a spread metric
+  eval_rank_k: 0           # >0: EVAL-ONLY lambda-rank acting -- rank k decoded candidates
+                           # by Q_a and execute the argmax, with no residual. Training is
+                           # unaffected; used to separate ranking from pushing.
+  # P2 FB graft: psi_a stops sharing the measure's basis. It gets its OWN backward map
+  # B_a trained by the FB measure loss (contrastive + ortho, no pessimism, b_tau on the
+  # target), and w_a is inferred from B_a. psi/phi/w and the latent actor are untouched;
+  # only delta and Q_a move to (psi_a, w_a). Off = the shared-basis action critic.
+  fb_graft: false
+  ortho_coef: 1000.0       # FB's cube value for the B_a orthonormality term
+  b_tau: 0.005             # FB's b_target_tau for B_a's target
+residual_eps: 0.05         # hard per-dim budget on |a_exec - decode|
+residual:
+  hidden_dim: 256
+  hidden_layers: 2
+  embedding_layers: 2
+
 # Fraction of TD bootstrap latents drawn from p0 instead of the actor. 0.0 = the backup as
 # published (it only ever evaluates the actor's own latent). Raising it makes psi see the
 # wider family: the fix direction for the flat-Q finding in logs/d3_q_landscape_cube.json.
