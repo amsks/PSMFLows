@@ -136,7 +136,13 @@ def sample_preimage_noise(means, covs, weights, rng=None):
     rand = np.random if rng is None else rng
     B, K, A = means.shape
 
-    # Pick a component per row via the categorical mixture weights.
+    # Pick a component per row via the categorical mixture weights. A row whose weights
+    # sum to ~0 (an EM fit that collapsed for that transition) would divide by zero here
+    # and hand NaN to the comparison, which silently selects component K-1 for it; fall
+    # back to a uniform mixture instead so the row stays a legitimate draw.
+    weights = np.asarray(weights, np.float64)
+    tot = weights.sum(axis=1, keepdims=True)
+    weights = np.where(tot > 1e-12, weights, np.full_like(weights, 1.0 / K))
     cdf = np.cumsum(weights, axis=1)
     cdf = cdf / cdf[:, -1:]  # guard against small normalization drift
     comp = (rand.random((B, 1)) > cdf).sum(axis=1)
@@ -146,8 +152,18 @@ def sample_preimage_noise(means, covs, weights, rng=None):
     chosen_mean = means[rows, comp]  # (B, A)
     chosen_cov = covs[rows, comp]  # (B, A, A)
 
-    # x = mu + L z, with L the Cholesky factor of the chosen covariance.
-    L = np.linalg.cholesky(chosen_cov)  # (B, A, A)
+    # x = mu + L z, with L the Cholesky factor of the chosen covariance. The stored EM
+    # covariances are only PSD up to float error, and this sampler runs on the TRAINING
+    # path: one non-PSD row raises LinAlgError and kills a run mid-flight (the fidelity
+    # tool already jittered for exactly this reason). Symmetrize + jitter, and fall back
+    # to a clipped eigendecomposition if that is still not enough.
+    chosen_cov = 0.5 * (chosen_cov + np.swapaxes(chosen_cov, -1, -2))
+    chosen_cov = chosen_cov + 1e-9 * np.eye(A, dtype=chosen_cov.dtype)
+    try:
+        L = np.linalg.cholesky(chosen_cov)  # (B, A, A)
+    except np.linalg.LinAlgError:
+        w_eig, V = np.linalg.eigh(chosen_cov)
+        L = V * np.sqrt(np.clip(w_eig, 0.0, None))[:, None, :]
     z = rand.standard_normal((B, A))
     noise = chosen_mean + np.einsum('bij,bj->bi', L, z)
     return noise.astype(np.float32)
@@ -182,6 +198,10 @@ def augment_dataset_with_preimage_distribution(agent, dataset, config, skills=No
     n_initial_steps = config.get('n_initial_steps', 100)
     batch_size = config.get('batch_size', 256)
     seed = config.get('seed', 0)
+    # Weight on the flow's own N(0, I) latent prior in the inversion target. 1.0 = the
+    # actual posterior p(u | s, a); 0.0 = the likelihood-only target every npz written
+    # before 2026-08-14 used, which is unbounded in the decoder's flat directions.
+    prior_scale = config.get('prior_scale', 1.0)
 
     assert num_samples >= num_clusters, (
         f'num_samples ({num_samples}) must be >= num_clusters ({num_clusters}); '
@@ -198,7 +218,8 @@ def augment_dataset_with_preimage_distribution(agent, dataset, config, skills=No
     dataset['preimage_ess'] = np.zeros((size,), np.float32)
 
     _kw = dict(num_samples=num_samples, n_steps=n_steps,
-               n_initial_steps=n_initial_steps, alpha=alpha, n_components=num_clusters)
+               n_initial_steps=n_initial_steps, alpha=alpha, n_components=num_clusters,
+               prior_scale=prior_scale)
     # The agent widens conditioned inputs itself (agents/fql.py `_actor_obs`), so raw
     # observations + per-row skills go in — pre-concatenating here would double-concat.
     if skills is None:

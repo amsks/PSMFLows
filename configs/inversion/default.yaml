@@ -39,6 +39,16 @@ num_clusters: 1
 # final-step higher still). N=200 is kept for headroom over the marginal N=100 pass; cost
 # is linear, ~19.5 h per 1M rows at batch_size=256 (17.95 s / 256 rows vs 9.02 s at N=100).
 # Changing either knob invalidates existing preimage npz files.
+# Weight on the flow's OWN latent prior N(0, I) in the inversion target:
+#     pi(u) ~ N(u; 0, I)^prior_scale * exp(-alpha * ||G(s,u) - a||)
+# 1.0 is the actual posterior p(u | s, a) and is what a latent-space policy needs.
+# 0.0 is the likelihood-only target used by every npz written before 2026-08-14: flat in
+# every direction the decoder cannot see, so the EM fit has no finite answer and runs away
+# (max covariance eigenvalue 1 -> 6 -> 34 -> 305 -> 2281 -> 6095 over 8 steps; in the
+# shipped files 84% of cube rows and 50% of pointmaze rows carry a per-dim variance wider
+# than the prior, worst case 3.8e4, with means out at |mu| = 206). Set 0.0 only to
+# regenerate a legacy file. Changing it invalidates existing preimage npz files.
+prior_scale: 1.0
 alpha: 20.0
 num_samples: 200
 n_steps: 10

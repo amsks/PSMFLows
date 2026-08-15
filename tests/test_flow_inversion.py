@@ -244,3 +244,52 @@ def test_ess_reports_zero_not_num_samples_when_every_sample_is_rejected(monkeypa
     np.testing.assert_allclose(ess, 0.0, atol=1e-6)
     assert not np.any(ess >= num_samples - 1e-4), (
         "a row with zero usable samples reported the maximum possible ESS")
+
+
+# ---- the inversion target must include the flow's own latent prior (2026-08-14) -------
+
+def _em_mixture(agent, obs, act, prior_scale, n_components=1, num_samples=64, n_steps=8,
+                alpha=20.0):
+    return jax.vmap(lambda s, a, r: agent.compute_full_proposal_distribution_em(
+        s, a, r, num_samples=num_samples, n_steps=n_steps, n_initial_steps=100,
+        alpha=alpha, n_components=n_components, prior_scale=prior_scale))(
+        obs, act, jax.random.split(jax.random.PRNGKey(0), obs.shape[0]))
+
+
+def test_prior_scale_zero_reproduces_the_legacy_likelihood_only_target():
+    """Every npz written before 2026-08-14 used the likelihood-only target. Regenerating
+    one has to remain possible, bit-for-bit, or the old files cannot be reproduced."""
+    agent = _tiny_agent(obs_dim=4, act_dim=2)
+    obs = jax.random.normal(jax.random.PRNGKey(0), (4, 4))
+    act = jnp.tanh(jax.random.normal(jax.random.PRNGKey(1), (4, 2)))
+    m0, c0, _, _ = _em_mixture(agent, obs, act, prior_scale=0.0)
+    m0b, c0b, _, _ = _em_mixture(agent, obs, act, prior_scale=0.0)
+    np.testing.assert_array_equal(np.asarray(m0), np.asarray(m0b))
+    np.testing.assert_array_equal(np.asarray(c0), np.asarray(c0b))
+    m1, c1, _, _ = _em_mixture(agent, obs, act, prior_scale=1.0)
+    assert not np.allclose(np.asarray(c1), np.asarray(c0)), "prior_scale is not wired in"
+
+
+def test_prior_keeps_the_fitted_mixture_inside_the_latent_prior():
+    """The defect, isolated: at alpha=0 the energy term vanishes, so the target IS the
+    latent prior and the fit has exactly one right answer, N(0, I).
+
+    Without the prior term the target is instead UNBOUNDED (uniform over R^d), and the
+    importance weights ~1/q reward tail samples, so the EM covariance walks off — which is
+    the same mechanism that, at the real alpha, walks off along whichever directions the
+    decoder cannot see. Measured here: per-dim variance 167 (means out at |u| = 85) versus
+    0.79 with the prior. A tiny untrained flow does NOT show this at alpha=20 (its Jacobian
+    is well conditioned in every direction), which is why the test drives the flat case
+    directly instead of hoping the toy reproduces the shipped npz pathology.
+    """
+    agent = _tiny_agent(obs_dim=4, act_dim=2)
+    obs = jax.random.normal(jax.random.PRNGKey(2), (8, 4))
+    act = jnp.tanh(jax.random.normal(jax.random.PRNGKey(3), (8, 2)))
+    m0, c0, _, _ = _em_mixture(agent, obs, act, prior_scale=0.0, alpha=0.0)
+    m1, c1, _, _ = _em_mixture(agent, obs, act, prior_scale=1.0, alpha=0.0)
+    var0 = float(np.mean(np.trace(np.asarray(c0), axis1=-2, axis2=-1) / 2))
+    var1 = float(np.mean(np.trace(np.asarray(c1), axis1=-2, axis2=-1) / 2))
+    assert var0 > 10.0, f"the legacy target should run away here; got {var0}"
+    assert 0.3 < var1 < 2.0, f"posterior fit should sit at the prior's scale; got {var1}"
+    assert float(np.abs(np.asarray(m1)).max()) < 2.0, "posterior means outside the prior"
+    assert float(np.abs(np.asarray(m0)).max()) > 5.0, "legacy means should be unbounded"
