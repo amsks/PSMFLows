@@ -50,7 +50,9 @@ def main(cfg: DictConfig):
     config = ml_collections.ConfigDict(_lists_to_tuples(OmegaConf.to_container(cfg.agent, resolve=True)))
 
     # Make environment and datasets.
-    env, eval_env, train_dataset, val_dataset = make_env_and_datasets(cfg.env_name, frame_stack=cfg.frame_stack)
+    env, eval_env, train_dataset, val_dataset = make_env_and_datasets(cfg.env_name, frame_stack=cfg.frame_stack,
+        dataset_fraction=cfg.get('dataset_fraction', 1.0),
+        dataset_fraction_seed=cfg.get('dataset_fraction_seed', 0))
     if cfg.video_episodes > 0:
         assert 'singletask' in cfg.env_name, 'Rendering is currently only supported for OGBench environments.'
     if cfg.online_steps > 0:
@@ -100,9 +102,38 @@ def main(cfg: DictConfig):
                 assert int(meta.get('restore_epoch') or 0) == int(config.get('flow_ckpt_epoch') or 0), (
                     f"preimage npz used restore_epoch={meta.get('restore_epoch')} but "
                     f"agent.flow_ckpt_epoch={config.get('flow_ckpt_epoch')}")
+            # WHICH SUBSET. At dataset_fraction < 1 the row count is identical for every
+            # fraction_seed, so the size check above cannot see a wrong-subset pairing:
+            # the latents would belong to different transitions than the ones trained on,
+            # with no symptom but bad numbers. Sidecars written before 08-14 lack these
+            # keys; the content spot-check below is the guard that covers those.
+            if 'dataset_fraction' in meta:
+                assert float(meta['dataset_fraction']) == float(cfg.get('dataset_fraction', 1.0)), (
+                    f"preimage npz was computed at dataset_fraction="
+                    f"{meta['dataset_fraction']} but this run uses "
+                    f"{cfg.get('dataset_fraction', 1.0)}")
+                assert int(meta['dataset_fraction_seed']) == int(cfg.get('dataset_fraction_seed', 0)), (
+                    f"preimage npz used dataset_fraction_seed="
+                    f"{meta['dataset_fraction_seed']} but this run uses "
+                    f"{cfg.get('dataset_fraction_seed', 0)}")
+            elif float(cfg.get('dataset_fraction', 1.0)) != 1.0:
+                print('WARNING: preimage sidecar predates dataset_fraction recording and '
+                      'this run subsamples; relying on the content spot-check below.')
         else:
             print('WARNING: preimage npz has no .meta.json sidecar; cannot verify it '
                   'matches agent.flow_ckpt_path — proceed only if you are sure.')
+        # Content spot-check: the rows themselves must be the SAME transitions, not just
+        # the same count. First and last 1k observations settle it — a different subset
+        # (or a different episode ordering) diverges immediately at both ends, and a full
+        # 1M-row comparison costs seconds of startup for no extra certainty.
+        n_rows = aug['observations'].shape[0]
+        m = min(1000, n_rows)
+        for lo, hi, where in ((0, m, 'first'), (n_rows - m, n_rows, 'last')):
+            assert np.array_equal(np.asarray(aug['observations'][lo:hi]),
+                                  np.asarray(train_dataset['observations'][lo:hi])), (
+                f'preimage npz observations differ from the env dataset in the {where} '
+                f'{m} rows: the latents belong to different transitions (wrong subset, '
+                f'wrong dataset_fraction_seed, or a stale npz)')
         # Size check FIRST (it is the wrong-env guard), then neutralize rows whose inversion
         # diverged. Applied at load, not only in the precompute, so npz files written before
         # `preimage_valid` existed are covered too: a single NaN latent otherwise NaNs the

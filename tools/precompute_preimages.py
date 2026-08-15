@@ -60,7 +60,10 @@ from utils.flow_inversion import (
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg):
-    _, _, train_dataset, _ = make_env_and_datasets(cfg.env_name, frame_stack=cfg.frame_stack)
+    _, _, train_dataset, _ = make_env_and_datasets(
+        cfg.env_name, frame_stack=cfg.frame_stack,
+        dataset_fraction=cfg.get('dataset_fraction', 1.0),
+        dataset_fraction_seed=cfg.get('dataset_fraction_seed', 0))
     ds = dict(Dataset.create(**train_dataset))
 
     # Optional slice for plumbing smokes (the full OGBench dataset is ~1M transitions).
@@ -149,6 +152,13 @@ def main(cfg):
                        inversion=OmegaConf.to_container(cfg.inversion, resolve=True),
                        num_transitions=int(out['actions'].shape[0]),
                        num_invalid_preimages=n_bad,
+                       # WHICH SUBSET these rows are. Two runs at the same fraction but
+                       # different fraction_seed have identical row counts and identical
+                       # env, so nothing else in this sidecar distinguishes them: pairing
+                       # a flow's preimages with another subset's transitions would train
+                       # on latents belonging to different rows, silently.
+                       dataset_fraction=float(cfg.get('dataset_fraction', 1.0)),
+                       dataset_fraction_seed=int(cfg.get('dataset_fraction_seed', 0)),
                        skill_cond=skill_cond, skill_window=skill_window), f, indent=2)
     print(f"Wrote {out_path} (+ .meta.json), n={out['actions'].shape[0]}, "
           f"invalid={n_bad}")

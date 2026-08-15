@@ -88,13 +88,39 @@ class FrameStackWrapper(gymnasium.Wrapper):
         return self.get_observation(), reward, terminated, truncated, info
 
 
-def make_env_and_datasets(env_name, frame_stack=None, action_clip_eps=1e-5):
+def subsample_episodes(dataset_dict, fraction, seed=0):
+    """Keep a random `fraction` of episodes (whole episodes, boundaries from `terminals`).
+
+    Whole-episode removal keeps the idx+1 successor pairing intact inside every surviving
+    episode; the seam between two formerly non-adjacent episodes is an episode boundary
+    either way, which `terminals` already marks. Never drops individual rows (that would
+    silently re-pair transitions across the gap — see the 07-29 preimage-repair note).
+    """
+    terminals = np.asarray(dataset_dict['terminals'])
+    ends = np.nonzero(terminals > 0.5)[0]
+    starts = np.concatenate([[0], ends[:-1] + 1])
+    n_ep = len(ends)
+    n_keep = max(1, int(round(n_ep * fraction)))
+    keep = np.sort(np.random.default_rng(seed).choice(n_ep, size=n_keep, replace=False))
+    row_mask = np.zeros(terminals.shape[0], dtype=bool)
+    for i in keep:
+        row_mask[starts[i]:ends[i] + 1] = True
+    out = {k: np.asarray(v)[row_mask] for k, v in dataset_dict.items()}
+    print(f'subsample_episodes: kept {n_keep}/{n_ep} episodes '
+          f'({row_mask.sum()}/{terminals.shape[0]} rows) at fraction={fraction} seed={seed}')
+    return out
+
+
+def make_env_and_datasets(env_name, frame_stack=None, action_clip_eps=1e-5,
+                          dataset_fraction=1.0, dataset_fraction_seed=0):
     """Make offline RL environment and datasets.
 
     Args:
         env_name: Name of the environment or dataset.
         frame_stack: Number of frames to stack.
         action_clip_eps: Epsilon for action clipping.
+        dataset_fraction: Keep this fraction of training episodes (episode-level, seeded).
+        dataset_fraction_seed: RNG seed for the episode subsample.
 
     Returns:
         A tuple of the environment, evaluation environment, training dataset, and validation dataset.
@@ -106,6 +132,9 @@ def make_env_and_datasets(env_name, frame_stack=None, action_clip_eps=1e-5):
         eval_env = ogbench.make_env_and_datasets(env_name, env_only=True)
         env = EpisodeMonitor(env, filter_regexes=['.*privileged.*', '.*proprio.*'])
         eval_env = EpisodeMonitor(eval_env, filter_regexes=['.*privileged.*', '.*proprio.*'])
+        if dataset_fraction < 1.0:
+            train_dataset = subsample_episodes(dict(train_dataset), dataset_fraction,
+                                               dataset_fraction_seed)
         train_dataset = Dataset.create(**train_dataset)
         val_dataset = Dataset.create(**val_dataset)
     elif 'antmaze' in env_name and ('diverse' in env_name or 'play' in env_name or 'umaze' in env_name):

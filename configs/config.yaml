@@ -39,4 +39,6 @@ eval_reward_shift: 1.0
 
 p_aug: null
 frame_stack: null
+dataset_fraction: 1.0    # episode-level seeded subsample of the training set (Idea 2b/2c)
+dataset_fraction_seed: 0
 balanced_sampling: 0
