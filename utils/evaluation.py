@@ -61,16 +61,23 @@ def evaluate(
         num_video_episodes: Number of episodes to render. These episodes are not included in the statistics.
         video_frame_skip: Number of frames to skip between renders.
         eval_temperature: Action sampling temperature.
-        seed: If not None, re-seed the environment's episode-init RNG to this value
-            at the start of every eval so success is a reproducible function of the
-            weights (matches the reference `evals/ogbench.py`, which re-creates and
-            re-seeds the eval env with `cfg.seed` on each eval). When None, the env
-            keeps its own (entropy-seeded) RNG and eval is not reproducible run-to-run.
+        seed: If not None, pin BOTH sources of eval randomness to this value at the start
+            of every eval -- the environment's episode-init RNG (matching the reference
+            `evals/ogbench.py`, which re-creates and re-seeds the eval env with `cfg.seed`
+            on each eval) and the agent's action-sampling key stream -- so success is a
+            reproducible function of the weights. When None, the env keeps its own
+            (entropy-seeded) RNG, the action key is drawn from OS entropy, and eval is not
+            reproducible run-to-run.
 
     Returns:
         A tuple containing the statistics, trajectories, and rendered videos.
     """
-    actor_fn = supply_rng(agent.sample_actions, rng=jax.random.PRNGKey(np.random.randint(0, 2**32)))
+    # Action noise was seeded from OS entropy regardless of `seed`, so re-evaluating the
+    # same weights drew a different action stream every time: pinning the env's episode
+    # inits alone did not make eval reproducible. Stochastic actors (flow decode, the
+    # residual path) move by more than rounding under a different key.
+    actor_key = seed if seed is not None else np.random.randint(0, 2**32)
+    actor_fn = supply_rng(agent.sample_actions, rng=jax.random.PRNGKey(actor_key))
     trajs = []
     stats = defaultdict(list)
 

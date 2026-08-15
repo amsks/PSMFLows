@@ -57,6 +57,11 @@ def wilson(k, n, z=1.96):
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg):
+    # Dataset.sample() draws from the GLOBAL numpy stream, so the task-vector relabel
+    # batch below (and anything else sampling here) was entropy-dependent: two runs of
+    # this tool on the same checkpoint inferred w from different transitions. Pin it.
+    np.random.seed(int(cfg.seed))
+
     env, eval_env, train_dataset, _ = make_env_and_datasets(cfg.env_name, frame_stack=cfg.frame_stack)
     ds = Dataset.create(**train_dataset)
     config = ml_collections.ConfigDict(_lists_to_tuples(OmegaConf.to_container(cfg.agent, resolve=True)))
@@ -76,8 +81,12 @@ def main(cfg):
         agent = agent.infer_eval_z(zb["next_observations"], zb["rewards"] + shift)
 
     n_ep = int(cfg.eval_episodes)
-    # Same seed convention as training eval, so the first 50 episodes reproduce the
-    # in-loop number exactly and the remainder are fresh initial states.
+    # Same seed convention as training eval: the episode-init stream starts where the
+    # in-loop eval's does, and (since the 08-14 seeding fix) the action-noise stream is
+    # pinned to cfg.seed too, so re-running this tool on a checkpoint reproduces its
+    # number exactly. It does NOT reproduce an in-loop eval step-for-step -- the in-loop
+    # relabel batch is drawn from a global numpy stream that training has advanced --
+    # which is what the previous docstring claimed.
     info, trajs, _ = evaluate(agent=agent, env=eval_env, config=config,
                               num_eval_episodes=n_ep, num_video_episodes=0,
                               seed=int(cfg.seed))
@@ -92,11 +101,36 @@ def main(cfg):
     else:  # fall back to the averaged field if the env does not expose per-step success
         k, n = int(round(float(info["success"]) * n_ep)), n_ep
 
+    # Self-identifying metadata. The same checkpoint evaluated in three acting modes
+    # produced three JSONs distinguishable only by their FILENAME, which is exactly how a
+    # lambda-rank number gets quoted as the deployed one six weeks later. Record what was
+    # actually run, in the report.
+    ac = config.get("action_critic", {}) or {}
+    rank_k = int(ac.get("eval_rank_k", 0) or 0)
+    if not ac.get("enabled", False):
+        mode = "decode(actor latent) — action branch disabled"
+    elif rank_k == 1:
+        mode = "decode-only control: one actor draw, decoded, no residual, no selection"
+    elif rank_k > 1:
+        mode = f"lambda-rank: {rank_k} decoded candidates scored by Q_a, argmax, no residual"
+    else:
+        mode = (f"deployed: actor draw + eps-bounded residual "
+                f"(residual_eps={config.get('residual_eps')})")
+
     lo, hi = wilson(k, n)
     report = {
         "env": cfg.env_name,
         "agent": name,
         "acting": config.get("acting"),
+        "acting_mode": mode,
+        "action_critic": {"enabled": bool(ac.get("enabled", False)),
+                          "eval_rank_k": rank_k,
+                          "residual_eps": config.get("residual_eps"),
+                          "fb_graft": bool(ac.get("fb_graft", False))},
+        "dataset_fraction": float(cfg.get("dataset_fraction", 1.0)),
+        "dataset_fraction_seed": int(cfg.get("dataset_fraction_seed", 0)),
+        "flow_ckpt_path": str(config.get("flow_ckpt_path")),
+        "preimage_path": str(config.get("preimage_path")),
         "restore_path": str(cfg.restore_path),
         "restore_epoch": int(cfg.restore_epoch),
         "seed": int(cfg.seed),
@@ -109,7 +143,7 @@ def main(cfg):
         "per_episode_success": [int(p > 0.5) for p in per_ep],
     }
     print(f"\n{name} [{cfg.env_name}] {k}/{n} = {report['success']:.3f}  "
-          f"95% CI [{lo:.3f}, {hi:.3f}]")
+          f"95% CI [{lo:.3f}, {hi:.3f}]\n  mode: {mode}")
     write_report(report, cfg, "eval_checkpoint.json")
 
 

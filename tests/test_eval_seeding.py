@@ -49,6 +49,17 @@ class _MockAgent:
         return np.zeros(2, np.float32)
 
 
+class _StochasticAgent:
+    """Records the action-sampling keys it is handed, so the stream can be compared."""
+
+    def __init__(self):
+        self.keys = []
+
+    def sample_actions(self, observations, seed=None, temperature=1.0):
+        self.keys.append(np.asarray(seed).tolist())
+        return np.zeros(2, np.float32)
+
+
 def _run(env, seed):
     stats, _, _ = evaluate(_MockAgent(), env, num_eval_episodes=8, seed=seed)
     return stats["success"], env.inits
@@ -71,6 +82,25 @@ def test_unseeded_eval_is_NOT_reproducible():
     (_, inits_a) = _run(_MockEnv(entropy=111), seed=None)
     (_, inits_b) = _run(_MockEnv(entropy=999), seed=None)
     assert inits_a != inits_b
+
+
+def test_seeded_eval_pins_the_action_key_stream():
+    """The other half of eval reproducibility: the ACTION noise. It was seeded from OS
+    entropy (`np.random.randint`) whatever `seed` said, so a stochastic actor took a
+    different action stream on every re-eval of identical weights."""
+    a, b, c = _StochasticAgent(), _StochasticAgent(), _StochasticAgent()
+    evaluate(a, _MockEnv(entropy=111), num_eval_episodes=4, seed=42)
+    evaluate(b, _MockEnv(entropy=999), num_eval_episodes=4, seed=42)
+    evaluate(c, _MockEnv(entropy=111), num_eval_episodes=4, seed=7)
+    assert a.keys == b.keys        # same eval seed -> same action keys
+    assert a.keys != c.keys        # different eval seed -> different action keys
+
+
+def test_unseeded_eval_does_not_pin_the_action_key_stream():
+    a, b = _StochasticAgent(), _StochasticAgent()
+    evaluate(a, _MockEnv(entropy=111), num_eval_episodes=4, seed=None)
+    evaluate(b, _MockEnv(entropy=111), num_eval_episodes=4, seed=None)
+    assert a.keys != b.keys
 
 
 def test_seed_overrides_env_history():
