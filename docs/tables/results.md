@@ -15,7 +15,8 @@ cube-single-play-singletask-v0. 500-episode evals. Multiple seeds are mean ± 95
 | Hybrid (action critic + residual), deployed | zero-shot | 0.162 ± 0.168 | 4 |
 | Hybrid, decode-only control | zero-shot | 0.226 ± 0.068 | 4 |
 | Hybrid, lambda-rank (K=32, no residual) | zero-shot | 0.083 ± 1.004 | 2 |
-| Hybrid + FB graft (unshared basis) | zero-shot | -- | 0 |
+| Hybrid + FB graft, deployed | zero-shot | 0.064 [0.046, 0.089] | 1 |
+| Hybrid + FB graft, decode-only control | zero-shot | 0.174 [0.143, 0.210] | 1 |
 | Behavior-cloning control (per-step prior) | control | 0.068 [0.049, 0.093] | 1 |
 
 ## Data fraction
@@ -24,13 +25,8 @@ cube-single-play-singletask-v0. 500-episode evals. Multiple seeds are mean ± 95
 |---|---|---|---|
 | Behavior flow (BC control) | 0.070 [0.051, 0.096] | 0.100 [0.077, 0.129] | 0.068 [0.049, 0.093] |
 | FQL (per-task) | 0.408 [0.366, 0.452] | 0.976 [0.959, 0.986] | 0.949 ± 0.063 |
-| FB (zero-shot) | 0.030 [0.018, 0.049] | -- | 0.721 ± 0.020 |
+| FB (zero-shot) | 0.030 [0.018, 0.049] | 0.376 [0.335, 0.419] | 0.721 ± 0.020 |
 | PSMFlow (zero-shot) | 0.067 ± 0.013 | 0.052 [0.036, 0.075] | 0.236 ± 0.071 |
 | Hybrid, deployed | 0.238 [0.203, 0.277] | 0.228 [0.193, 0.267] | 0.162 ± 0.168 |
 | Hybrid, decode-only control | 0.072 [0.052, 0.098] | 0.070 [0.051, 0.096] | 0.226 ± 0.068 |
 | Latent RL (per-task) | 0.058 [0.041, 0.082] | -- | 0.905 ± 0.020 |
-
-## Cells with no data yet
-
-- headline: Hybrid + FB graft (unshared basis)  (`eval500_fbgraft_sd?.json`)
-- fraction: FB (zero-shot) @ 50\%  (`eval500_fb_frac50_sd?.json`)

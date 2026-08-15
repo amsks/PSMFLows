@@ -45,7 +45,9 @@ HEADLINE = [
      ["eval500_hybrid_decodeonly_sd00?.json", "eval500_hybrid_1M_decodeonly_sd00?.json"]),
     ("Hybrid, lambda-rank (K=32, no residual)", "zero-shot",
      ["eval500_hybrid_lambdarank_sd00?.json"]),
-    ("Hybrid + FB graft (unshared basis)", "zero-shot", ["eval500_fbgraft_sd?.json"]),
+    ("Hybrid + FB graft, deployed", "zero-shot", ["eval500_fbgraft_sd?_deployed.json"]),
+    ("Hybrid + FB graft, decode-only control", "zero-shot",
+     ["eval500_fbgraft_sd?_decodeonly.json"]),
     ("Behavior-cloning control (per-step prior)", "control", ["eval500_bcflow_cube.json"]),
 ]
 

@@ -103,9 +103,14 @@ latents decoding 53% of an action scale away, so that ablation was never fair.
   (the hpmatch checkpoints could not otherwise be loaded at all).
 - eval reports are self-identifying (`acting_mode`, `action_critic`, fraction, flow/npz
   paths): three acting modes per checkpoint were distinguishable only by FILENAME.
-- P2 FB-graft built and running: ψ_a gets its own backward map B_a trained by the FB measure
-  loss, w_a inferred from B_a; ψ_u/φ/actor untouched. Tests pin byte-identity when off and
-  both-directions gradient isolation when on. Gate: 500-ep ≥ 0.45 ⇒ scale to 5 seeds.
+- **P2 FB-graft FAILED its gate (sd1, 1M): deployed 0.064 [0.046, 0.089] against a 0.45
+  gate — at the BC control, below the hybrid.** ψ_a got its own backward map B_a trained by
+  the FB measure loss and its own w_a inferred from B_a; the residual got WORSE
+  (decode-only 0.174 → deployed 0.064). Its decode-only number sits inside the hybrid's own
+  decode-only spread, confirming the graft left the latent actor alone as designed — so the
+  implementation did what it claimed and the claim did not help. Pre-registered rule
+  applied: shared-φ was NOT the explanation for the weak action critic; report, do not
+  iterate. sd0 still running only to give the negative result n=2.
 - **Run the test suite module-per-process** — all 29 modules pass (177 passed, 1 skipped),
   but the whole suite in ONE process dies in the XLA CPU compiler at a moving victim
   (pre-existing; reproduced with every one of today's tests excluded).

@@ -458,6 +458,34 @@ per fraction cell, so this needs replication before it is a claim, but it is the
 setting where the action branch earns its place, and it suggests the residual matters
 precisely when the behaviour flow is weakest.
 
+### 2026-08-14 19:30 — P2 GATE CALL: the FB graft FAILS, and the shared-φ theory with it
+`hybrid_fbgraft_sd1` finished 1M. Both acting modes, 500 episodes:
+
+| | deployed | decode-only |
+|---|---|---|
+| **FB graft, sd1** | **0.064** [0.046, 0.089] | 0.174 [0.143, 0.210] |
+| hybrid (same recipe, shared basis) | 0.162 ± 0.168 (4 seeds) | 0.226 ± 0.068 |
+| BC control | 0.068 | — |
+
+**Gate was 500-ep ≥ 0.45 on either seed. Deployed reads 0.064** — a factor of seven below
+the gate, at the BC control, and below the current hybrid. The pre-registered rule for this
+outcome is explicit: *"Below the current hybrid ⇒ the shared-φ theory of the gap is wrong —
+report, don't iterate blindly."* So: no 5-seed scale-up, no graft tuning.
+
+What it rules out: the action critic's weakness was blamed on being steered through a φ
+trained by a pessimistic, actor-bootstrapped, proto-branch-less loss. Give ψ_a its own
+FB-recipe basis B_a and its own w_a — the audit's highest-expected-value fix — and the
+residual gets WORSE (0.174 → 0.064 within this run; the hybrid's own residual effect is
+−0.065 on average). The basis is not what is wrong with the action branch.
+
+The decode-only number (0.174) sits inside the hybrid's own decode-only seed spread
+(0.180–0.266), which is the expected null: the graft touches only ψ_a/B_a/w_a and the
+residual, so the latent actor should be untouched — and measurably is. That is a useful
+positive control on the implementation: the graft did what it claimed, and what it claimed
+did not help.
+
+sd0 is left running (≈5 h out, GPU0 idle otherwise) purely so the negative result has n=2.
+
 ### 2026-08-14 — user's three preimage-pipeline claims: all three confirmed
 **(1) The full inversion utility is not used.** `configs/inversion/default.yaml` sets
 `num_clusters: 1`, so `compute_full_proposal_distribution_em` runs at `n_components=1`:
