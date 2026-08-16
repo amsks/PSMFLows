@@ -182,6 +182,10 @@ def augment_dataset_with_preimage_distribution(agent, dataset, config, skills=No
     n_initial_steps = config.get('n_initial_steps', 100)
     batch_size = config.get('batch_size', 256)
     seed = config.get('seed', 0)
+    # Weight on the flow's N(0, I) latent prior in the EM target; 0.0 is the pre-2026-08-14
+    # likelihood-only target every published npz was computed under. It is recorded in the
+    # sidecar with the rest of the inversion config, which is what tells the two apart.
+    prior_scale = config.get('prior_scale', 1.0)
 
     assert num_samples >= num_clusters, (
         f'num_samples ({num_samples}) must be >= num_clusters ({num_clusters}); '
@@ -198,7 +202,8 @@ def augment_dataset_with_preimage_distribution(agent, dataset, config, skills=No
     dataset['preimage_ess'] = np.zeros((size,), np.float32)
 
     _kw = dict(num_samples=num_samples, n_steps=n_steps,
-               n_initial_steps=n_initial_steps, alpha=alpha, n_components=num_clusters)
+               n_initial_steps=n_initial_steps, alpha=alpha, n_components=num_clusters,
+               prior_scale=prior_scale)
     # The agent widens conditioned inputs itself (agents/fql.py `_actor_obs`), so raw
     # observations + per-row skills go in — pre-concatenating here would double-concat.
     if skills is None:

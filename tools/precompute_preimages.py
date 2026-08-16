@@ -48,7 +48,8 @@ from omegaconf import OmegaConf
 from agents.fql import FQLAgent
 from envs.env_utils import make_env_and_datasets
 from main import _lists_to_tuples
-from utils.datasets import Dataset
+from utils.datasets import Dataset, get_size
+from utils.nn_search import neighborhood_sample
 from utils.flax_utils import restore_agent
 from utils.flow_inversion import (
     augment_dataset_with_point_preimage,
@@ -67,6 +68,38 @@ def main(cfg):
     limit = cfg.get('preimage_limit', None)
     if limit is not None:
         ds = {k: v[:limit] for k, v in ds.items()}
+
+    # `+preimage_sample=N` inverts an N-row batch instead of the whole dataset (or a
+    # prefix of it). Inverting 1M rows costs 4-19 h, which is far too slow to tune the
+    # inversion against; a few thousand rows costs minutes and is what the recovery tools
+    # need to say whether a setting is any good. `+preimage_sample_mode` picks whole
+    # neighbourhoods (default, `+preimage_sample_k` rows per anchor) or uniform rows; the
+    # batch is seeded off cfg.seed, and the buffer row each sample came from is stored as
+    # `source_index` -- without it the npz rows no longer line up with the dataset, and
+    # anything that needs the environment (tools/validate_dynamics_recovery.py) could not
+    # find the simulator state.
+    sample_n = cfg.get('preimage_sample', None)
+    sample_mode = str(cfg.get('preimage_sample_mode', 'neighborhoods'))
+    sample_k = int(cfg.get('preimage_sample_k', 20))
+    source_index = None
+    if sample_n is not None:
+        size = get_size(ds)
+        assert int(sample_n) <= size, f'preimage_sample={sample_n} exceeds the {size}-row dataset'
+        if sample_mode == 'neighborhoods':
+            # Whole neighbourhoods, so the local density of the batch matches the full
+            # buffer's. A uniform sample of the same size has no neighbourhood structure
+            # left (see utils/nn_search.neighborhood_sample), which silently guts any
+            # metric about what nearby transitions share.
+            obs = np.asarray(ds['observations'], np.float32)
+            source_index = neighborhood_sample(
+                obs, int(sample_n), sample_k, seed=int(cfg.seed),
+                scale=np.maximum(obs.std(0), 1e-6))
+        elif sample_mode == 'uniform':
+            source_index = np.sort(np.random.default_rng(int(cfg.seed)).choice(
+                size, int(sample_n), replace=False))
+        else:
+            raise ValueError(f'preimage_sample_mode must be neighborhoods|uniform, got {sample_mode!r}')
+        ds = {k: v[source_index] for k, v in ds.items()}
 
     # Build the agent from the Hydra `agent` group, NOT fql.get_config(): the net shapes
     # must match the Stage-A run whose checkpoint we are about to restore.
@@ -136,6 +169,10 @@ def main(cfg):
         # dataset value, which a bare scalar array would break.
         out['skill_window'] = np.asarray(skill_window, np.int32)
 
+    if source_index is not None:
+        # Added after repair/validity so it cannot be mistaken for a preimage product.
+        out['source_index'] = source_index.astype(np.int64)
+
     out_path = cfg.get('preimage_out', 'preimages.npz')
     save_augmented_dataset(out_path, out)
     # Sidecar: which flow produced these latents. Without it an npz is unusable — the
@@ -149,6 +186,12 @@ def main(cfg):
                        inversion=OmegaConf.to_container(cfg.inversion, resolve=True),
                        num_transitions=int(out['actions'].shape[0]),
                        num_invalid_preimages=n_bad,
+                       # A sampled batch is a tuning artifact, not a training input: it
+                       # covers a random subset of the buffer, so main.py's row-count
+                       # pairing check will (correctly) reject it.
+                       sampled_batch=source_index is not None,
+                       sample_mode=None if source_index is None else sample_mode,
+                       sample_k=None if source_index is None else sample_k,
                        skill_cond=skill_cond, skill_window=skill_window), f, indent=2)
     print(f"Wrote {out_path} (+ .meta.json), n={out['actions'].shape[0]}, "
           f"invalid={n_bad}")

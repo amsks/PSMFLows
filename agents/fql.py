@@ -63,23 +63,38 @@ class FQLAgent(flax.struct.PyTreeNode):
 
         return x_0, jax.jacfwd(forward_map)(x_0)
 
-    def _get_predistribution_proposal(self, state, action, n_steps, alpha=1.0):
+    def _get_predistribution_proposal(self, state, action, n_steps, alpha=1.0, prior_scale=1.0):
         """Local Gaussian proposal (mean, cov) for the preimage of `action`.
 
-        cov is the Laplace covariance of the target pi(x) ~ exp(-alpha*||flow(x)-action||)
-        around the preimage: (1/alpha^2)(J^T J)^{-1}, eigenvalues clipped for stability.
-        Larger alpha (lower temperature) => tighter proposal.
+        cov is the Laplace covariance of the target
+        pi(x) ~ N(x; 0, I)^prior_scale * exp(-alpha*||flow(x)-action||) around the
+        preimage: (alpha^2 J^T J + prior_scale*I)^{-1}. Larger alpha (lower temperature)
+        => tighter proposal.
+
+        The prior term is what bounds the proposal from above: without it the covariance
+        is (1/alpha^2)(J^T J)^{-1}, which diverges along the directions the flow map
+        flattens (small singular values of J), and the old code capped it by clipping the
+        eigenvalues at 1.0 instead. Clipping puts the proposal at exactly the prior's width
+        in those directions while the target it is proposing FOR is the posterior, which is
+        narrower there -- a proposal/target mismatch that shows up directly as low ESS.
+        `prior_scale=0.0` recovers the clipped likelihood-only proposal exactly.
         """
         x_0, jacobian = self._get_preimage_and_jacobian(state, action, n_steps)
         gram = jacobian.T @ jacobian + 1e-6 * jnp.eye(jacobian.shape[-1], dtype=jacobian.dtype)
         eigvals, eigvecs = jnp.linalg.eigh(gram)
-        # positional bounds: jax removed the a_min/a_max kwargs (broke on jax 0.10).
-        cov_eigvals = jnp.clip(1.0 / (alpha ** 2 * eigvals), 0.01, 1.0)
+        # positional bounds: jax removed the a_min/a_max kwargs (broke on jax 0.10). The
+        # bounds stay as guards; at prior_scale=1 the upper one is already implied, since
+        # (alpha^2 lambda + 1)^{-1} <= 1 for every eigenvalue.
+        cov_eigvals = jnp.clip(1.0 / (alpha ** 2 * eigvals + prior_scale), 0.01, 1.0)
         cov = (eigvecs * cov_eigvals[None, :]) @ eigvecs.T
         return x_0, cov
     
-    def compute_full_proposal_distribution(self, state, action, rng, num_samples=100, n_steps=10, n_initial_steps=100, alpha=1.0, skills=None):
-        """Refine the preimage proposal toward pi(x) ~ exp(-alpha * ||flow(x) - action||) by importance sampling.
+    def compute_full_proposal_distribution(self, state, action, rng, num_samples=100, n_steps=10, n_initial_steps=100, alpha=1.0, skills=None, prior_scale=1.0):
+        """Refine the preimage proposal toward the posterior by importance sampling.
+
+        Same target as the EM variant below, pi(x) ~ N(x; 0, I)^prior_scale *
+        exp(-alpha * ||flow(x) - action||), fitted with a single Gaussian instead of a
+        mixture. See that docstring for what dropping the prior costs.
 
         alpha is an inverse temperature (1/T): larger alpha => sharper target.
         `state` is the RAW observation; with skill_cond the hindsight target `skills`
@@ -88,7 +103,7 @@ class FQLAgent(flax.struct.PyTreeNode):
         if self.config['skill_cond']:
             assert skills is not None, 'skill_cond=True: pass the raw state plus skills'
         x_0, cov = self._get_predistribution_proposal(
-            self._actor_obs(state, skills), action, n_initial_steps, alpha)
+            self._actor_obs(state, skills), action, n_initial_steps, alpha, prior_scale)
         state_b = jnp.broadcast_to(state, (num_samples, *state.shape))
         skills_b = None if skills is None else jnp.broadcast_to(skills, (num_samples, *skills.shape))
 
@@ -102,7 +117,7 @@ class FQLAgent(flax.struct.PyTreeNode):
             # Same exposure as the EM variant: the flow diverges to NaN when integrated
             # from a tail sample at flow_steps>=100, and one NaN makes the whole softmax
             # NaN. Give such samples weight zero; uniform if none survive.
-            logits = -dist - log_prob
+            logits = -dist - 0.5 * prior_scale * jnp.sum(samples ** 2, axis=-1) - log_prob
             ok = jnp.isfinite(logits)
             logits = jnp.where(ok, logits, -jnp.inf)
             logits = jnp.where(jnp.any(ok), logits, jnp.zeros_like(logits))
@@ -119,19 +134,32 @@ class FQLAgent(flax.struct.PyTreeNode):
         (x_0, cov, rng), ess = jax.lax.scan(_step, (x_0, cov, rng), None, length=n_steps)
         return x_0, cov, ess
 
-    def compute_full_proposal_distribution_em(self, state, action, rng, num_samples=100, n_steps=10, n_initial_steps=100, alpha=1.0, n_components=3, skills=None):
-        """Importance-weighted EM fit of a Gaussian mixture to pi(x) ~ exp(-alpha * ||flow(x) - action||).
+    def compute_full_proposal_distribution_em(self, state, action, rng, num_samples=100, n_steps=10, n_initial_steps=100, alpha=1.0, n_components=3, skills=None, prior_scale=1.0):
+        """Importance-weighted EM fit of a Gaussian mixture to the preimage posterior.
+
+        The target is pi(x) ~ N(x; 0, I)^prior_scale * exp(-alpha * ||flow(x) - action||):
+        the decode-error likelihood TIMES the flow's own Gaussian prior over latents.
 
         Samples are drawn from the current mixture; per-sample IS weights w_n ~ pi/q
         carry the energy, membership responsibilities r_{k,n} assign them to components,
         and the M-step uses gamma_{k,n} = w_n * r_{k,n}. alpha is an inverse temperature.
         `state` is the RAW observation; with skill_cond pass `skills` (as in the IS
         variant above), never a pre-concatenated state.
+
+        `prior_scale=0.0` drops the prior, which is what this fitted before 2026-08-14 and
+        what every published npz was computed under. Without it the target is a likelihood
+        only: it has no term pulling mass toward the typical set, so the fit follows the
+        level set of the decode error out of the region the flow was trained on. Measured
+        on the published npz files, mean ||u||^2 of a mixture draw was 14.6 against
+        E[chi^2_5] = 5 on cube and 59.3 against 2 on pointmaze, with 34%/43% of draws past
+        the chi^2 99th percentile -- while the point preimage stayed typical (5.57 / 1.64).
+        Latents that far out are pure extrapolation for the flow, and ~0.3% of them made
+        the forward integration diverge outright.
         """
         if self.config['skill_cond']:
             assert skills is not None, 'skill_cond=True: pass the raw state plus skills'
         x_0, cov = self._get_predistribution_proposal(
-            self._actor_obs(state, skills), action, n_initial_steps, alpha)
+            self._actor_obs(state, skills), action, n_initial_steps, alpha, prior_scale)
         action_dim = x_0.shape[-1]
 
         rng, init_rng = jax.random.split(rng)
@@ -153,7 +181,10 @@ class FQLAgent(flax.struct.PyTreeNode):
             state_b = jnp.broadcast_to(state, (samples.shape[0], *state.shape))
             skills_b = None if skills is None else jnp.broadcast_to(skills, (samples.shape[0], *skills.shape))
             actions = self.compute_flow_actions(state_b, noises=samples, skills=skills_b)
-            log_energy = -alpha * jnp.linalg.norm(actions - action[None], axis=-1)
+            # log pi = log prior + log likelihood, up to a constant: the -||x||^2/2 term is
+            # the flow's N(0, I) latent prior (agents/fql.py actor_loss draws x_0 from it).
+            log_energy = (-alpha * jnp.linalg.norm(actions - action[None], axis=-1)
+                          - 0.5 * prior_scale * jnp.sum(samples ** 2, axis=-1))
 
             log_likelihoods = jax.vmap(
                 lambda m, c: jax.vmap(
