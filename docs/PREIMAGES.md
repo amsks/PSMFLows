@@ -209,6 +209,9 @@ it cancels.
 
 ### Tuning the inversion on a sampled batch
 
+`docs/TUNING_INVERSION.md` is the short version: which knob moves what, what to read off the
+report, and the commands. The rest of this section is the measurements behind it.
+
 Inverting 1M rows costs 4-19 h, which is the wrong loop to tune in. Two pieces make the
 short loop:
 
@@ -247,6 +250,62 @@ beyond `u_clip` costs nothing, since psmflow clamps every draw to that box, wher
 in the bulk is the failure the metric exists to catch. `decode_mix` is the label noise the
 coverage was bought with. Coverage alone is maximised by inflating the covariances, so
 read the two together and pick the widest setting inside a decode-error budget.
+
+Coverage is strongly k-dependent, so read the curve, not a number. Pointmaze at
+`prior_scale=1`, 1280 rows sampled as neighbourhoods:
+
+| | k=0 | k=1 | k=4 | k=16 | k=64 | decode |
+|---|---|---|---|---|---|---|
+| `alpha=20` | 0.03 | 0.06 | 0.14 | 0.38 | 0.74 | 0.077 |
+| `alpha=50` | 0.01 | 0.02 | 0.05 | 0.15 | 0.40 | 0.035 |
+
+It roughly doubles per doubling of k and has not saturated by 64, so "how well is the
+prior covered" is mostly a question about how far the measure generalises across states.
+The misses concentrate in the tail — at `alpha=20`, k=64 the prior's inner quartile is 88%
+covered and its outer 5% is 17% — which is the benign case, since `u_clip` means the actor
+never emits the tail anyway.
+
+Cube (`d_a=5`, `prior_scale=1`, `n_steps=4`, `num_samples=32`, k=64) is the case that
+matters, and it reads very differently from pointmaze:
+
+| `alpha` | coverage | inner quartile | decode | E‖u‖² (want 5) |
+|---|---|---|---|---|
+| 2 | 0.60 | 0.98 | 0.232 | 4.81 |
+| 5 | 0.53 | 0.95 | 0.193 | 4.66 |
+| 10 | 0.41 | 0.85 | 0.153 | 4.56 |
+| 20 (current default) | 0.19 | 0.48 | 0.109 | 4.65 |
+| 50 | 0.02 | 0.04 | 0.052 | 5.07 |
+
+Four things to know before picking a setting:
+
+- **Coverage falls off geometrically with `d_a`.** The same `alpha` covers 0.74 of the
+  prior on pointmaze (`d_a=2`) and 0.19 on cube (`d_a=5`), because an ellipsoid of fixed
+  per-dimension width covers a volume fraction that shrinks with dimension. Antmaze
+  (`d_a=8`) will be worse again.
+- **With the prior in the target, MORE EM iterations shrink the mixture.** On cube,
+  `n_steps` 4 -> 10 drops coverage 0.19 -> 0.01. Without the prior the target is improper
+  along the decode level set and EM drifted outward (the ~4x-per-iteration covariance
+  growth noted in `_condition`); with it, EM converges onto the point preimage as it
+  should. So `n_steps` is now a width knob pointing the opposite way, and the
+  `num_samples=200, n_steps=10` production setting is a *concentrating* one.
+- **`num_samples` dominates, and the table above is at a starved budget.** It was
+  measured at `num_samples=32`, an eighth of the production 200. Re-run at 128 with
+  `alpha=5`, coverage goes 0.53 -> 0.96 at k=64 and 0.02 -> 0.29 at k=0, for a decode
+  error of 0.227 against 0.193. The EM proposal is fitted from those draws, so too few of
+  them yield a covariance shrunk toward the point preimage. Read the `alpha` frontier as
+  the *shape* of the trade-off, not as absolute coverage.
+- **More mixture components do not buy coverage.** Sweeping `num_clusters` 1/2/3/5 at
+  fixed `num_samples=32` (cube, k=64) moves coverage 0.53/0.39/0.22/0.11 at `alpha=5` and
+  0.19/0.13/0.05/0.01 at `alpha=20`, monotonically down, with the prior's inner quartile
+  falling the same way (0.95 -> 0.28) and the decode error improving only ~6%. The union
+  of K components fitted from N/K draws each is smaller than one component fitted from N.
+  At `num_samples=128` the K dependence mostly disappears (k=64: 0.962 at K=1, 0.978 at
+  K=3), so `num_clusters=1` is a defensible default and K is at best a refinement once the
+  sample budget is adequate.
+
+Typicality stays put across the whole `alpha` range (E‖u‖² 4.5-5.1 against 5) — with
+`prior_scale=1` the prior pins where the mass sits while `alpha` sets how wide it spreads,
+which is the separation of concerns the likelihood-only target did not have.
 
 The sweep runs every combination against the same rows and the same draw seed, so a
 difference between rows is the setting. Note that ESS is bounded by `num_samples` and is
