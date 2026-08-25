@@ -50,14 +50,6 @@ num_clusters: 1
 # regenerate a legacy file. Changing it invalidates existing preimage npz files.
 prior_scale: 1.0
 alpha: 20.0
-# Weight on the flow's N(0, I) latent prior in the EM target, which is
-# pi(u) ~ N(u; 0, I)^prior_scale * exp(-alpha*||G(s,u) - a||). 1.0 is the preimage
-# POSTERIOR; 0.0 is the likelihood-only target used before 2026-08-14, under which the
-# mixture left the prior's typical set entirely (mean ||u||^2 14.6 vs E[chi^2_5]=5 on
-# cube, 59.3 vs 2 on pointmaze) and ~0.3% of its draws diverged when decoded. The point
-# arm is computed by the backward ODE and is unaffected either way.
-# Changing this invalidates existing preimage npz files.
-prior_scale: 1.0
 num_samples: 200
 n_steps: 10
 n_initial_steps: 100
