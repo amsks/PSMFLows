@@ -120,7 +120,19 @@ def _coverage(means, covs, weights, obs, d_a, n_prior=8, k=16, seed=0):
         thresh = float(d_a + 3.0 * np.sqrt(2 * d_a))
 
     # Mahalanobis of every draw under every component of every neighbour's mixture.
-    chol = np.linalg.cholesky(covs.astype(np.float64))       # (n, K, d, d)
+    # Near-singular EM covariances (ESS-collapsed rows) can fail Cholesky at float
+    # tolerance; escalate a diagonal jitter far below any covariance scale that matters.
+    covs64 = covs.astype(np.float64)
+    covs64 = 0.5 * (covs64 + np.swapaxes(covs64, -1, -2))
+    jitter = 1e-9
+    while True:
+        try:
+            chol = np.linalg.cholesky(covs64 + jitter * np.eye(d_a))  # (n, K, d, d)
+            break
+        except np.linalg.LinAlgError:
+            if jitter > 1e-3:
+                raise
+            jitter *= 100.0
     inside = np.zeros((n, n_prior, kk), bool)
     for j in range(kk):
         nb = nb_idx[:, j]
