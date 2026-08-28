@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import utils.xla_guard  # noqa: F401  -- MUST precede jax (see module docstring)
 
 import hydra
+from hydra.core.hydra_config import HydraConfig
 import ml_collections
 import numpy as np
 from omegaconf import OmegaConf
@@ -101,16 +102,24 @@ def main(cfg):
     decode = record['decode_mix_mean']
     budget = float(cfg.hpo_decode_budget)
     penalty = float(cfg.hpo_penalty)
+    # Typicality hinge (assumption A2): a mixture whose draws sit far outside the prior's
+    # typical set scores coverage against latents the actor will never emit. E||u||^2 for
+    # u ~ N(0, I_d) is d, so penalize the ratio past hpo_typicality_ratio.
+    d_a = int(batch['actions'].shape[-1])
+    typ_ratio = float(record['typicality']['mean_sq_norm']) / d_a
+    typ_slack = float(cfg.hpo_typicality_ratio)
     if decode is None:  # every mixture draw decoded to NaN: worst possible setting
         cost = penalty
     else:
-        cost = -coverage + penalty * max(0.0, decode - budget)
+        cost = (-coverage + penalty * max(0.0, decode - budget)
+                + penalty * max(0.0, typ_ratio - typ_slack))
 
     trial = {'inversion': {k: inv[k] for k in ('alpha', 'prior_scale', 'n_steps',
                                                'num_samples', 'num_clusters')},
              'cost': round(float(cost), 6), 'coverage_at_kmax': coverage, **record}
     print(json.dumps(trial))
-    with open('hpo_trial.json', 'w') as f:  # hydra runs each trial in its own run dir
+    out_dir = HydraConfig.get().runtime.output_dir
+    with open(os.path.join(out_dir, 'hpo_trial.json'), 'w') as f:
         json.dump(trial, f, indent=2)
     return float(cost)
 

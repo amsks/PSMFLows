@@ -11,10 +11,13 @@ defaults:
   - override hydra/sweeper: HyperSMAC
   - _self_
 
-# Decode-error budget in action units. Cube actions are [-1,1]^5: 0.22 L2 is ~0.10/dim
-# (docs/TUNING_INVERSION.md). Re-decide per env before launching elsewhere.
+# Decode-error budget in action units, ~0.10/dim (docs/TUNING_INVERSION.md): L2 budget
+# 0.1*sqrt(d_a) -> 0.22 for cube (d_a=5), 0.28 for antmaze (d_a=8). Override per env.
 hpo_decode_budget: 0.22
 hpo_penalty: 10.0
+# Typicality hinge: penalize E||u||^2 / d_a beyond this ratio, so coverage can't be
+# bought with mixtures whose draws leave the prior's typical set (assumption A2).
+hpo_typicality_ratio: 1.1
 
 inversion:
   # Pinned at 128 for the width search: num_samples dominates coverage monotonically
