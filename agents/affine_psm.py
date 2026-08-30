@@ -97,6 +97,31 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
                           flow_t=jax.random.uniform(r_t, (B, 1)),
                           flow_noise=jax.random.normal(r_noise, (B, adim)))
 
+    # ---- action-slot seams ----
+    # The measure, the actor and the codebook all read ONE array per transition: the
+    # thing that fills M(s, ., x)'s middle slot. Here that is the dataset action. The
+    # latent subclass (agents/latent_affine_psm.py) serves the flow's preimage latent
+    # instead and decodes it back to an action only at act time, so the PSM machinery
+    # below never needs to know which space it is working in.
+
+    def _slot(self, batch):
+        """The array filling the measure's action slot for this batch."""
+        return batch["actions"]
+
+    def _slot_scale(self):
+        """Multiplier on the actor's tanh output; 1.0 keeps actions in [-1, 1]."""
+        return 1.0
+
+    def _emit(self, observations, a):
+        """Environment action for a slot value. Identity (plus the clip the acting path
+        already applied) in action space."""
+        return jnp.clip(a, -1.0, 1.0)
+
+    @staticmethod
+    def _codebook_table(rng, max_seed, dim, config):
+        """Hash-codebook lookup table: RLU draws actions uniform in [-2, 0)."""
+        return (jax.random.uniform(rng, (max_seed, dim)) - 1.0) * 2.0
+
     def measure_loss(self, batch, sampled, measure_params, w_params):
         """PSM contrastive TD loss on the affine measure M(s,a,x) = Phi(s,a,x)·w(z) + b.
 
@@ -105,7 +130,8 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         `measure_params`/`w_params` flow gradients; the target nets are stop-gradient.
         """
         c = self.config
-        obs, action, next_obs = batch["observations"], batch["actions"], batch["next_observations"]
+        obs, next_obs = batch["observations"], batch["next_observations"]
+        action = self._slot(batch)
         x = next_obs                              # the measure argument (a future state s')
         B = obs.shape[0]
         off, off_sum = off_diagonal_mask(B)       # (1 - I) mask and its sum, for the off-diagonal term
@@ -175,7 +201,7 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         goal g is the mean basis response over dataset (s,a) toward g, sqrt(d)-normalized —
         i.e. the zero_shot inference, batch-estimated. The measure is frozen here (no grad
         flows to it from the actor stage), so both actor branches share this."""
-        obs, action = batch["observations"], batch["actions"]
+        obs, action = batch["observations"], self._slot(batch)
         B = obs.shape[0]
         g = sampled.actor_goal                               # this step's goal (a future state)
         g_rep = jnp.broadcast_to(g, (B,) + g.shape)          # (B, ob_dim) broadcast to the batch
@@ -197,11 +223,12 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         Q = Phi(s,a,g)·w_g + b(s,a,g). Over training this amortizes goal-reaching across the
         whole goal/w distribution (vs the paper's from-scratch eval-time distillation)."""
         c = self.config
-        obs, action = batch["observations"], batch["actions"]
+        obs, action = batch["observations"], self._slot(batch)
         B = obs.shape[0]
         g_rep, w_g = self._goal_task_coord(batch, sampled)
         w_rep = jnp.broadcast_to(w_g, (B, c["d_dim"]))       # condition the actor on w_g
-        a = self.actor(obs, w_rep, params=actor_params)      # pi(s, w_g): tanh mean in [-1,1]
+        # tanh mean in [-1,1], rescaled to the slot's box (a no-op at scale 1.0).
+        a = self._slot_scale() * self.actor(obs, w_rep, params=actor_params)
         Q = self._goal_q(obs, a, g_rep, w_g)
         loss = -Q.mean()                                     # maximize Q -> deterministic policy gradient
         info = {"actor_loss": loss, "actor_q": Q.mean()}
@@ -224,10 +251,11 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         Q is the same frozen-measure goal Q as `actor_loss`. Differentiated w.r.t.
         (actor_params, vf_params)."""
         c = self.config
-        obs, action = batch["observations"], batch["actions"]
+        obs, action = batch["observations"], self._slot(batch)
         B = obs.shape[0]
         x0, t, noise = sampled.flow_x0, sampled.flow_t, sampled.flow_noise
         bc_coeff, steps = self._bc_coeff(), c["flow_steps"]
+        scale = self._slot_scale()
 
         def rollout(vf_p, o, n):
             """Euler-integrate the velocity field from noise n to an action (t: 0 -> 1)."""
@@ -235,7 +263,7 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
             for i in range(steps):
                 ti = jnp.full((o.shape[0], 1), i / steps)
                 a = a + self.actor_vf(o, a, ti, params=vf_p) / steps
-            return jnp.clip(a, -1.0, 1.0)
+            return jnp.clip(a, -scale, scale)
 
         # --- conditional flow matching: regress v(s, x_t, t) onto the straight-line velocity ---
         xt = (1 - t) * x0 + t * action                       # interpolant between noise and data action
@@ -245,7 +273,7 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         # --- one-step w-conditioned noise actor, scored by the frozen measure's goal Q ---
         g_rep, w_g = self._goal_task_coord(batch, sampled)
         w_rep = jnp.broadcast_to(w_g, (B, c["d_dim"]))
-        a = self.actor(obs, w_rep, noise, params=actor_params)   # NoiseConditionedActor applies tanh
+        a = scale * self.actor(obs, w_rep, noise, params=actor_params)  # tanh, rescaled to the slot box
         Q = self._goal_q(obs, a, g_rep, w_g)
         q_loss = -Q.mean()
         info = {"actor_q": Q.mean(), "bc_flow_loss": bc_flow_loss}
@@ -324,7 +352,7 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
                               hidden_layers=ic["lagrange_hidden_layers"])
         ex = dataset.sample(c["batch_size"])
         lam_params = lam_def.init(jax.random.PRNGKey(seed),
-                                  jnp.asarray(ex["observations"]), jnp.asarray(ex["actions"]),
+                                  jnp.asarray(ex["observations"]), jnp.asarray(self._slot(ex)),
                                   jnp.asarray(ex["next_observations"]))["params"]
         lam_opt = optax.adam(c["lr_w"])
         lam_state = lam_opt.init(lam_params)
@@ -371,7 +399,7 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         perm_rng = np.random.default_rng(seed)
         for _ in range(int(ic["num_inference_steps"])):
             b = dataset.sample(c["batch_size"])
-            obs = jnp.asarray(b["observations"]); act = jnp.asarray(b["actions"])
+            obs = jnp.asarray(b["observations"]); act = jnp.asarray(self._slot(b))
             xb = jnp.asarray(b["next_observations"])
             perm = perm_rng.permutation(obs.shape[0])
             xperm = xb[perm]
@@ -411,9 +439,9 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
             def loss_fn(params):
                 if flow:
                     noise = jax.random.normal(rng, (B, c["action_dim"]))
-                    a = self.actor(obs, w_rep, noise, params=params)
+                    a = self._slot_scale() * self.actor(obs, w_rep, noise, params=params)
                 else:
-                    a = self.actor(obs, w_rep, params=params)
+                    a = self._slot_scale() * self.actor(obs, w_rep, params=params)
                 Q = self._goal_q(obs, a, g_rep, self.w_inf)
                 loss = -Q.mean()
                 bc_coeff = self._bc_coeff()
@@ -429,7 +457,7 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         for _ in range(n):
             b = dataset.sample(c["batch_size"])
             rng, k = jax.random.split(rng)
-            actor, _ = step(actor, k, jnp.asarray(b["observations"]), jnp.asarray(b["actions"]))
+            actor, _ = step(actor, k, jnp.asarray(b["observations"]), jnp.asarray(self._slot(b)))
         return self.replace(actor=actor, rng=rng)
 
     def infer_w_zeroshot(self, dataset, goal, num_samples=4096):
@@ -439,11 +467,11 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         goal = jnp.asarray(goal, jnp.float32)
         # Deterministic full-array reduction when the dataset exposes its raw arrays
         # (unit-test _FakeDataset). Production ReplayBuffer has no `.obs`, so it samples.
-        if hasattr(dataset, "obs") and num_samples >= getattr(dataset, "n", 0):
+        if hasattr(dataset, "obs") and hasattr(dataset, "act") and num_samples >= getattr(dataset, "n", 0):
             obs = jnp.asarray(dataset.obs); act = jnp.asarray(dataset.act)
         else:
             b = dataset.sample(num_samples)
-            obs = jnp.asarray(b["observations"]); act = jnp.asarray(b["actions"])
+            obs = jnp.asarray(b["observations"]); act = jnp.asarray(self._slot(b))
         goal_rep = jnp.broadcast_to(goal, obs.shape[:-1] + goal.shape)
         phi, _ = self.measure(obs, act, goal_rep)
         w = phi.mean(0)
@@ -469,8 +497,8 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
             # One-step noise actor: draw the flow latent, decode, clip (mirrors agents/psm.py).
             seed = self.rng if seed is None else seed
             noise = jax.random.normal(seed, (*observations.shape[:-1], self.config["action_dim"]))
-            return jnp.clip(self.actor(observations, w, noise), -1.0, 1.0)
-        return self.actor(observations, w)
+            return self._emit(observations, self._slot_scale() * self.actor(observations, w, noise))
+        return self._emit(observations, self._slot_scale() * self.actor(observations, w))
 
     @classmethod
     def create(cls, seed, ex_observations, ex_actions, config):
@@ -544,7 +572,7 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
 
         # hash-codebook table: max_seed rows of actions in [-2, 0); pi_z looks one up per (z, s).
         max_seed = 2 ** config["max_log_seed"] + 20000
-        table = (jax.random.uniform(rproto, (max_seed, action_dim)) - 1.0) * 2.0
+        table = cls._codebook_table(rproto, max_seed, action_dim, config)
         powers = (2 ** jnp.arange(config["max_log_seed"]))[::-1].astype(jnp.float32)   # bit -> integer weights
         proto = (table.astype(jnp.float32), powers)
 

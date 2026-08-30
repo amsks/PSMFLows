@@ -71,7 +71,7 @@ def main(cfg: DictConfig):
             # re-wrap it here or it stays a plain dict when p_aug/frame_stack are set.
             val_dataset = Dataset.create(**val_dataset)
 
-    if config['agent_name'] in ('psmflow', 'latentrl'):
+    if config['agent_name'] in ('psmflow', 'latentrl', 'latent_affine_psm'):
         # These train on the preimage-augmented dataset (latents per transition).
         from utils.flow_inversion import load_augmented_dataset, repair_invalid_preimages
         assert config.get('preimage_path'), (
@@ -198,7 +198,7 @@ def main(cfg: DictConfig):
             dataset.frame_stack = cfg.frame_stack
             if config['agent_name'] == 'rebrac':
                 dataset.return_next_actions = True
-            if config['agent_name'] in ('psm', 'affine_psm'):
+            if config['agent_name'] in ('psm', 'affine_psm', 'latent_affine_psm'):
                 # The proto behavior sampler keys on the global buffer row index
                 # (reference train.py with_index). Emit it as batch['index'].
                 # WITHOUT this both agents fall back to arange(B) — i.e. BATCH POSITION —
@@ -206,7 +206,7 @@ def main(cfg: DictConfig):
                 # than of its state, and the TD bootstrap target is re-randomized on every
                 # resample. affine_psm was missing from this list.
                 dataset.return_index = True
-            if config['agent_name'] in ('psmflow', 'latentrl'):
+            if config['agent_name'] in ('psmflow', 'latentrl', 'latent_affine_psm'):
                 # Emit u_0 / u_0' per transition: either a draw from the stored EM mixture
                 # or the exact backward-ODE point, per the point-vs-mixture ablation.
                 dataset.return_preimage_noise = True

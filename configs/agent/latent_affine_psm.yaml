@@ -1,0 +1,83 @@
+agent_name: latent_affine_psm
+batch_size: 1024          # REFERENCE cube value (../Factored-FB configs/agent/psm.yaml).
+                          # Affordable only because measure.factored=true turns the B^2 mesh
+                          # into B evals + two matmuls: 6.2 ms/step vs ~1.1 s unfactored.
+                          # The old 32 was an RLU (DMC/gridworld) default — do not restore it.
+d_dim: 128                # reference z_dim (was 50, an RLU default)
+z_dim: 128                # must equal d_dim (the actor's task-coord width)
+max_log_seed: 16          # reference proto codebook width (was 12, an RLU default)
+proto_table_path: null
+discount: 0.98
+tau: 0.01                 # target soft-update rate (RLU fb_target_tau)
+lr: 1.0e-4                # measure (Phi, b) learning rate
+lr_w: 1.0e-4              # task-coordinate net (WNet) learning rate
+lr_actor: 1.0e-4         # amortized actor LR; set below the measure LR for two-timescale (e.g. 3e-5)
+ortho_coef: 1000.0        # proven Factored-FB cube recipe (run_psm_orthohi1000). Valid only
+                          # because phi is now sqrt(d)-normalized: on normed phi the ortho
+                          # diagonal term is inert and coef=1000 is a pure strong decorrelator.
+measure:
+  factored: true          # Phi(s,a,x) = A(s,a) phi_x(x) — write-up Prop. 4.3 under A5.
+                          # The unfactored trunk takes x INSIDE the net, so the B^2 mesh costs
+                          # B^2 network evals: measured 274 ms/step at B=512, ~1.1 s at B=1024
+                          # (~6 days per 500k seed). Factored it is B evals + two matmuls,
+                          # exactly like the reference's psi(s,z,a) @ phi(g)^T — which is what
+                          # makes batch_size=1024 affordable. M stays LINEAR in w, so the
+                          # constrained-LP `full` inference is unaffected.
+  k_dim: 32               # factorization rank. MUST stay well below d_dim: the A head emits
+                          # d_dim*k_dim values, so k_dim=d_dim=128 is a 1024x16384 layer
+                          # (16.8M params, 79% of the net) vs the reference psi head's 1024x128.
+  hidden_dim: 1024
+  hidden_layers: 3
+  b_scale: 10.0           # tanh-bound on the affine offset b (prevents the b-explosion)
+actor:
+  type: flow              # ddpgbc | flow. Cube/manipulation wants `flow`: the reference
+                          # (../Factored-FB) uses psm_flowbc for cube/scene/puzzle and the
+                          # deterministic actor only for antmaze/locomotion. A tanh-mean actor
+                          # trained with MSE-to-data regresses to the MEAN of multimodal cube
+                          # actions, which is not a valid action.
+  hidden_dim: 1024        # ddpgbc PSMActor width
+  hidden_layers: 1
+  embedding_layers: 2
+  bc_coeff: 3.0           # ddpgbc: MSE to the data action; flow: distillation to the ODE rollout.
+                          # 3.0 is the reference cube/manipulation value (psm_flowbc.yaml; antmaze
+                          # uses 0.3). The pre-flow ddpgbc runs used 1.0 — override to compare.
+  # --- flow actor (actor.type=flow); defaults mirror ../Factored-FB configs/agent/psm_flowbc.yaml
+  flow_steps: 10          # Euler steps for the BC-flow ODE rollout
+  lr_actor_vf: 3.0e-4     # LR for the flow velocity field
+  flow_actor_hidden_dim: 512
+  flow_actor_hidden_layers: 2
+  flow_actor_embedding_layers: 2
+  flow_vf_hidden_dim: 512
+  flow_vf_hidden_layers: 4
+inference:
+  mode: full              # full | zero_shot
+  use_dgd: true
+  inf_coeff: 5.0          # hinge weight when use_dgd=false
+  num_inference_steps: 5120   # RLU default (was 512). The factored measure needs the
+                              # full budget: its Phi is unnormalized, so w_inf moves slower.
+  lagrange_hidden_dim: 256
+  lagrange_hidden_layers: 2
+  norm_w: true
+  num_actor_inference_steps: 512   # `full` mode re-distills the amortized actor against the
+                              # SOLVED w_inf (it was trained on the closed-form w_g). 0 disables.
+ob_dims: null
+action_dim: null
+encoder: null
+
+# ---- latent action space (agents/latent_affine_psm.py) ----
+# The measure's action slot carries the flow's latent u, not the action a. The frozen
+# Stage-A flow decodes u at act time; the preimage npz supplies u for every transition.
+flow:
+  hidden_dims: [512, 512, 512, 512]     # must match the Stage-A checkpoint's shapes
+  value_hidden_dims: [512, 512, 512, 512]
+  layer_norm: false
+  critic_layer_norm: true
+flow_ckpt_path: null       # REQUIRED for real runs (dir glob, restore_agent convention)
+flow_ckpt_epoch: null
+allow_untrained_flow: false   # tests/smokes only: a random flow decodes nothing
+preimage_path: null        # REQUIRED: tools/precompute_preimages.py output npz
+use_point_preimage: true   # true = exact backward-ODE latent; false = draw from the EM mixture
+u_clip: 3.0                # typical-set clamp on every latent: u_data, the codebook and the
+                           # actor's tanh box all share it, so online and target inputs match
+gpi_decode: onestep        # onestep | ode — which decoder produces the emitted action
+flow_decode_steps: 10      # Euler steps when gpi_decode=ode
