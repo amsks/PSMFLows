@@ -1,0 +1,28 @@
+\section{Introduction}
+
+An agent that quickly adapts to a large variety of tasks in an environment needs to capture a useful representation which encodes how its behavior affects the environment and its own state within it.
+To accomplish this, various unsupervised reinforcement learning techniques such as goal-conditioned reinforcement learning, unsupervised skill learning, forward-backward representation learning, and proto successor measure approximations have been proposed.
+Recently, \citet{agarwal-rlj25a} have shown that these objectives can be unified as approximations to the successor measure, a generalization of the future state-action occupancy of an agent.
+
+Explicit successor measure approximations such as proto successor measures~\citep{agarwal-arxiv25a} and forward-backward representations~\citep{touati-neurips21a,touati2023does,trinzoni-iclr25a,bagatella-iclr26a} need to be defined with regard to a set of basis policies or tasks.
+These prior approaches have explicitly sought to obtain representations capable of representing the occupancy under all possible policies.
+However, capturing the behavior of all possible policies from a static dataset is in many cases intractable as the amount of data necessary to accomplish this is simply too large.
+Some practical approaches have therefore added ad-hoc regularization to the existing behavior foundation model framework, such as behavior cloning losses. %%AZ.8.29: citation? 
+
+ %%AZ.8.29: Need a link here explaining what's wrong with the above approaches, why should someone prefer the below.
+We establish a principled way of extracting a diverse set of well-covered basis policies from a static dataset and obtain a successor measure approximation for this dataset.
+For this, we use an expressive flow-based policy to capture the dataset distribution. 
+Following \citet{wagenmaker}, we treat the input noise of the flow model as a latent action, and define deterministic basis policies in this latent space.
+We can then treat this noise space as an unconstrained action space and any policy defined over it will stay close to the set of policies well-covered by the data.
+
+ %%AZ.8.29: the contribution of this paragraph is not coming through. Is the point that we are trying to augment the latent action dataset? What is the benefit of doing this?
+However, while flow policies allow us to define unconstrained basis policies, the data itself contains environment actions, not latent actions.
+Multiple latent actions can lead to the same environment action, and identifying these allows us to augment the dataset with all valid latent transitions.
+We therefore present an algorithm to identify a distribution over latent noise actions which are decoded by the flow policy to similar environment action.
+This technique allows us to augment the training dataset for the proto successor measures, but we believe it is also of general interest to the community for many other applications.
+To construct the noise space sets, we leverage the local invertibility of the flow model.
+We then compute a proposal distribution in the latent space and treat the set identification as a posterior inference problem.
+
+The resulting algorithm for successor measure approximation using inverted flow models and latent actions is called Proto Successor Measure Flows, a principled method for computing successor approximations over limited coverage datasets.
+We implement and validate our technique on the OGBench tasks, a goal-conditioned environment and dataset that naturally allows for testing multi-task goal-reaching capabilities of behavior foundation models.
+We show ... \todo[inline]{add results here}.

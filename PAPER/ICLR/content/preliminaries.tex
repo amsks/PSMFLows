@@ -1,0 +1,83 @@
+\section{Preliminaries}
+
+\todo[inline]{add markov boilerplate}
+
+\subsection{Markov Decision Processes and Successor Measures}
+
+For a policy \(\pi\), define the discounted successor measure
+\[
+M^\pi(s,\mathrm{d}x) = \E_\pi \left[ \sum_{t=0}^\infty \gamma^t \, \1_{\{s_t\in \mathrm{d}x\}} \;\middle|\; s_0=s \right].
+\]
+For any reward \(r:\Sspace\to\R\),
+\[ V_r^\pi(s) = \int r(x)\, M^\pi(s,\mathrm{d}x). \]
+
+Let \( \D={(s_i,a_i,s_i')}_{i=1}^N \) be a fixed offline dataset collected by an unknown behavior policy \(\mu_{\D}(a\mid s)\).  
+We want to learn SMs on \(\D\).
+
+The offline difficulty is that Bellman backups and policy extraction require action queries such as \( \max_{a'} Q(s',a'), \) which may select
+\[
+a' \notin \supp \mu_{\D}(\cdot\mid s').
+\]
+In SMs, this causes the representation to be trained or queried outside the dataset-supported action manifold.
+
+Therefore, we require a mechanism to learn successor measures $M^\pi$ for all $\pi \in \Pi_c$, where $\Pi_c$ is the set of all policies which are well covered by the dataset.
+For a policy to be ``well-covered'' we require that \todo[inline]{formalize that a state action pair visited by the policy has a high chance of being captured in the dataset}
+
+
+\subsection{The Proto Successor Measure Framework}
+
+Furthermore, setups like FB entangle "task" indicator and "policy" indicator, implicitly constraining policies to the set of all optimal policies for all tasks.
+
+PSMs represent the space of possible SMs using policy-independent basis measures:
+
+\[
+    M^\pi \approx b + P^\top w^\pi ,
+\]
+
+
+where $b$ and $P$ are sheared across policies, and \(w^\pi\) are policy-specific coordinates.
+
+For a reward $r$, policy extraction becomes: 
+\[
+    w_r^\star \in \argmax_w \langle b+P^\top w,\ r\rangle,
+\]
+subject t the constraint of \(b+P^\top w\).
+Operationally, PSM uses a hashing mechanism \( z \mapsto \pi_z \).
+
+The central problem, then, is how to construct a useful policy class \(\{\pi_z \}\) from limited-support offline data.
+
+The trick is to obtain a space in which an easy to sample distribution over $z$ directly indexes into the constrained policy space.
+
+\subsection{Behavior Cloning with Flow Policies}
+
+Train a conditional behavior flow on \(\D\). 
+For each dataset action $a$, sample
+
+\[
+    u_0  \sim p_0. \qquad u_1 = a, \qquad (s,a) \sim \D
+\]
+
+Here $u_0$ is the initial flow noise and $u_1$ is the target action.
+For $t \in [0,1]$, define
+\[
+    u_t = (1-t)u_0 + tu_1
+\]
+Th target velocity along this path is
+\[
+    \dot u_t = u_1 - u_0 = a - u_0 
+\]
+
+We train a conditional vector field 
+\[
+    v_\theta:\Sspace \times [0,1] \times \R^{d_u} \to \R^{d_u}, \qquad (s,t,u_t)\mapsto v_\theta(s,t,u_t),
+\]
+with the BC flow objective
+\[
+    \mathcal L_{\mathrm{flow}} (\theta) = \E_{(s,a) \sim \D,\ u_0\sim p_0,\ t\sim \mathrm{Unif}([0,1])}
+    \left[ \left\| v_\theta(s,t,u_t) - (u_1-u_0) \right\|_2^2 \right].
+\]
+
+At inference, givem a state $s$ and latent $u \sim p_0$, the flow is obtained by solving
+\[
+    \frac{\dd u_t}{\dd t} = v_\theta(s,t,u_t), \qquad u_{t=0}=u .
+\]
