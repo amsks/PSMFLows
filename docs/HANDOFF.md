@@ -17,8 +17,66 @@ x-/(s,a)-branch) are still the open leads if we return to it. The older bilinear
 hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RESEARCH_NOTE.md`
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
-Branch: `feat/psm-integration` · Machine: `midi-01` (UT CS)
-Date: **2026-08-14** (latest) · prior: 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+Branch: `feat/inversion-integration` · Machine: `midi-01` (UT CS)
+Date: **2026-08-29** (latest) · prior: 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+
+---
+
+<!-- _class: lead -->
+
+## 2026-08-29 — inversion HPO: cube solved and precomputed; antmaze structurally closed to width tuning
+
+Branch `feat/inversion-integration` (= main + Claas's `tuning_inversion` merge + HPO work).
+Three unpushed commits: `643d4d7` (hypersweeper+SMAC harness), `75fa57d` (typicality hinge
++ per-trial json fix), `7d635a4` (jittered Cholesky for near-singular EM covariances —
+required or every antmaze trial crashes).
+
+**What was built.** `tools/hpo_preimage_inversion.py` — single-trial SMAC target derived
+from Claas's `tools/tune_preimage_inversion.py`: inverts one fixed neighbourhood batch
+(same batch + draw seed across trials), returns
+`cost = −coverage@k64 + 10·max(0, decode_mix − budget) + 10·max(0, E‖u‖²/d_a − 1.1)`.
+Budget rule: 0.1 per action dim (cube 0.22, antmaze 0.28), config keys
+`hpo_decode_budget` / `hpo_typicality_ratio`. Sweeper config `configs/hpo_preimage.yaml`
+(SMAC BlackBox BO, 50 trials; alpha log [2,100], prior_scale [0.3,1.0], n_steps [5,20];
+num_samples pinned 128, num_clusters 1). ~65 s/trial cube, ~127 s antmaze.
+The typicality hinge exists because the first cube sweep's incumbents cheated: prior_scale
+0.30 bought coverage 0.999 at E‖u‖² ≈ 8 vs expected 5 (mixture leaves the prior).
+
+**Cube result (sweep dir `/data-local/amsks/PSMFLows/hpo/cube_20260828_000356`, log
+`cube_launch.log`, one JSON line per trial).** Feasible region comfortably non-empty:
+43/50 trials inside budget, 17 also typical. Winner after typicality filter:
+**alpha 14.1, prior_scale 0.69, n_steps 14** — coverage@64 0.990, decode 0.196,
+E‖u‖² 5.06, ESS 58/128. Beats the hand grid (0.96 @ 0.227, over budget).
+Full 1M-row precompute at exactly that setting is **DONE**:
+`/var/local/amsks/exp/PSMFLows/preimages_cube_hpo_a14p1_ps0p69_ns14_N128.npz` (+ meta),
+13/1M diverged rows reset to prior (flagged in `preimage_valid`).
+**Next pending step: recovery tests on that npz** (`tools/validate_decode_recovery.py`,
+`tools/validate_dynamics_recovery.py`, or `scripts/run_recovery_tests.sh`), then it can
+replace the shipped cube npz for mixture-mode (`use_point_preimage=false`) runs.
+
+**Antmaze result (sweep dir `.../antmaze_20260828_020557`, log `antmaze_launch.log`) —
+the important one.** Ckpt: only **antmaze-medium** exists
+(`bcflow_antmaze-medium-navigate_20260805_014546/sd000` @ 500000; no -large ckpt),
+env `antmaze-medium-navigate-singletask-v0`, d_a=8. Over 50 BO trials:
+best coverage inside budget **0.115**; best coverage of ANY trial, budget ignored,
+**0.24**; ESS 6–7/128 across every setting. Conclusion, now with search-based evidence
+rather than a grid: **no width setting makes the antmaze mixture usable — the conflict is
+structural.** The cube flow has near-flat Jacobian directions (median singular value
+0.068), so a genuine wide preimage region exists and tuning finds its width; the antmaze
+flow is near-bijective, the preimage is a point, and widening it is label noise by
+definition. This refutes the "re-run with a re-tuned alpha" hope in
+`scripts/upload_preimages_hf.py` and explains why antmaze runs use
+`use_point_preimage=true` (mixture is the default elsewhere — `psmflow.yaml:95`).
+
+**Open leads, in order.**
+1. Recovery tests on the new cube npz (above) — blocks adopting it.
+2. Jacobian probe: singular spectrum of dG/du at data points, antmaze vs cube. Cube's
+   0.068 is on record; if antmaze's is ~10× larger, the structural claim is quantified.
+3. The actual fix direction: retrain the antmaze flow so preimage SETS exist — extra
+   latent dims beyond d_a, or a decoder noise floor / entropy regularizer — then re-run
+   the same sweep. Tuning the inversion harder is ruled out; don't respend there.
+4. Housekeeping: stray `hpo_trial.json` + `smac3_output/` in repo root are pre-fix sweep
+   droppings (safe to delete / gitignore); the three commits above are unpushed.
 
 ---
 
