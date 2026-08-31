@@ -92,13 +92,46 @@ class Dataset(FrozenDict):
         self.return_preimage_noise = False  # Whether to sample preimage noise from the EM mixture; set outside the class.
         self.return_index = False  # Whether to emit the global row index as batch['index'] (PSM proto sampler); set outside the class.
         self.preimage_point_mode = False  # Serve the stored point preimage instead of mixture draws; set outside the class.
+        # Cache for _valid_preimage_rows, keyed on the size it was computed at (a
+        # ReplayBuffer grows). -1 means "not computed yet".
+        self._preimage_valid_rows = None
+        self._preimage_rows_size = -1
 
         # Compute terminal and initial locations.
         self.terminal_locs = np.nonzero(self['terminals'] > 0)[0]
         self.initial_locs = np.concatenate([[0], self.terminal_locs[:-1] + 1])
 
+    def _valid_preimage_rows(self):
+        """Rows whose stored preimage is real, or None when every row's is.
+
+        `repair_invalid_preimages` neutralizes rows whose backward ODE diverged (point
+        preimage -> u = 0, mixture -> the N(0, I) prior) so that one NaN latent cannot
+        poison an update. But u = 0 is not a missing value, it is a WRONG one:
+        G(s, 0) != a for those transitions, so training on them teaches the measure a
+        (state, latent, action) triple the frozen flow never produces. The rows are few
+        (cube 13/1M, antmaze 881/1M) and they are wrong rather than noisy, so they are
+        dropped from sampling rather than down-weighted.
+
+        Returns None when nothing is invalid, which keeps the common path untouched.
+        """
+        if self._preimage_rows_size != self.size:
+            from utils.flow_inversion import PREIMAGE_VALID_KEY  # local: avoids a cycle
+            valid = self._dict.get(PREIMAGE_VALID_KEY)
+            rows = None
+            if valid is not None:
+                ok = np.asarray(valid[:self.size]) > 0.5
+                if not ok.all():
+                    rows = np.nonzero(ok)[0]
+            self._preimage_valid_rows = rows
+            self._preimage_rows_size = self.size
+        return self._preimage_valid_rows
+
     def get_random_idxs(self, num_idxs):
         """Return `num_idxs` random indices."""
+        if self.return_preimage_noise:
+            rows = self._valid_preimage_rows()
+            if rows is not None:
+                return rows[np.random.randint(rows.size, size=num_idxs)]
         return np.random.randint(self.size, size=num_idxs)
 
     def sample(self, batch_size: int, idxs=None):
