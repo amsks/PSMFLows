@@ -34,7 +34,11 @@ EXTRA="${EXTRA:-}"
 GROUP="${GROUP:-psmflow_${ENV%%-singletask*}_$(date +%Y%m%d_%H%M%S)}"
 
 REPO=/u/amsks/git/PSMFLows
-LOCAL=/var/local/amsks
+# Where checkpoints, wandb and logs go. /var/local is a 24G node-local partition and it
+# FILLED on 2026-08-31, killing six runs mid-training with OSError errno 28; /data-local is
+# 3.5T. Override with STORE=/data-local/amsks/PSMFLows (the default stays /var/local so
+# every earlier launch line reproduces).
+LOCAL="${STORE:-/var/local/amsks}"
 PY="$REPO/.venv/bin/python"     # system `python` is 2.7 on midi-01
 mkdir -p "$LOCAL/exp" "$LOCAL/wandb" "$LOCAL/logs/$GROUP"
 
