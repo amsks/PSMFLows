@@ -1,26 +1,19 @@
 """Affine PSM over the behavior flow's LATENT action space.
 
-`agents/affine_psm.py` is the full PSM: the affine measure M(s, a, x) = Phi(s,a,x)·w +
-b(s,a,x), a basis learned against a hash codebook of policies, and the constrained-LP task
-inference the affine form makes well-defined. It operates on raw environment actions, so
-its measure is defined over the whole action space — including the actions the dataset
-never contains.
+`agents/affine_psm.py` is the full PSM — affine measure M(s,a,x) = Phi(s,a,x)·w + b(s,a,x),
+a basis learned against a hash codebook of policies, and the constrained-LP task inference
+the affine form makes well-defined. It operates on raw actions, so its measure covers the
+whole action space, including actions the dataset never contains.
 
-This agent is the same PSM with ONE substitution: the measure's action slot carries the
-flow's latent u instead of the action a, and an action is produced only at act time, by
-decoding u through the FROZEN behavior flow. Every policy the measure can express is
-therefore a flow decode and stays inside the behaviour the flow was cloned from, which is
-the constraint the extra regularizers in offline PSM/FB exist to impose.
-
-Single latent by construction: one u per transition (the Stage-B preimage), filling the
-same slot the action filled. There is no second latent — the earlier `phi(s, u_0, u_0')`
-form, which indexed the future rollout with its own latent, is not part of this agent.
+This agent makes one substitution: the measure's action slot carries the flow's latent u,
+and an action appears only at act time, by decoding u through the FROZEN behavior flow.
+Every policy the measure can express is therefore a flow decode. Single latent by
+construction — one u per transition, filling the slot the action filled.
 
 Code <-> PSM:
   measure (FactoredAffineMeasureNet)  ->  M(s, u, x) = Phi(s,u,x)·w + b(s,u,x)
   w (WNet)                            ->  task coordinate for a codebook code z
-  proto codebook                      ->  latent policies pi_z(s) = table[hash(z, s)],
-                                          drawn from the flow's own N(0, I) prior
+  proto codebook                      ->  latent policies pi_z(s) = table[hash(z, s)]
   actor                               ->  u(s, w), amortized, tanh * u_clip
   flow_vf / flow_onestep              ->  G_theta, FROZEN (FQL Stage-A checkpoint)
   batch['noise_preimage']             ->  u = E_theta(s, a), the dataset latent
@@ -50,7 +43,7 @@ class LatentAffinePSMAgent(AffinePSMAgent):
     flow_onestep_def: Any = nonpytree_field(default=None)
 
     # ---- action-slot seams (see agents/affine_psm.py) ----
-    def _slot(self, batch):
+    def measure_action(self, batch):
         """The dataset latent u = E(s, a), clipped to the typical-set box.
 
         The clip is the same one psmflow applies: the actor side is tanh-bounded to
@@ -60,10 +53,10 @@ class LatentAffinePSMAgent(AffinePSMAgent):
         return jnp.clip(jnp.asarray(batch["noise_preimage"]),
                         -self.config["u_clip"], self.config["u_clip"])
 
-    def _slot_scale(self):
+    def action_scale(self):
         return self.config["u_clip"]
 
-    def _emit(self, observations, u):
+    def to_env_action(self, observations, u):
         """Decode a latent through the FROZEN flow. This is the only place an action
         appears; everything upstream is latent-space."""
         if self.config["gpi_decode"] == "onestep":
@@ -77,19 +70,13 @@ class LatentAffinePSMAgent(AffinePSMAgent):
         return jnp.clip(a, -1.0, 1.0)
 
     @staticmethod
-    def _codebook_table(rng, max_seed, dim, config):
-        """Codebook of LATENT policies: rows drawn from the flow's own N(0, I) prior,
-        clipped to the same box as every other latent in the agent.
+    def codebook_table(rng, max_seed, dim, config):
+        """Codebook of LATENT policies, drawn from the flow's own N(0, I) prior.
 
-        RLU's table is uniform in [-2, 0) because its entries are actions. Here an entry
-        is a latent the frozen flow will decode, so the prior it was trained under is the
-        right draw — a uniform box would index policies the flow never saw.
-
-        The codebook policy is pi_z(s) = table[(z·powers + hash(s)) mod max_seed], so the
-        latent varies with the state. It is NOT a fixed-u policy: the fixed-u family was
-        measured non-goal-covering (HANDOFF 2026-08-05), and this construction avoids it
-        for the same reason the reference's does — the index selects a mapping, not a
-        constant.
+        The reference table is uniform in [-2, 0) because its entries are actions; here an
+        entry is a latent the flow will decode, so the prior it was trained under is the
+        right draw. pi_z(s) = table[(z·powers + hash(s)) mod max_seed] varies with the
+        state, so this is NOT the fixed-u family (HANDOFF 2026-08-05).
         """
         u_clip = float(config["u_clip"])
         return jnp.clip(jax.random.normal(rng, (max_seed, dim)), -u_clip, u_clip)

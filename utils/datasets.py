@@ -139,26 +139,16 @@ class Dataset(FrozenDict):
             # WARNING: This is incorrect at the end of the trajectory. Use with caution.
             result['next_actions'] = self._dict['actions'][np.minimum(idxs + 1, self.size - 1)]
         if self.return_preimage_noise:
-            # u_0 for this transition, plus u_0' for the NEXT one (the future-rollout
-            # policy index).
-            # WARNING: the "next" slot is incorrect at the end of a trajectory. Use with caution.
-            nxt = np.minimum(idxs + 1, self.size - 1)
+            # u for this transition: the exact backward-ODE preimage, or a draw from its
+            # stored EM mixture (the point-vs-mixture ablation).
             if self.preimage_point_mode:
-                # Exact backward-ODE preimages (point-vs-mixture ablation).
                 result['noise_preimage'] = self._dict['noise_preimage_point'][idxs]
-                result['next_noise_preimage'] = self._dict['noise_preimage_point'][nxt]
             else:
-                # Sample a latent noise per transition from its precomputed EM mixture.
-                from utils.flow_inversion import sample_preimage_noise  # local import to avoid a cycle
+                from utils.flow_inversion import sample_preimage_noise  # local: avoids a cycle
                 result['noise_preimage'] = sample_preimage_noise(
                     result['noise_preimage_mean'],
                     result['noise_preimage_cov'],
                     result['noise_preimage_weights'],
-                )
-                result['next_noise_preimage'] = sample_preimage_noise(
-                    self._dict['noise_preimage_mean'][nxt],
-                    self._dict['noise_preimage_cov'][nxt],
-                    self._dict['noise_preimage_weights'][nxt],
                 )
         return result
 

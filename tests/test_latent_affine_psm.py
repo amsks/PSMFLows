@@ -77,7 +77,7 @@ def test_slot_is_clipped_to_u_clip():
     agent = _agent(config)
     batch = _batch()
     batch["noise_preimage"] = batch["noise_preimage"] * 100.0
-    u = np.asarray(agent._slot(batch))
+    u = np.asarray(agent.measure_action(batch))
     assert np.abs(u).max() <= config["u_clip"] + 1e-6
 
 

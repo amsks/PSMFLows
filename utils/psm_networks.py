@@ -262,32 +262,21 @@ class AffineMeasureNet(nn.Module):
 class FactoredAffineMeasureNet(nn.Module):
     """Affine measure with a FACTORIZED basis: Phi(s,a,x) = A(s,a) phi_x(x).
 
-    This is Prop. 4.3 of the write-up (assumption A5): factorizing the basis reduces the
-    general affine form to a bilinear one that is STILL LINEAR in w, so the constrained-LP
-    `full` inference is unaffected. (Remark 4.4's warning applies to *free*-psi
-    implementations, which drop affineness in w; this is not one — A and beta are network
-    outputs, w is not.)
-
-    Why it exists: the unfactorized AffineMeasureNet takes x INSIDE the trunk, so the B^2
-    contrastive mesh costs B^2 network evaluations — measured 274 ms/step at B=512 and
-    ~1.1 s at B=1024, i.e. ~6 days per 500k-step seed. Factorized, the mesh costs B evals
-    per tower plus two matmuls, exactly like the reference's psi(s,z,a) @ phi(g)^T. That is
-    what makes batch_size=1024 (the reference cube value) affordable.
+    Write-up Prop. 4.3 (assumption A5): factorizing keeps the measure LINEAR in w, so the
+    constrained-LP `full` inference is unaffected, while the B^2 contrastive mesh costs B
+    evaluations per tower plus two matmuls instead of B^2 network evaluations. That is
+    what makes batch_size=1024 affordable (measured: 274 ms/step at B=512 unfactored).
 
         M(s,a,x) = Phi(s,a,x)·w + b(s,a,x)
                  = phi_x(x)·(A(s,a)^T w)  +  b_scale*tanh(beta(s,a)·phi_x(x))
 
     `mesh_terms` returns the per-side factors so the agent can build the (B,B) mesh with
     two matmuls; `__call__` gives the elementwise value for the actor / inference paths.
-    Both compute the SAME function — the mesh form is an algebraic regrouping, not an
-    approximation.
+    Both compute the SAME function — the mesh form is an algebraic regrouping.
 
-    Normalization follows the reference rather than the unfactored net: PhiMap normalizes
-    the x-side basis phi(g) and leaves psi free, so here psm_norm is applied to phi_x (the
-    measure-argument basis) and NOT to the product Phi. That is what keeps the mesh cheap
-    (normalizing Phi would force materializing the (B,B,d) product) and it keeps the ortho
-    regularizer's diagonal term inert, so ortho_coef=1000 stays a pure decorrelator —
-    the property configs/agent/affine_psm.yaml relies on. Apply ortho to phi_x, not Phi.
+    psm_norm is applied to phi_x, NOT to the product Phi: that follows the reference
+    (which normalizes phi(g) and leaves psi free), keeps the mesh cheap, and leaves the
+    ortho regularizer's diagonal term inert so ortho_coef=1000 stays a pure decorrelator.
     """
 
     d_dim: int
