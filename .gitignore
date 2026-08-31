@@ -36,3 +36,9 @@ wandb/
 # latent_reachability, ...). Curated figures live in assets/ and PAPER/ and stay tracked.
 /*.png
 .mypy_cache/*
+
+# HPO run artifacts. The harness is tracked (tools/hpo_preimage_inversion.py,
+# configs/hpo_preimage.yaml); its output is not — SMAC's state dir and the per-trial
+# JSON belong in the sweep directory under $PSM_DATA/hpo, not in the repo.
+smac3_output/
+hpo_trial.json
