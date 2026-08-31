@@ -85,12 +85,36 @@ def main(cfg):
         states.append(np.asarray(ob, dtype=np.float32))
     states = jnp.asarray(np.stack(states))
 
-    def Q(obs_b, u_b):
-        wb = jnp.broadcast_to(w, (obs_b.shape[0], *w.shape))
-        qpsi = agent.psi(obs_b, wb, u_b)
-        Qs = (qpsi * w).sum(-1)
-        qmean, qunc = targets_uncertainty(Qs, agent.config['num_parallel'])
-        return qmean - agent.config['actor_pessimism_penalty'] * qunc
+    latent_index = agent.config.get('policy_index') == 'latent'
+    has_actor = bool(agent.config.get('train_actor', True))
+
+    if latent_index:
+        # psi(s, u', u): score a candidate u as GPI does -- max over a fixed panel of
+        # policy-index draws u' ~ p0 (pessimism inside, max outside, mirroring
+        # gpi_select's latent branch). The panel is fixed per probe run so Q is a
+        # deterministic function of (s, u).
+        N_IDX = 16
+        u_idx_panel = jnp.clip(
+            jax.random.normal(jax.random.PRNGKey(SEED + 1), (N_IDX, d_a)),
+            -u_clip, u_clip)
+
+        def Q(obs_b, u_b):
+            n = obs_b.shape[0]
+            obs_r = jnp.repeat(obs_b, N_IDX, axis=0)
+            u_r = jnp.repeat(u_b, N_IDX, axis=0)
+            idx_r = jnp.tile(u_idx_panel, (n, 1))
+            qpsi = agent.psi(obs_r, idx_r, u_r)
+            Qs = (qpsi * w).sum(-1)
+            qmean, qunc = targets_uncertainty(Qs, agent.config['num_parallel'])
+            q = qmean - agent.config['actor_pessimism_penalty'] * qunc
+            return q.reshape(n, N_IDX).max(axis=-1)
+    else:
+        def Q(obs_b, u_b):
+            wb = jnp.broadcast_to(w, (obs_b.shape[0], *w.shape))
+            qpsi = agent.psi(obs_b, wb, u_b)
+            Qs = (qpsi * w).sum(-1)
+            qmean, qunc = targets_uncertainty(Qs, agent.config['num_parallel'])
+            return qmean - agent.config['actor_pessimism_penalty'] * qunc
 
     rng = jax.random.PRNGKey(SEED)
 
@@ -102,9 +126,16 @@ def main(cfg):
         u_prior = jnp.clip(jax.random.normal(k1, (N_DRAWS, d_a)), -u_clip, u_clip)
         q_prior = np.asarray(Q(s_rep, u_prior))
 
-        u_a = u_clip * agent.actor(states[i][None],
-                                   jnp.broadcast_to(w, (1, *w.shape)),
-                                   jax.random.normal(k2, (1, d_a)))
+        if has_actor:
+            u_a = u_clip * agent.actor(states[i][None],
+                                       jnp.broadcast_to(w, (1, *w.shape)),
+                                       jax.random.normal(k2, (1, d_a)))
+        else:
+            # No actor (paper-faithful arm): the deployed pick is gpi_select. Scored
+            # against FRESH prior draws (q_prior above), so its percentile measures
+            # whether the ranking transfers across draws rather than being 1.0 by
+            # construction.
+            u_a = agent.gpi_select(states[i], seed=k2)[None]
         q_a = float(np.asarray(Q(states[i][None], u_a))[0])
 
         u_ball = jnp.clip(u_a + BALL_SIGMA * jax.random.normal(k3, (N_DRAWS, d_a)),
@@ -151,21 +182,25 @@ def main(cfg):
         leaves = jax.tree_util.tree_leaves(g)
         return float(jnp.sqrt(sum((jnp.sum(x ** 2) for x in leaves))))
 
-    norms = {k: [] for k in ('q', 'distill', 'bc_flow', 'total')}
-    for _ in range(N_GRAD_BATCHES):
-        rng, k = jax.random.split(rng)
-        b = train.sample(config['batch_size'])
-        sampled = agent.sample_step_inputs(b, k)
-        for key in norms:
-            norms[key].append(term_grads(b, sampled, key))
-    grads = {f'grad_norm_{k}': float(np.mean(v)) for k, v in norms.items()}
-    grads['q_share_of_total'] = grads['grad_norm_q'] / (
-        grads['grad_norm_q'] + grads['grad_norm_distill'] + grads['grad_norm_bc_flow'])
-    grads['n_batches'] = N_GRAD_BATCHES
+    if has_actor:
+        norms = {k: [] for k in ('q', 'distill', 'bc_flow', 'total')}
+        for _ in range(N_GRAD_BATCHES):
+            rng, k = jax.random.split(rng)
+            b = train.sample(config['batch_size'])
+            sampled = agent.sample_step_inputs(b, k)
+            for key in norms:
+                norms[key].append(term_grads(b, sampled, key))
+        grads = {f'grad_norm_{k}': float(np.mean(v)) for k, v in norms.items()}
+        grads['q_share_of_total'] = grads['grad_norm_q'] / (
+            grads['grad_norm_q'] + grads['grad_norm_distill'] + grads['grad_norm_bc_flow'])
+        grads['n_batches'] = N_GRAD_BATCHES
+    else:
+        grads = {'skipped': 'train_actor=false -- no actor loss exists on this arm',
+                 'q_share_of_total': None}
 
     # ---- (iii) does the actor's dispersion shrink over training? -------------------
     dispersion = {}
-    for ep in DISPERSION_EPOCHS:
+    for ep in DISPERSION_EPOCHS if has_actor else []:
         if not os.path.exists(os.path.join(str(cfg.restore_path), f'params_{ep}.pkl')):
             continue
         a = build(ep)
@@ -176,10 +211,12 @@ def main(cfg):
 
     spread = landscape['q_relative_spread_prior_mean']
     ratio = landscape['q_relative_spread_local_mean'] / (spread + 1e-12)
+    qshare = grads.get('q_share_of_total')
+    qshare_txt = f'{qshare:.3f}' if qshare is not None else 'n/a (no actor)'
     if spread < 0.05:
         verdict = (f'H2 supported: Q is flat over the latent -- relative spread {spread:.4f} '
                    f'of |Q| across 512 prior draws. The actor loss is owned by its BC terms '
-                   f'(q-term gradient share {grads["q_share_of_total"]:.3f}), so the policy '
+                   f'(q-term gradient share {qshare_txt}), so the policy '
                    f'is latent behaviour cloning with pessimism, not value improvement.')
     elif ratio < 0.3:
         verdict = (f'H3 supported: Q has relief globally ({spread:.3f}) but is flat around '
