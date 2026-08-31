@@ -35,3 +35,4 @@ wandb/
 # Diagnostic figures the tools drop in the repo root (viz_*, calibration_check,
 # latent_reachability, ...). Curated figures live in assets/ and PAPER/ and stay tracked.
 /*.png
+.mypy_cache/*

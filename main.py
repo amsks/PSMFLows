@@ -71,13 +71,28 @@ def main(cfg: DictConfig):
             # re-wrap it here or it stays a plain dict when p_aug/frame_stack are set.
             val_dataset = Dataset.create(**val_dataset)
 
-    if config['agent_name'] in ('psmflow', 'latentrl'):
+    if config['agent_name'] in ('psmflow', 'latentrl', 'latent_affine_psm'):
         # These train on the preimage-augmented dataset (latents per transition).
         from utils.flow_inversion import load_augmented_dataset, repair_invalid_preimages
         assert config.get('preimage_path'), (
             f"{config['agent_name']} requires agent.preimage_path "
             "(tools/precompute_preimages.py)")
         aug = load_augmented_dataset(config['preimage_path'])
+        # Read the sidecar before the size check so a sampled tuning batch reports its own
+        # cause. `+preimage_sample` npz files cover a random subset of the buffer and are
+        # scoring artifacts for tools/tune_preimage_inversion.py, never training inputs;
+        # without this they fail the row count below and read as "wrong env or stale file".
+        _meta_path = str(config['preimage_path']) + '.meta.json'
+        _meta = {}
+        if os.path.exists(_meta_path):
+            with open(_meta_path) as f:
+                _meta = json.load(f)
+        assert not _meta.get('sampled_batch'), (
+            f"preimage npz {config['preimage_path']!r} is a SAMPLED BATCH "
+            f"(sample_mode={_meta.get('sample_mode')!r}, k={_meta.get('sample_k')}, "
+            f"{_meta.get('num_transitions')} rows): a tuning artifact covering a random "
+            'subset of the buffer, not a training input. Regenerate the chosen setting '
+            'without +preimage_sample (use dataset_fraction to shrink the run instead).')
         assert aug['observations'].shape[0] == train_dataset['observations'].shape[0], (
             'preimage npz size mismatch vs env dataset — wrong env or stale file?')
         # Pairing guard: latents are only meaningful for the EXACT flow that produced them.
@@ -86,10 +101,9 @@ def main(cfg: DictConfig):
         # otherwise train the whole representation on another flow's latents with no
         # symptom except bad results.
         import glob as _glob
-        meta_path = str(config['preimage_path']) + '.meta.json'
+        meta_path = _meta_path
         if os.path.exists(meta_path):
-            with open(meta_path) as f:
-                meta = json.load(f)
+            meta = _meta
             assert meta.get('env_name') == cfg.env_name, (
                 f"preimage npz was computed on {meta.get('env_name')!r}, not {cfg.env_name!r}")
             ckpt = config.get('flow_ckpt_path')
@@ -119,6 +133,25 @@ def main(cfg: DictConfig):
             elif float(cfg.get('dataset_fraction', 1.0)) != 1.0:
                 print('WARNING: preimage sidecar predates dataset_fraction recording and '
                       'this run subsamples; relying on the content spot-check below.')
+            # WHICH TARGET the mixture was fitted to. prior_scale=0 is the pre-2026-08-14
+            # likelihood-only target, whose fits leave the prior's typical set (measured:
+            # per-dim variance 3.68 and latents 3.10 from the point inverse on pointmaze,
+            # against 0.096 / 0.428 at prior_scale=1). The point arm is the backward ODE
+            # and is unaffected, so this only bites when the run actually reads the
+            # mixture — which is exactly the case nothing else here checks.
+            _ps = (meta.get('inversion') or {}).get('prior_scale')
+            if not config.get('use_point_preimage', False):
+                assert _ps is not None and float(_ps) > 0.0, (
+                    f'preimage npz was inverted at prior_scale={_ps} (legacy '
+                    'likelihood-only target) but this run reads the MIXTURE '
+                    '(use_point_preimage=false). Those fits sit outside the prior the '
+                    'latent actor samples from. Regenerate at inversion.prior_scale=1.0, '
+                    'or set agent.use_point_preimage=true.')
+            elif _ps is None or float(_ps) == 0.0:
+                # Sidecars written before 08-14 have no prior_scale key at all; absent
+                # means the legacy target, same as an explicit 0.0.
+                print(f'NOTE: preimage npz uses the legacy prior_scale={_ps} mixture, but '
+                      'this run reads point preimages only — the mixture arrays are unread.')
         else:
             print('WARNING: preimage npz has no .meta.json sidecar; cannot verify it '
                   'matches agent.flow_ckpt_path — proceed only if you are sure.')
@@ -165,7 +198,7 @@ def main(cfg: DictConfig):
             dataset.frame_stack = cfg.frame_stack
             if config['agent_name'] == 'rebrac':
                 dataset.return_next_actions = True
-            if config['agent_name'] in ('psm', 'affine_psm'):
+            if config['agent_name'] in ('psm', 'affine_psm', 'latent_affine_psm'):
                 # The proto behavior sampler keys on the global buffer row index
                 # (reference train.py with_index). Emit it as batch['index'].
                 # WITHOUT this both agents fall back to arange(B) — i.e. BATCH POSITION —
@@ -173,7 +206,7 @@ def main(cfg: DictConfig):
                 # than of its state, and the TD bootstrap target is re-randomized on every
                 # resample. affine_psm was missing from this list.
                 dataset.return_index = True
-            if config['agent_name'] in ('psmflow', 'latentrl'):
+            if config['agent_name'] in ('psmflow', 'latentrl', 'latent_affine_psm'):
                 # Emit u_0 / u_0' per transition: either a draw from the stored EM mixture
                 # or the exact backward-ODE point, per the point-vs-mixture ablation.
                 dataset.return_preimage_noise = True

@@ -1,11 +1,11 @@
-"""PSMFlow agent — latent-space PSM over a frozen behavior flow.
+"""PSMFlow agent — measure learning in a frozen behavior flow's latent action space.
 
-Redesigned 2026-08-05 (PAPER/decisions.tex, first entry): the original Rung-1 semantics
-indexed policies by a FIXED latent u' and bootstrapped psi(s', u', u') — faithful to a
-family that is structurally non-goal-covering (fixed-u policies are orbiters or
-tanh-saturated constant headings; expert routes are latent white noise). This version is
-PSM transposed to the flow's latent space: policy identity lives in the task vector w,
-actions live in latent space, and the deployed action is always a flow decode.
+Policy identity lives in the task vector w, actions live in the flow's latent space, and
+the deployed action is always a flow decode, so every policy stays inside the cloned
+behaviour. NOTE the measure branch below is FB-shaped (single branch, basis trained
+against the task head) rather than PSM's proto/sf split; see docs/HANDOFF.md 2026-08-30.
+The earlier fixed-u policy family it replaced was measured non-goal-covering
+(HANDOFF 2026-08-05).
 
 Code <-> write-up:
   phi (PhiMap)            -> varphi(x)        shared basis over future states
@@ -71,18 +71,17 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
     target_psi: Any
     actor: TrainState       # amortized LATENT actor (s, w, noise) -> u (flowBC recipe)
     actor_vf: TrainState    # CFM velocity field over preimage latents (the actor's BC anchor)
-    # Idea-1 action branch (config action_critic.enabled, default false): a SECOND
-    # successor-feature head over EXECUTED ACTIONS, psi_a(s, w, a), sharing phi and the
-    # w-machinery, plus a bounded residual head delta(s, w, u). Zero-shot port of the W4
-    # residual result: Q_a = psi_a^T w gives the value-directed gradient a latent critic
-    # cannot (Q(s,u) = Q(s, G(s,u)) is flat in u when the decode is narrow), and the
-    # executed action a = G(s,u) + eps*delta stays within an eps budget of the decode.
+    # Action branch (config action_critic.enabled, default false): a second
+    # successor-feature head over EXECUTED actions, psi_a(s, w, a), sharing phi and the
+    # w-machinery, plus a bounded residual delta(s, w, u). Q_a = psi_a^T w supplies the
+    # value-directed gradient a latent critic cannot when the decode is narrow; the
+    # executed action a = G(s,u) + eps*delta stays within eps of the decode.
     psi_a: TrainState
     target_psi_a: Any
     residual: TrainState
-    # P2 FB graft (config action_critic.fb_graft, default false): the action branch's OWN
-    # backward map B_a -- the basis psi_a's measure is written against and the source of
-    # w_a. Created always so the pytree is static; trained only when the graft is on.
+    # FB graft (config action_critic.fb_graft, default false): the action branch's own
+    # backward map B_a, the basis psi_a's measure is written against and the source of w_a.
+    # Always created so the pytree stays static; trained only when the graft is on.
     phi_a: TrainState
     target_phi_a: Any
     flow_vf: Any        # FROZEN params: multi-step BC velocity field (ODE decode)
@@ -106,9 +105,9 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         phi_g = self.phi(goal, params=phi_params)
         M = self.psi(obs, w, u, params=psi_params) @ phi_g.T
         tphi = self.phi(goal, params=self.target_phi)
-        # Bootstrap action = the ACTOR's latent at s' (PSM sf_loss's sf_next_action,
-        # transposed to latent space). This is where policy improvement enters the
-        # measure: the continuation is pi_w, not a fixed-u orbit (decisions.tex 08-05).
+        # Bootstrap action = the ACTOR's latent at s' (PSM sf_loss's sf_next_action in
+        # latent space): the continuation is pi_w, which is where policy improvement
+        # enters the measure.
         tM = self.psi(next_obs, w, u_next, params=self.target_psi) @ tphi.T
         tmean, tunc = targets_uncertainty(tM, P)
         target_M = tmean - c["pessimism_penalty"] * tunc
@@ -121,17 +120,13 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
     def sample_step_inputs(self, batch, rng):
         c = self.config
         B, adim = batch["observations"].shape[0], c["action_dim"]
-        # Clip u_data: `u_clip` is the typical-set clamp on ALL latent draws, and the
-        # bootstrap side only ever sees tanh-bounded actor latents. Leaving u_data raw
-        # gives the online branch inputs the target branch never sees, and the stored EM
-        # mixtures are broad enough for that to be catastrophic: sampled |u| reaches 377
-        # per-dim on pointmaze (43% of rows exceed u_clip), which drove psm_offdiag from
-        # ~300 to 3.5e7 and left psm_diag flat. Clipping restores train/target
-        # consistency; it does NOT fix the underlying mixture calibration.
+        # u_clip is the typical-set clamp on EVERY latent here: the bootstrap side is a
+        # tanh-bounded actor latent, so an unclipped u_data would hand the online branch
+        # inputs the target branch can never produce (HANDOFF 2026-08-05).
         u_data = jnp.clip(jnp.asarray(batch["noise_preimage"]), -c["u_clip"], c["u_clip"])
-        # Task vector w, shared by measure + actor branches: Gaussian, with a mix_ratio
-        # fraction replaced by project_z(phi(next_obs[perm])) — PSM's sample_mixed_z.
-        # stop_gradient: sampling must not shape the basis.
+        # Task vector w, shared by the measure and actor branches: Gaussian, with a
+        # mix_ratio fraction replaced by phi(next_obs[perm]) — PSM's sample_mixed_z.
+        # Sampling must not shape the basis, hence stop_gradient.
         r_w, r_wmix, r_wperm, r_next, r_x0, r_t, r_noise = jax.random.split(rng, 7)
         gauss_w = project_z(jax.random.normal(r_w, (B, c["z_dim"])), c["norm_z"])
         wperm = jax.random.permutation(r_wperm, B)
@@ -139,31 +134,23 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
                            c["norm_z"])
         wmask = (jax.random.uniform(r_wmix, (B,)) < c["mix_ratio"])[:, None]
         task_w = jnp.where(wmask, goal_w, gauss_w)
-        # TD bootstrap action: the actor's latent at s' under task_w (PSM's flow-mode
-        # sf_next_action). NoiseConditionedActor is tanh-bounded; scale to the u box.
+        # TD bootstrap: the actor's latent at s' under task_w (PSM's sf_next_action),
+        # tanh-bounded and scaled to the u box.
         u_next = c["u_clip"] * self.actor(batch["next_observations"], task_w,
                                           jax.random.normal(r_next, (B, adim)))
-        # Backup exploration (default off). The backup otherwise only ever evaluates the
-        # actor's own latent, so psi is fit on the slice of latent space the actor already
-        # occupies — measured on cube at 500k, Q then varies by ~1% of |Q| across the whole
-        # prior, which is too flat for the -Q term to say anything (D3). Replacing a
-        # fraction of bootstrap latents with prior draws makes the backup evaluate the
-        # family it is supposed to be a measure over. Prior draws stay in-support: they
-        # decode through the same frozen flow, so C=1 is untouched.
-        #
-        # The extra keys are drawn INSIDE the branch, and `frac` is a static config value,
-        # so at the default 0.0 every random draw above keeps the key it had before this
-        # feature existed — the published runs stay bit-reproducible.
+        # Backup exploration (default off): replace a fraction of bootstrap latents with
+        # prior draws, so psi is fit over the whole latent family rather than the slice
+        # the actor already occupies. Keys are drawn inside the branch, so at frac=0 the
+        # random stream is unchanged.
         if c["backup_explore_frac"] > 0.0:
             r_expl, r_emask = jax.random.split(r_next)
             u_prior = jnp.clip(jax.random.normal(r_expl, (B, adim)),
                                -c["u_clip"], c["u_clip"])
             emask = (jax.random.uniform(r_emask, (B,)) < c["backup_explore_frac"])[:, None]
             u_next = jnp.where(emask, u_prior, u_next)
-        # P2 FB graft: the action branch gets its OWN task vector, sampled against its own
-        # backward map B_a exactly as FB samples z against B (Gaussian mixed with
-        # B_a(next_obs[perm]) at mix_ratio). Keys are folded out of `rng` inside the
-        # branch, so with the graft off not one draw above changes.
+        # FB graft (default off): the action branch gets its own task vector, sampled
+        # against its own backward map B_a the way FB samples z against B. Keys are folded
+        # out of `rng` inside the branch, so with the graft off no draw above changes.
         task_w_a = task_w
         if c["action_critic"]["fb_graft"]:
             r_wa, r_wamix, r_waperm = jax.random.split(jax.random.fold_in(rng, 104), 3)
@@ -181,20 +168,15 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             task_w_a=task_w_a)
 
     def flow_actor_loss(self, batch, sampled, actor_params, vf_params):
-        """flowBC actor (fb_flowbc recipe), transposed to LATENT space.
+        """flowBC actor (fb_flowbc recipe) with the action space replaced by latents.
 
-        Same three terms as agents/psm.py:flow_actor_loss, with the action space
-        replaced by the flow's latent space:
-          - CFM velocity field v(s, x_t, t) trained toward the dataset PREIMAGE latents
-            u_data — the latent-space behavior distribution. (Under an exact flow this is
-            N(0, I) everywhere; measured, it is not — D3 — which is exactly why the BC
-            anchor is worth learning rather than assuming.)
-          - one-step NoiseConditionedActor(s, w, noise) -> tanh * u_clip, distilled from
-            the vf's Euler rollout.
-          - Q term: psi(s, w, u_a)^T w — the task-w value of emitting latent u_a now —
-            with ensemble pessimism (PSM's flow_actor_loss, action slot = latent).
-        psi is read at fixed params (no gradient); the frozen flow is untouched. Deployed
-        action = flow decode of the actor's latent, so it stays data-like by construction.
+        Three terms, as in agents/psm.py:flow_actor_loss:
+          - CFM velocity field v(s, x_t, t) toward the dataset latents u_data (the
+            latent-space behavior distribution, which is measurably not N(0, I));
+          - a one-step actor(s, w, noise) -> tanh * u_clip, distilled from its rollout;
+          - Q = psi(s, w, u_a)^T w with ensemble pessimism.
+        psi is read at fixed params and the frozen flow is untouched, so the deployed
+        action stays a flow decode.
         """
         c = self.config
         obs = batch["observations"]
@@ -263,17 +245,10 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         t_next = self.psi_a(next_obs, w, jax.lax.stop_gradient(a_next),
                             params=self.target_psi_a)
         tmean, tunc = targets_uncertainty(t_next, c["num_parallel"])
-        # Pessimism in Q-SPACE, not per-feature. psi_a predicts a VECTOR of successor
-        # features and the task value is Q = psi_a^T w with w of mixed sign, so
-        # subtracting a per-feature spread (what targets_uncertainty returns here) shifts
-        # Q by -pessimism * unc^T w, an expression whose SIGN depends on w: on every
-        # feature where w is negative the "penalty" RAISES the target. The knob was
-        # therefore optimistic on half the basis and is not a lower bound on anything.
-        # Instead blend the ensemble mean toward the member the task itself values least
-        # -- a genuine per-sample pessimistic estimate of Q for this w -- with
-        # `pessimism` as the blend weight lambda in [0, 1]. At lambda = 0 (the default,
-        # and every run to date) this is exactly the ensemble mean, i.e. bit-identical to
-        # the previous expression.
+        # Pessimism in Q-space, not per-feature: a per-feature spread shifts Q by
+        # -pessimism * unc^T w, whose sign flips wherever w < 0, so it raised the target
+        # on half the basis. Blend the ensemble mean toward the member this task values
+        # least instead; at lambda = 0 (the default) this is the plain ensemble mean.
         q_next = (t_next * w[None]).sum(-1)                                  # (P, B)
         worst = jnp.argmin(q_next, axis=0)                                   # (B,)
         t_worst = jnp.take_along_axis(t_next, worst[None, :, None], axis=0)[0]
@@ -286,20 +261,15 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
                       "ac_feature_unc": tunc.mean()}
 
     def action_critic_fb_loss(self, batch, sampled, psi_a_params, phi_a_params):
-        """P2 FB graft: train (psi_a, B_a) as a self-contained FB pair over EXECUTED actions.
+        """FB graft: train (psi_a, B_a) as a self-contained FB pair over EXECUTED actions.
 
-        The audit's one structural deviation is that phi is trained by a pessimistic,
-        actor-bootstrapped, proto-branch-less loss unlike every working implementation, and
-        w is inferred THROUGH that phi — so the hybrid's compass is built on a basis no
-        reference recipe produced. This severs that dependency for the action branch only:
         B_a(s') is the branch's own backward map, trained by the FB measure loss verbatim
-        (contrastive off-diag/diag against the discounted target measure + ortho on B_a, no
-        pessimism, FB's tau on the target), and w_a is inferred from B_a. psi_u / phi / w_u
-        keep training exactly as before and act for the latent actor; only delta and Q_a
-        move to (psi_a, w_a).
+        (contrastive off-diag/diag + ortho on B_a, no pessimism, FB's target tau), and w_a
+        is inferred from it — so delta and Q_a stop depending on the shared basis phi.
+        phi / psi / w keep training as before for the latent actor. No gradient crosses
+        between this branch and the shared measure in either direction.
 
-        Reads phi_a's params only through `phi_a_params` and the target, so no gradient
-        crosses between this branch and the shared measure in either direction.
+        Result on record: this FAILED its gate (deployed 0.064 vs a 0.45 bar).
         """
         c = self.config
         ac = c["action_critic"]

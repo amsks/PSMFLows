@@ -1,0 +1,57 @@
+# HPO over the preimage-inversion width knobs with hypersweeper + SMAC BO.
+# Primary config for tools/hpo_preimage_inversion.py; composes the normal run config and
+# swaps the sweeper. Launch with -m (multirun) to sweep; without -m it scores the
+# baseline `inversion` settings once.
+#
+# Objective (see the tool): cost = -coverage@k + hpo_penalty * max(0, decode - budget).
+# num_samples and num_clusters stay pinned (configs/inversion/default.yaml): num_samples
+# dominates monotonically and just buys coverage with compute; num_clusters=1 is settled.
+defaults:
+  - config
+  - override hydra/sweeper: HyperSMAC
+  - _self_
+
+# Decode-error budget in action units, ~0.10/dim (docs/TUNING_INVERSION.md): L2 budget
+# 0.1*sqrt(d_a) -> 0.22 for cube (d_a=5), 0.28 for antmaze (d_a=8). Override per env.
+hpo_decode_budget: 0.22
+hpo_penalty: 10.0
+# Typicality hinge: penalize E||u||^2 / d_a beyond this ratio, so coverage can't be
+# bought with mixtures whose draws leave the prior's typical set (assumption A2).
+hpo_typicality_ratio: 1.1
+
+inversion:
+  # Pinned at 128 for the width search: num_samples dominates coverage monotonically
+  # (0.53 -> 0.96 at 32 -> 128) and its cost is linear, so sweeping it would let the
+  # optimizer buy coverage with compute instead of finding the width frontier.
+  num_samples: 128
+
+hydra:
+  sweeper:
+    n_trials: 50
+    sweeper_kwargs:
+      max_parallelization: 0.0  # strictly sequential: trials share the in-process cache
+      optimizer_kwargs:
+        smac_facade: ${get_class:smac.facade.blackbox_facade.BlackBoxFacade}
+        scenario:
+          n_trials: 50
+          deterministic: true
+          seed: 0
+    search_space:
+      seed: 0
+      hyperparameters:
+        inversion.alpha:
+          type: uniform_float
+          lower: 2.0
+          upper: 100.0
+          log: true
+          default_value: 20.0
+        inversion.prior_scale:
+          type: uniform_float
+          lower: 0.3
+          upper: 1.0
+          default_value: 1.0
+        inversion.n_steps:
+          type: uniform_int
+          lower: 5
+          upper: 20
+          default_value: 10

@@ -93,8 +93,8 @@ def test_save_load_roundtrips_augmented_dataset(tmp_path):
         np.testing.assert_array_equal(back[k], ds[k])
 
 
-def test_batch_exposes_u0_and_u0prime():
-    """Task 3 (WP1): a sampled batch carries u_0 (noise_preimage) and u_0' (next_noise_preimage)."""
+def test_batch_exposes_u0():
+    """A sampled batch carries the transition's latent u (noise_preimage)."""
     from utils.datasets import Dataset
     from utils.flow_inversion import augment_dataset_with_preimage_distribution
 
@@ -116,9 +116,7 @@ def test_batch_exposes_u0_and_u0prime():
     d.return_preimage_noise = True
     b = d.sample(8)
     assert b['noise_preimage'].shape == (8, 2)
-    assert b['next_noise_preimage'].shape == (8, 2)
     assert np.all(np.isfinite(b['noise_preimage']))
-    assert np.all(np.isfinite(b['next_noise_preimage']))
 
 
 def test_em_posterior_ess_is_finite():

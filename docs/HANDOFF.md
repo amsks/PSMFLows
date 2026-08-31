@@ -17,8 +17,226 @@ x-/(s,a)-branch) are still the open leads if we return to it. The older bilinear
 hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RESEARCH_NOTE.md`
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
-Branch: `feat/psm-integration` · Machine: `midi-01` (UT CS)
-Date: **2026-08-14** (latest) · prior: 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+Branch: `feat/inversion-integration` · Machine: `midi-01` (UT CS)
+Date: **2026-08-30** (latest) · prior: 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+
+---
+
+<!-- _class: lead -->
+
+## 2026-08-30 — the agent we have been running is FB, not PSM; the preimage is exact for a decoder we never use
+
+Two things came out of reading the ICLR draft against the code, and one port followed.
+
+### The draft describes a method we are not running
+
+`PAPER/ICLR` was re-added this session (skeleton: prewriting form + intro + preliminaries
++ a working-notes method section; `experiments.tex` and `related-work.tex` are empty, the
+abstract is template text). Audited claim by claim against the run record:
+
+- **Basis policies.** The draft defines `Pi = {G(s, u_0) | u_0 ~ p_0}` — fix `u_0` and hold
+  it. That family was measured non-goal-covering on 08-05 (0/233 fixed-u policies reach the
+  pointmaze goal). Everything that works uses per-step latent selection.
+- **Preimage sets.** The draft's second contribution is identifying the DISTRIBUTION of
+  latents decoding to the same action and augmenting the dataset with it. Against that: the
+  width diagnostic on all three environments says the fitted mixture is a blurred point (far
+  in `u` AND faithful in `a` peaks at 3.4% pointmaze, 0.7% antmaze). For that claim the cube
+  is the open case — the 08-29 sweep found coverage@64 0.990 inside budget with near-flat
+  Jacobian directions, which is the opposite reading. The Jacobian probe settles it.
+- **No tuned regularizer.** The pitch is that the latent parameterization removes the
+  pessimism/BC knobs. In practice the per-task result depends on a tuned residual budget
+  (eps=0.05 -> 0.905 +/- 0.020 over 3 seeds; eps=0 -> 0.142 +/- 0.025 over 2) and the
+  collapse forensics traced failure to a pessimism spiral.
+- **Not in the draft at all:** the hybrid action critic + residual, which carries the only
+  limited-coverage evidence we have (10% data: deployed 0.238 vs FB 0.030).
+
+### `psmflow` is FB with a latent action space
+
+`agents/psm.py` — the one pinned to the torch reference by weight transplant
+(`tests/test_psm_agent_equiv.py`, 5 passed) — has two measure branches: `proto_loss` learns
+the basis against a hash codebook of policies, and `sf_loss` fits the task head on a FROZEN
+basis with ONLINE phi in the target ("matching the reference").
+
+`agents/psmflow.py:96 measure_loss` has one branch: `M = psi(s,w,u) @ phi(s')^T`, ortho on
+phi, phi trained by that same contrastive term, target from `target_psi` and `target_phi`,
+`w` Gaussian mixed with `phi(next_obs[perm])`, `w = E[r phi]`. That is `agents/fb.py:49
+_fb_loss_fn` line for line with F->psi, B->phi, a->u. No codebook basis, no affine `b`, no
+constrained-LP inference.
+
+This was a deliberate call — `docs/design/2026-07-20-psmflow-v1-design.md:89`: "One branch
+only — PSM's proto/sf split collapses: the flow family IS the codebook." That held under
+Rung-1, where the fixed-`u` family WAS the codebook. The 08-05 redesign moved policy
+identity to `w` and made the bootstrap the actor's latent, which removed the codebook;
+nothing re-derived the argument afterwards. The code is reference-faithful — to FB.
+
+### The preimage is exact for a decoder the agent never uses
+
+New measurement, 4096 rows of the cube HPO npz, same Stage-A checkpoint:
+
+| latent | decode distance to `a`, ODE-100 | one-step decoder |
+|---|---:|---:|
+| stored point preimage | **0.00012** | **0.0886** |
+| stored mixture mean | 0.1153 | 0.1495 |
+| prior draw N(0, I) | — | 0.2855 |
+
+Mean `||a||` = 0.875. The inversion solves `G_100(s,u) = a` and `precompute_preimages.py`
+asserts `inversion.n_initial_steps == agent.flow_steps` to keep it exact — but every psmflow
+run sets `gpi_decode: onestep`, so acting and training go through the distilled one-step net.
+Under that decoder the "exact" latent misses by 0.0886, ~10% of action scale and comparable
+to the mixture width the HPO spent 50 trials tuning (cube winner decode_mix 0.196). Still
+3.2x better than a prior draw, so the latent carries real information — but the point arm is
+NOT the noise-free control the point-vs-mixture ablation treats it as. Fix: invert at the
+one-step decoder, or act at `flow_decode_steps=100`.
+
+Two smaller integration findings:
+
+- `utils/datasets.py:141-161` computes `next_noise_preimage` (u_0') on every batch and NO
+  agent reads it — a Rung-1 leftover. In mixture mode it doubles the per-step mixture
+  sampling (numpy Cholesky over B rows) on the training path. The `idx+1` pairing rule, its
+  "incorrect at the end of a trajectory" warning, and the guard it forced into `main.py`
+  all exist for that dead field.
+- `preimage_valid` is computed and diverged rows are repaired (mixture -> prior, point -> 0)
+  but the mask never excludes them from the loss: a point-arm row reset to `u=0` decodes to
+  `G(s,0)` and trains as a legitimate pair. cube 13/1M, antmaze 881/1M.
+
+What is solid: the pairing guards (env, ckpt realpath, epoch, `dataset_fraction` + seed,
+`prior_scale > 0` whenever the mixture is read, first/last-1k row content check), `u_clip`
+keeping online and target inputs on one support, per-visit mixture resampling, and `infer_z`
+identical to the reference-verified `psm.py`.
+
+### Ported: PSM into the latent action space (single latent)
+
+`agents/latent_affine_psm.py` (commit `db96e48`). `LatentAffinePSMAgent(AffinePSMAgent)`
+inherits the whole PSM — affine `M(s,u,x) = Phi(s,u,x).w + b(s,u,x)`, `WNet`, the codebook
+basis branch, the constrained-LP `infer_w_goal` and closed-form `infer_w_zeroshot`, the
+amortized actor — and substitutes the action slot for the flow's latent. Four overrides:
+`_slot` (the clipped `noise_preimage`), `_slot_scale` (`u_clip`), `_emit` (decode through
+the frozen flow — the only place an action exists), and `_codebook_table` (codebook policies
+are latents drawn from the flow's own N(0, I) prior, still keyed on the row hash so `pi_z`
+varies with the state and is NOT the fixed-u family).
+
+`agents/affine_psm.py` gained those four seams and routes all nine action-slot reads through
+them; its defaults leave behaviour unchanged, and all five affine test modules still pass
+(smoke 6, networks 3, inference 5, flow 9, factored 8). New `tests/test_latent_affine_psm.py`
+(7 passed) includes the load-bearing one: negating `batch['actions']` leaves the measure loss
+bit-identical while shifting `noise_preimage` moves it. End-to-end smoke on the real cube npz
+ran 200 steps plus LP inference, actor distillation and eval.
+
+Open on the port: no HP tuning (it inherits affine PSM's raw-action cube values);
+`inference.mode` defaults to `full`, i.e. a 5120-step LP at every eval, untested in latent
+space against `zero_shot`; and no BC control yet, without which no number is quotable.
+
+### The Jacobian probe refutes the 08-29 structural claim
+
+`tools/diag_flow_jacobian.py` (new): singular spectrum of dG(s, .)/du at each transition's
+OWN preimage — the point the inversion solved for, so the numbers describe the region the
+mixture is fitted in. 2048 rows per environment, `flow_steps=100`, reports at
+`/data-local/amsks/PSMFLows/logs/jacobian_{cube,antmaze}.json`.
+
+| | cube (d_a 5, mean ||a|| 0.87) | antmaze (d_a 8, mean ||a|| 1.99) |
+|---|---:|---:|
+| sigma pooled, median | 0.083 | 0.201 |
+| sigma_min, median | 0.068 | 0.050 |
+| sigma_max, median | 0.117 | 0.325 |
+| condition number, median | 1.79 | 6.67 |
+| free radius in u for a 0.05 action move | 0.73 | 1.00 |
+| rows dropped (inverse diverged) | 0 / 2048 | 5 / 2048 |
+
+The 08-29 entry read cube's 0.068 as evidence of near-flat directions and inferred antmaze
+must be near-bijective. **Both halves are wrong.** Cube's condition number is 1.79 and its
+spectrum runs 0.068-0.117: a near-ISOTROPIC contraction by ~0.1 with no null direction —
+the same object the 08-14 width diagnostic described ("a near-uniform contraction sigma
+~ 0.07, which is injective"). And antmaze's smallest singular value is SMALLER than cube's
+with a LARGER free radius, so locally antmaze has more latent slack per unit of action
+change, not less.
+
+The cube/antmaze split therefore is NOT local injectivity, and "cube has a preimage set,
+antmaze has a point" should not be written down. Coverage@64 is a global property — where
+prior draws land relative to the data — and antmaze differs on two axes this probe cannot
+reach: 8 action dims instead of 5, and actions of twice the norm, so a fixed decode budget
+is spread thinner. Whatever explains antmaze's 0.115 coverage and ESS 7/128 is still open;
+the Jacobian is now excluded, and lead 2 of the 08-29 entry is closed negative.
+
+### In flight
+
+- **Cube mixture arm**, 3 seeds, `psmflow_mixture_hpo_20260829`, tmux `mix_sd0/1/2`: the
+  first runs to use the HPO npz with `use_point_preimage=false`. Point arms of the old and
+  new npz are bit-identical, so the 5-seed 0.236 +/- 0.071 is an exact control. Prediction on
+  record: no better than 0.236, because mixture draws sit 1.38 in `u` from the point inverse.
+- **Antmaze precompute**, queued behind them (tmux `pre_antmaze_queued`) at the best trial of
+  the 50 (alpha 11.55, prior_scale 0.489, n_steps 5): ~13.5 h. Run to be safe, but its own
+  sweep says coverage@64 0.115 and decode_mix 0.263 vs decode_pt 0.0002, against a working
+  point-arm number of 0.220 +/- 0.005 (3 seeds, BC control 0.090).
+
+### Also this session
+
+- `PAPER/` untracked from `main`, `feat/psm-integration` and `feat/inversion-integration`
+  (tip removal only; history keeps it), then the ICLR skeleton re-added — it builds clean
+  with latexmk, 6 pages, one undefined citation (`wagenmaker`).
+- `utils/log_utils.py`: wandb 0.29 rejects `start_method` / `_disable_stats` through
+  pydantic, so every run died in `setup_wandb` before training. Commit `d634b63`.
+
+---
+
+<!-- _class: lead -->
+
+## 2026-08-29 — inversion HPO: cube solved and precomputed; antmaze structurally closed to width tuning
+
+Branch `feat/inversion-integration` (= main + Claas's `tuning_inversion` merge + HPO work).
+Three unpushed commits: `643d4d7` (hypersweeper+SMAC harness), `75fa57d` (typicality hinge
++ per-trial json fix), `7d635a4` (jittered Cholesky for near-singular EM covariances —
+required or every antmaze trial crashes).
+
+**What was built.** `tools/hpo_preimage_inversion.py` — single-trial SMAC target derived
+from Claas's `tools/tune_preimage_inversion.py`: inverts one fixed neighbourhood batch
+(same batch + draw seed across trials), returns
+`cost = −coverage@k64 + 10·max(0, decode_mix − budget) + 10·max(0, E‖u‖²/d_a − 1.1)`.
+Budget rule: 0.1 per action dim (cube 0.22, antmaze 0.28), config keys
+`hpo_decode_budget` / `hpo_typicality_ratio`. Sweeper config `configs/hpo_preimage.yaml`
+(SMAC BlackBox BO, 50 trials; alpha log [2,100], prior_scale [0.3,1.0], n_steps [5,20];
+num_samples pinned 128, num_clusters 1). ~65 s/trial cube, ~127 s antmaze.
+The typicality hinge exists because the first cube sweep's incumbents cheated: prior_scale
+0.30 bought coverage 0.999 at E‖u‖² ≈ 8 vs expected 5 (mixture leaves the prior).
+
+**Cube result (sweep dir `/data-local/amsks/PSMFLows/hpo/cube_20260828_000356`, log
+`cube_launch.log`, one JSON line per trial).** Feasible region comfortably non-empty:
+43/50 trials inside budget, 17 also typical. Winner after typicality filter:
+**alpha 14.1, prior_scale 0.69, n_steps 14** — coverage@64 0.990, decode 0.196,
+E‖u‖² 5.06, ESS 58/128. Beats the hand grid (0.96 @ 0.227, over budget).
+Full 1M-row precompute at exactly that setting is **DONE**:
+`/var/local/amsks/exp/PSMFLows/preimages_cube_hpo_a14p1_ps0p69_ns14_N128.npz` (+ meta),
+13/1M diverged rows reset to prior (flagged in `preimage_valid`).
+**Next pending step: recovery tests on that npz** (`tools/validate_decode_recovery.py`,
+`tools/validate_dynamics_recovery.py`, or `scripts/run_recovery_tests.sh`), then it can
+replace the shipped cube npz for mixture-mode (`use_point_preimage=false`) runs.
+
+**Antmaze result (sweep dir `.../antmaze_20260828_020557`, log `antmaze_launch.log`) —
+the important one.** Ckpt: only **antmaze-medium** exists
+(`bcflow_antmaze-medium-navigate_20260805_014546/sd000` @ 500000; no -large ckpt),
+env `antmaze-medium-navigate-singletask-v0`, d_a=8. Over 50 BO trials:
+best coverage inside budget **0.115**; best coverage of ANY trial, budget ignored,
+**0.24**; ESS 6–7/128 across every setting. Conclusion, now with search-based evidence
+rather than a grid: **no width setting makes the antmaze mixture usable — the conflict is
+structural.** The cube flow has near-flat Jacobian directions (median singular value
+0.068), so a genuine wide preimage region exists and tuning finds its width; the antmaze
+flow is near-bijective, the preimage is a point, and widening it is label noise by
+definition. **[SUPERSEDED 2026-08-30: the Jacobian probe refutes this. Cube's 0.068 is its
+sigma_MIN; the spectrum is 0.068-0.117, condition number 1.79, i.e. an isotropic contraction
+with no flat direction, and antmaze's sigma_min is SMALLER at 0.050. The conclusion that no
+width setting works on antmaze stands on the sweep; the structural explanation offered for
+it does not.]** This refutes the "re-run with a re-tuned alpha" hope in
+`scripts/upload_preimages_hf.py` and explains why antmaze runs use
+`use_point_preimage=true` (mixture is the default elsewhere — `psmflow.yaml:95`).
+
+**Open leads, in order.**
+1. Recovery tests on the new cube npz (above) — blocks adopting it.
+2. Jacobian probe: singular spectrum of dG/du at data points, antmaze vs cube. Cube's
+   0.068 is on record; if antmaze's is ~10× larger, the structural claim is quantified.
+3. The actual fix direction: retrain the antmaze flow so preimage SETS exist — extra
+   latent dims beyond d_a, or a decoder noise floor / entropy regularizer — then re-run
+   the same sweep. Tuning the inversion harder is ruled out; don't respend there.
+4. Housekeeping: stray `hpo_trial.json` + `smac3_output/` in repo root are pre-fix sweep
+   droppings (safe to delete / gitignore); the three commits above are unpushed.
 
 ---
 

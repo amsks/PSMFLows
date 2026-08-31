@@ -1,0 +1,30 @@
+\section{The space of policies indexed by $u$}
+
+To define a set of restricted policy spaces, we will now define policies over the set of initial noise variables $u_0$ sampled from the flow prior as $\Pi = \{G_\theta(s,u_0)|u_0 \sim p_0\}$.
+
+This set is not equal to the set of all well-covered policies, importantly any policy that resamples $u_0$ at every step is also a valid flow policy under the data.
+However, representing this would require a significantly larger set of latent variables.
+
+We can now train a PSM approximation as $\phi(s,u_0,u'_0)^T\psi(s^+)$. Note that $\phi$ takes two $u$ as an input: one as the current state action, and one that is the index of the future rollout.
+Obtaining a meaningful $u_0$ from dataset samples $(s,a,s')$ requires us to invert the flow policy (which seems feasible given the recent literature \url{https://arxiv.org/pdf/2605.10821})\footnote{We probably want to expand this, because this just generates one noise sample for each action, but we want all noise samples which give us a similar action, so we need to add some noise, and maybe a forward correction pass.}.
+
+The interpretation of $\phi(s,u_0,u_0')$ is now as the feature for a taking action $a=G_\theta(s,u_0)$ and then following $\pi = G_\theta(s,u_0')$ afterwards.
+
+\section{Policy inference}
+
+Given a task expressed via weights $w$, we can now run a constrained Q learning procedure to obtain a Q function for \textbf{any} well-covered mixture policy without leaving the $z$ space in which all of our actions remain in distribution.
+We need to solve for the following recursive function on the dataset (again, generating $u_0$ from provided actions)
+\begin{align}
+    Q^*(s,u_0,w) = \max_{u'_0} \left(\phi(s,u_0,u_0') - \gamma \phi(s',u_0',u_0')\right)^\top w + \gamma Q^*(s',u_0',w)
+\end{align}
+
+In principle $\left(\phi(s,u_0,u_0') - \gamma \phi(s',u_0',u_0')\right)^\top w$ should actually be independent of $u_0'$ if I'm not completely mistaken because it is simply the one step occupancy / one step reward? This would simplify the problem to a standard Q learning problem:
+
+\begin{align}
+    Q^*(s,u_0,w) = \left(\phi(s,u_0,u_0) - \gamma \phi(s',u_0,u_0)\right)^\top w + \max_{u'_0} \gamma Q^*(s',u_0',w).
+\end{align}
+
+We can solve for this Q function and essentially obtain a latent noise DSRL style critic for free. Now finally we need to sample initial noise to maximize $Q^*$ for the final policy.
+We can even use Haoran's technique here in the z space!
+
+Alternatively, we can train Q on intermediate noise samples as well $u_t$ for $t\in[0,1]$, and use the Q function instead as a steering approach. 

@@ -112,7 +112,8 @@ def subsample_episodes(dataset_dict, fraction, seed=0):
 
 
 def make_env_and_datasets(env_name, frame_stack=None, action_clip_eps=1e-5,
-                          dataset_fraction=1.0, dataset_fraction_seed=0):
+                          dataset_fraction=1.0, dataset_fraction_seed=0,
+                          add_info=False):
     """Make offline RL environment and datasets.
 
     Args:
@@ -121,14 +122,21 @@ def make_env_and_datasets(env_name, frame_stack=None, action_clip_eps=1e-5,
         action_clip_eps: Epsilon for action clipping.
         dataset_fraction: Keep this fraction of training episodes (episode-level, seeded).
         dataset_fraction_seed: RNG seed for the episode subsample.
+        add_info: Keep OGBench's simulator-state keys ('qpos', 'qvel', 'button_states') in
+            the datasets. They are row-aligned with `observations` and are what
+            `set_state` needs to put the simulator back at a recorded transition.
+            OGBench drops them by default.
 
     Returns:
         A tuple of the environment, evaluation environment, training dataset, and validation dataset.
     """
 
+    assert not (add_info and 'singletask' not in env_name), (
+        f'add_info is an OGBench-only option; {env_name!r} carries no qpos/qvel')
+
     if 'singletask' in env_name:
         # OGBench.
-        env, train_dataset, val_dataset = ogbench.make_env_and_datasets(env_name)
+        env, train_dataset, val_dataset = ogbench.make_env_and_datasets(env_name, add_info=add_info)
         eval_env = ogbench.make_env_and_datasets(env_name, env_only=True)
         env = EpisodeMonitor(env, filter_regexes=['.*privileged.*', '.*proprio.*'])
         eval_env = EpisodeMonitor(eval_env, filter_regexes=['.*privileged.*', '.*proprio.*'])

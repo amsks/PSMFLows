@@ -87,9 +87,6 @@ def test_dataset_point_mode(tmp_path):
     idxs = np.arange(5)
     batch = d.sample(5, idxs=idxs)
     np.testing.assert_array_equal(batch["noise_preimage"], aug["noise_preimage_point"][idxs])
-    np.testing.assert_array_equal(
-        batch["next_noise_preimage"], aug["noise_preimage_point"][np.minimum(idxs + 1, N - 1)]
-    )
 
     d2 = Dataset.create(**aug)
     d2.return_preimage_noise = True  # mixture mode (default)
