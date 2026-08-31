@@ -1,5 +1,43 @@
 num_clusters: 1
-# Inverse temperature of the preimage target pi(u) ~ exp(-alpha*||G(s,u) - a||).
+# Inverse temperature of the preimage target pi(u) ~ exp(-alpha*||G(s,u) - a||^2).
+#
+# RETUNED 2026-08-31, and every number below the next divider is from the OLD un-squared
+# target exp(-alpha*||G - a||) with the alpha^2 Laplace covariance. Both were corrected on
+# 2026-08-31 (agents/fql.py: squared L2 at :116/:201, covariance 2*alpha J^T J at :88), so
+# every alpha tuned against the old form -- including the 20.0 this file used to carry --
+# means something different now and cannot be read across. Existing mixture npz files were
+# written under the old form; they are not invalidated as files, but their alpha does not
+# transfer. The point arm (use_point_preimage=true), which carries every shipped result,
+# is untouched by all of this.
+#
+# Sweep under the CORRECTED target, 256 rows, seed 0, flow_steps=100, num_samples=200,
+# prior_scale=1.0, on the cube and antmaze Stage-A checkpoints:
+#
+#              cube                              antmaze
+#   alpha    ESS  decode_mix  cov_k16      ESS  decode_mix  cov_k16
+#   20 OLD  112.9     0.1682    0.890      8.8      0.1758    0.016   <- old target
+#      20   131.7     0.2224    0.945     16.4      0.2964    0.258
+#      50   132.6     0.1747    0.897     18.8      0.2023    0.064
+#     100   133.1     0.1365    0.807     19.1      0.1464    0.007
+#     200   136.1     0.1021    0.580     20.4      0.1042    0.002
+#     400   139.1     0.0749    0.249     20.2      0.0730    0.000
+#     800   138.2     0.0546    0.066     19.2      0.0521    0.000
+#    1600   137.9     0.0395    0.013     16.2      0.0361    0.000
+#    3200   137.0     0.0252    0.003     10.2      0.0261    0.000
+#
+# ESS and decode error both improve with alpha while COVERAGE collapses: raising alpha
+# shrinks the mixture toward the point preimage, which is the same "the mixture is a
+# blurred point, its width is temperature" finding the width sweeps reached. So alpha is a
+# position on a frontier, not an optimum to be found.
+#
+# 50.0 is chosen as the matched-fidelity analogue of the old operating point: it reproduces
+# the old decode error and coverage on cube (0.175/0.897 vs 0.168/0.890) while ESS goes
+# 112.9 -> 132.6, and on antmaze it more than doubles ESS (8.8 -> 18.8) and quadruples
+# coverage (0.016 -> 0.064) for slightly worse decode (0.176 -> 0.202). Pick a different
+# point on the table if a regeneration wants fidelity over coverage.
+#
+# ---- everything below is from the OLD un-squared target; kept for provenance ----
+#
 # At alpha=1 the target is far broader than the proposal: near the preimage
 # ||G(s,u) - a|| ~ sigma*||u - u*|| with sigma = ||d(action)/d(noise)|| ~ 0.1 (median
 # singular value 0.068 on the Stage-A cube ckpt), so the target's width in u-space is
@@ -49,7 +87,7 @@ num_clusters: 1
 # than the prior, worst case 3.8e4, with means out at |mu| = 206). Set 0.0 only to
 # regenerate a legacy file. Changing it invalidates existing preimage npz files.
 prior_scale: 1.0
-alpha: 20.0
+alpha: 50.0            # see the frontier table above; retuned for the squared target
 num_samples: 200
 n_steps: 10
 n_initial_steps: 100

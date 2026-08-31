@@ -67,12 +67,19 @@ class FQLAgent(flax.struct.PyTreeNode):
         """Local Gaussian proposal (mean, cov) for the preimage of `action`.
 
         cov is the Laplace covariance of the target
-        pi(x) ~ N(x; 0, I)^prior_scale * exp(-alpha*||flow(x)-action||) around the
-        preimage: (alpha^2 J^T J + prior_scale*I)^{-1}. Larger alpha (lower temperature)
+        pi(x) ~ N(x; 0, I)^prior_scale * exp(-alpha*||flow(x)-action||^2) around the
+        preimage: (2*alpha J^T J + prior_scale*I)^{-1}. Larger alpha (lower temperature)
         => tighter proposal.
 
+        The 2*alpha (not alpha^2) is the second derivative of the SQUARED-norm target:
+        exp(-alpha ||J d||^2) = exp(-1/2 d^T (2 alpha J^T J) d). The code carried
+        alpha^2 against an un-squared norm, a pairing that matches neither target; at the
+        production alpha=20 it made the proposal 10x too narrow in well-conditioned
+        directions. Every alpha tuned against the old un-squared target, and every mixture
+        npz written under it, is invalidated by this change.
+
         The prior term is what bounds the proposal from above: without it the covariance
-        is (1/alpha^2)(J^T J)^{-1}, which diverges along the directions the flow map
+        is (1/(2*alpha))(J^T J)^{-1}, which diverges along the directions the flow map
         flattens (small singular values of J), and the old code capped it by clipping the
         eigenvalues at 1.0 instead. Clipping puts the proposal at exactly the prior's width
         in those directions while the target it is proposing FOR is the posterior, which is
@@ -84,8 +91,8 @@ class FQLAgent(flax.struct.PyTreeNode):
         eigvals, eigvecs = jnp.linalg.eigh(gram)
         # positional bounds: jax removed the a_min/a_max kwargs (broke on jax 0.10). The
         # bounds stay as guards; at prior_scale=1 the upper one is already implied, since
-        # (alpha^2 lambda + 1)^{-1} <= 1 for every eigenvalue.
-        cov_eigvals = jnp.clip(1.0 / (alpha ** 2 * eigvals + prior_scale), 0.01, 1.0)
+        # (2*alpha lambda + 1)^{-1} <= 1 for every eigenvalue.
+        cov_eigvals = jnp.clip(1.0 / (2.0 * alpha * eigvals + prior_scale), 0.01, 1.0)
         cov = (eigvecs * cov_eigvals[None, :]) @ eigvecs.T
         return x_0, cov
     
@@ -113,7 +120,7 @@ class FQLAgent(flax.struct.PyTreeNode):
             rng, sample_rng = jax.random.split(rng)
             samples, log_prob = prop_dist.sample_and_log_prob(seed=sample_rng, sample_shape=(num_samples,))
             actions = self.compute_flow_actions(state_b, noises=samples, skills=skills_b)
-            dist = alpha * jnp.linalg.norm(actions - action[None], axis=-1)
+            dist = alpha * jnp.sum((actions - action[None]) ** 2, axis=-1)
             log_prior = -0.5 * prior_scale * jnp.sum(samples ** 2, axis=-1)
             # Same exposure as the EM variant: the flow diverges to NaN when integrated
             # from a tail sample at flow_steps>=100, and one NaN makes the whole softmax
@@ -198,7 +205,7 @@ class FQLAgent(flax.struct.PyTreeNode):
             actions = self.compute_flow_actions(state_b, noises=samples, skills=skills_b)
             # log pi = log prior + log likelihood, up to a constant: the -||x||^2/2 term is
             # the flow's N(0, I) latent prior (agents/fql.py actor_loss draws x_0 from it).
-            log_energy = (-alpha * jnp.linalg.norm(actions - action[None], axis=-1)
+            log_energy = (-alpha * jnp.sum((actions - action[None]) ** 2, axis=-1)
                           - 0.5 * prior_scale * jnp.sum(samples ** 2, axis=-1))
 
             log_likelihoods = jax.vmap(
