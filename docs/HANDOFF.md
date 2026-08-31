@@ -18,7 +18,109 @@ hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RES
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
 Branch: `feat/inversion-integration` · Machine: `midi-01` (UT CS)
-Date: **2026-08-30** (latest) · prior: 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+Date: **2026-08-31** (latest) · prior: 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+
+---
+
+<!-- _class: lead -->
+
+## 2026-08-31 — oracle-aim: the reachable set is fine (0.934), the loss is ranking; paper-faithful arms are training
+
+Plan and pre-registered readings: `docs/plans/2026-08-31-interface-fork-experiments.md`.
+Everything below is cube unless stated. Table regeneration: commit `8e89d76`.
+
+### The audit that set this up
+
+A three-way audit of code vs the formal writeup (`git show 5249267:PAPER/main.tex`)
+found the shipped agent replaced both hypotheses of Prop. "insample" (C=1): the
+bootstrap latent is the actor's (`psmflow.py:139`), and the ψ index slot carries the
+task vector, not a policy latent (`psmflow.py:106,111`). So every negative Stage-C
+number to date tested latent-space FB, not the paper's construction. Three inversion
+bugs also surfaced and are now FIXED (commits `313948e`, `3ef0afe`): the likelihood
+norm was un-squared, the Laplace proposal used α²JᵀJ instead of the spec's 2αJᵀJ
+(10× too narrow at α=20), and `preimage_valid` never reached sampling (u=0-repaired
+rows trained on wrong pairs). Validation at matched fidelity: cube ESS 112.9 → 132.6,
+antmaze ESS 8.8 → 18.8 with coverage 0.016 → 0.064 — the ESS collapse was partly this
+bug, not purely d_a=8 geometry; antmaze mixture remains short of usable. Default alpha
+retuned 20 → 50 with a frontier table in `configs/inversion/default.yaml`. All mixture
+npz files and both 08-28 HPO sweeps predate the fix and measure the old target.
+
+### E1 — oracle-aim rollout (`tools/diag_oracle_aim.py`, 500 ep, K=512, ODE-100)
+
+Execute, at each step, the decoded prior latent closest to a frozen FQL expert's
+action. **oracle-aim 0.934 [0.909, 0.953]** against the expert's own 0.960 [0.939,
+0.974]; random-latent floor 0.086 (consistent with the BC control). Mean min-distance
+to the expert action over K=512: 0.062. Pre-registered fork: ≥0.7 ⇒ **cannot aim** —
+the flow's reachable action set contains near-expert behavior and the entire Stage-C
+loss is latent *selection*. No flow retraining is indicated by this number; the target
+is a critic that can rank.
+
+### E2 — ODE re-eval of the 5 shipped checkpoints (post-P0.2 seeding, 500 ep × 5 seeds)
+
+| arm | one-step | ODE-100 |
+|---|---|---|
+| actor | 0.220 ± 0.037 | 0.182 ± 0.019 |
+| gpi | 0.054 ± 0.032 | 0.044 ± 0.043 |
+
+Exact decode helps nowhere (slightly worse everywhere; even the random-latent floor
+drops, 0.086 → 0.014). The one-step distilled decoder is exonerated as a loss source;
+its 0.0886 preimage decode error stays a bookkeeping caveat only. The re-measured
+one-step control (0.220 ± 0.037) supersedes the pre-seeding-fix 0.236 ± 0.071 for
+comparisons; sd0's recorded 0.318 is not reproducible post-fix (0.240).
+
+### E3 — paper-faithful arms (training today; results below when evals land)
+
+Arm A: `backup_explore_frac=1.0` — the exact `u′~p₀` bootstrap, all else shipped
+config, acting=actor, 3 seeds. Arm B: `policy_index=latent` — ψ(s, u, u′) with a
+fresh prior policy-index latent, `train_actor=false`, acting=gpi, 3 seeds. Both point
+arm, pessimism 0.5, flags verified from the runs' own flags.json. Pre-registered:
+Arm A alone likely within noise of 0.22 (a correct backup does not create ranking
+signal by itself); Arm B is the first number Prop. insample applies to — clear FB's
+0.721 and the mechanism is demonstrated; land ~0.2 and the C=1 construction is
+refuted on its own terms on a field where E1 proves a winning selection exists.
+
+### Arm results at step 250k (training was torn down externally at ~16:40; 500k finals do not exist)
+
+All six arm trainers stopped at ~16:40 with tmux sessions removed and no note; last
+checkpoints are at 250k (armA sd0-2, armB sd0). armA sd2's params_250000.pkl was
+mid-write at the kill and is truncated — unrecoverable, so Arm A is a 2-seed number.
+armB sd1/sd2 died before their first checkpoint and were relaunched to 250k
+(`psmflow_paperfaith_armB_relaunch_20260831`, slowed ~10x by GPU contention; their
+evals follow separately). Everything below is
+**at-step-250k, not final** — but the shipped agent's own in-loop curves were flat by
+250k, so these are read as strong signal, weak proof.
+
+| arm | 500-ep success | seeds |
+|---|---|---|
+| Arm A (u'~p0 bootstrap, actor acting) | 0.189 ± 0.089 (0.196 / 0.182) | 2 |
+| Arm B (psi(s,u,u'), no actor, gpi K=64) | **0.006** [0.002, 0.018] | 1 |
+| Arm B floor control: same path, gpi_num_u=1 (random pick) | 0.080 [0.041, 0.150] (100 ep) | 1 |
+
+- **Arm A = the pre-registered null.** The correct backup distribution alone lands
+  inside the shipped agent's noise band (control 0.220 ± 0.037). A right backup does
+  not create ranking signal.
+- **Arm B anti-selects.** The K=1 control proves the eval path sound (0.080 ≈ the
+  0.086 random-latent floor); letting the critic pick among 64 candidates drops
+  success 13x below random. Probes on the same checkpoint agree:
+  - D3 (adapted for latent index, `d3_q_landscape_armB_ep250k.json`): Q relative
+    spread over 512 prior draws **0.0092** of |Q| — flatter than the shipped agent's
+    0.011. H2 again.
+  - D1-analog (`d1a_latent_ranking_armB_ep250k.json`, new
+    `tools/diag_latent_ranking_oracle.py`): Spearman of psi-ranking vs FQL-oracle
+    distances over the same K=128 candidates: **0.079** mean (old D1: 0.10, chance).
+    The critic's argmax sits 0.359 from the oracle action when 0.086 was available
+    in the candidate set — worse than the median candidate (0.265).
+- Reading, per the pre-registration: at 250k the C=1 construction shows **no ranking
+  signal and active anti-selection** — the failure mode survives the paper-faithful
+  bootstrap and index. Caveats before calling it refuted: half-trained, one seed,
+  and the E2 finding that gpi acting under-performs even for the shipped agent.
+  The honest verdict gate is the relaunched-seed evals plus (if pursued) a 500k
+  retrain; but nothing in these numbers points at the bootstrap/index substitutions
+  as the missing ingredient, and everything continues to point at the critic's
+  inability to rank latents — now measured directly against an oracle over the very
+  candidate set it deploys on.
+
+
 
 ---
 
