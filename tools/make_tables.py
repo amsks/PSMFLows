@@ -49,7 +49,47 @@ HEADLINE = [
     ("Hybrid + FB graft, decode-only control", "zero-shot",
      ["eval500_fbgraft_sd?_decodeonly.json"]),
     ("Behavior-cloning control (per-step prior)", "control", ["eval500_bcflow_cube.json"]),
+    # E2 (08-31): same 5 checkpoints re-evaluated post-P0.2 seeding, one-step vs ODE-100.
+    ("PSMFlow re-eval, actor, one-step decode", "zero-shot", ["e2_onestep_actor_sd?.json"]),
+    ("PSMFlow re-eval, actor, exact ODE-100 decode", "zero-shot", ["e2_ode_actor_sd?.json"]),
+    ("PSMFlow re-eval, gpi, one-step decode", "zero-shot", ["e2_onestep_gpi_sd?.json"]),
+    ("PSMFlow re-eval, gpi, exact ODE-100 decode", "zero-shot", ["e2_ode_gpi_sd?.json"]),
+    # E3 (08-31): paper-faithful arms; epoch recorded per-file in table_dataset_fraction.json.
+    ("Paper-faithful Arm A (u'~p0 bootstrap)", "zero-shot", ["eval500_paperfaith_armA_sd?*.json"]),
+    ("Paper-faithful Arm B (psi(s,u,u'), no actor, gpi)", "zero-shot",
+     ["eval500_paperfaith_armB_sd?*.json"]),
 ]
+
+# Static provenance notes appended to the markdown table.
+NOTES = [
+    "The FB-graft rows aggregate every `eval500_fbgraft_sd?_*.json` present; the "
+    "previously quoted single-seed 0.064 predates sd0's JSONs landing (08-14 23:05).",
+    "sd0 headline evals recorded before the P0.2 eval-seeding fix are not exactly "
+    "reproducible (sd0 re-eval 0.240 vs recorded 0.318); the E2 re-eval rows are the "
+    "post-fix measurement of the same checkpoints and supersede the PSMFlow headline "
+    "row for comparisons.",
+    "E1 oracle-aim (below) is a diagnostic, not an agent: an oracle picks among K=512 "
+    "decoded prior latents using a frozen FQL expert's action.",
+]
+
+
+def e1_section(logs):
+    """-> markdown block for the E1 oracle-aim report, or '' if absent."""
+    path = os.path.join(logs, "e1_oracle_aim_cube_sd0.json")
+    if not os.path.exists(path):
+        return ""
+    with open(path) as f:
+        d = json.load(f)
+    lines = ["\n## E1 oracle-aim (tools/diag_oracle_aim.py, 500 ep, K=512, ODE-100 decode)\n",
+             "| Arm | Success | Wilson 95% |", "|---|---|---|"]
+    for arm, r in d.get("arms", {}).items():
+        lo, hi = r.get("wilson95", [None, None])
+        lines.append(f"| {arm} | {r['success']:.3f} | [{lo:.3f}, {hi:.3f}] |")
+    md = d.get("aim_distance", {}).get("min_over_K", {})
+    if md:
+        lines.append(f"\nMean min-distance to the oracle action over K: {md['mean']:.3f} "
+                     f"(p90 {md['p90']:.3f}). Verdict: {d.get('fork_branch', 'n/a')}.")
+    return "\n".join(lines) + "\n"
 
 FRACTIONS = ["10\\%", "50\\%", "100\\%"]
 FRACTION = [
@@ -174,6 +214,10 @@ def main():
             x.replace("\\", "") for x in FRACTIONS) + " |\n|---|---|---|---|\n")
         for label, texts, _ in frac_rows:
             f.write(f"| {label} | " + " | ".join(md(t) for t in texts) + " |\n")
+        f.write(e1_section(logs))
+        f.write("\n## Provenance notes\n\n")
+        for note in NOTES:
+            f.write(f"- {note}\n")
         if missing:
             f.write("\n## Cells with no data yet\n\n")
             for m in missing:

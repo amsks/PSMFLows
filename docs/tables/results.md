@@ -15,9 +15,15 @@ cube-single-play-singletask-v0. 500-episode evals. Multiple seeds are mean ± 95
 | Hybrid (action critic + residual), deployed | zero-shot | 0.162 ± 0.168 | 4 |
 | Hybrid, decode-only control | zero-shot | 0.226 ± 0.068 | 4 |
 | Hybrid, lambda-rank (K=32, no residual) | zero-shot | 0.083 ± 1.004 | 2 |
-| Hybrid + FB graft, deployed | zero-shot | 0.064 [0.046, 0.089] | 1 |
-| Hybrid + FB graft, decode-only control | zero-shot | 0.174 [0.143, 0.210] | 1 |
+| Hybrid + FB graft, deployed | zero-shot | 0.095 ± 0.394 | 2 |
+| Hybrid + FB graft, decode-only control | zero-shot | 0.225 ± 0.648 | 2 |
 | Behavior-cloning control (per-step prior) | control | 0.068 [0.049, 0.093] | 1 |
+| PSMFlow re-eval, actor, one-step decode | zero-shot | 0.220 ± 0.037 | 5 |
+| PSMFlow re-eval, actor, exact ODE-100 decode | zero-shot | 0.182 ± 0.019 | 5 |
+| PSMFlow re-eval, gpi, one-step decode | zero-shot | 0.054 ± 0.032 | 5 |
+| PSMFlow re-eval, gpi, exact ODE-100 decode | zero-shot | 0.044 ± 0.043 | 5 |
+| Paper-faithful Arm A (u'~p0 bootstrap) | zero-shot | -- | 0 |
+| Paper-faithful Arm B (psi(s,u,u'), no actor, gpi) | zero-shot | -- | 0 |
 
 ## Data fraction
 
@@ -30,3 +36,25 @@ cube-single-play-singletask-v0. 500-episode evals. Multiple seeds are mean ± 95
 | Hybrid, deployed | 0.238 [0.203, 0.277] | 0.228 [0.193, 0.267] | 0.162 ± 0.168 |
 | Hybrid, decode-only control | 0.072 [0.052, 0.098] | 0.070 [0.051, 0.096] | 0.226 ± 0.068 |
 | Latent RL (per-task) | 0.058 [0.041, 0.082] | -- | 0.905 ± 0.020 |
+
+## E1 oracle-aim (tools/diag_oracle_aim.py, 500 ep, K=512, ODE-100 decode)
+
+| Arm | Success | Wilson 95% |
+|---|---|---|
+| oracle_aim | 0.934 | [0.909, 0.953] |
+| oracle | 0.960 | [0.939, 0.974] |
+| random_latent_onestep | 0.086 | [0.065, 0.114] |
+| random_latent_ode | 0.014 | [0.007, 0.029] |
+
+Mean min-distance to the oracle action over K: 0.062 (p90 0.096). Verdict: selection: reachable set is fine, the loss is ranking.
+
+## Provenance notes
+
+- The FB-graft rows aggregate every `eval500_fbgraft_sd?_*.json` present; the previously quoted single-seed 0.064 predates sd0's JSONs landing (08-14 23:05).
+- sd0 headline evals recorded before the P0.2 eval-seeding fix are not exactly reproducible (sd0 re-eval 0.240 vs recorded 0.318); the E2 re-eval rows are the post-fix measurement of the same checkpoints and supersede the PSMFlow headline row for comparisons.
+- E1 oracle-aim (below) is a diagnostic, not an agent: an oracle picks among K=512 decoded prior latents using a frozen FQL expert's action.
+
+## Cells with no data yet
+
+- headline: Paper-faithful Arm A (u'~p0 bootstrap)  (`eval500_paperfaith_armA_sd?*.json`)
+- headline: Paper-faithful Arm B (psi(s,u,u'), no actor, gpi)  (`eval500_paperfaith_armB_sd?*.json`)
