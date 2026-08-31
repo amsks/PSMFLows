@@ -42,6 +42,17 @@ actor:
   bc_coeff: 1.0            # distillation weight (reference cube value is 3.0)
 acting: actor              # actor | gpi (per-step latent argmax, actor-free ablation)
 
+# psi's index slot. `task_vector` is the shipped agent: psi(s, w, u), policy identity in w.
+# `latent` is the write-up's psi(s, u, u') — a fresh u' ~ p0 per batch element indexes the
+# policy, the backup continues that SAME u' at s' (so the bootstrap action is a p0 decode,
+# which is Prop. insample's hypothesis and makes backup_explore_frac inert), and w reaches
+# psi only through the readout Q = psi^T w. Under `latent` acting must be gpi, which then
+# searches (u_i, u'_j) pairs per Alg. "Rung 1".
+policy_index: task_vector  # task_vector | latent
+# Train the amortized latent actor. false drops the actor/CFM branch entirely; the
+# write-up's Sec. PSMFlows has no actor. Only valid with acting=gpi.
+train_actor: true
+
 # Idea-1 action branch (2026-08-13): w-conditioned successor features over EXECUTED
 # actions (psi_a shares phi and the w machinery) + an eps-bounded residual head.
 # pessimism 0.0 on this branch by design: the collapse forensics showed exact-min
