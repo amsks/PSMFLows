@@ -235,7 +235,7 @@ def main(cfg):
               'verdict': verdict}
     print(f"\nQ relative spread {spread:.4f} (local {landscape['q_relative_spread_local_mean']:.4f}) | "
           f"actor percentile {landscape['actor_percentile_in_prior_Q_mean']:.2f} | "
-          f"q grad share {grads['q_share_of_total']:.3f}\nVERDICT: {verdict}")
+          f"q grad share {qshare_txt}\nVERDICT: {verdict}")
     write_report(report, cfg, 'diag_q_landscape.json')
 
 
