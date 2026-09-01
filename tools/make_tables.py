@@ -55,9 +55,11 @@ HEADLINE = [
     ("PSMFlow re-eval, gpi, one-step decode", "zero-shot", ["e2_onestep_gpi_sd?.json"]),
     ("PSMFlow re-eval, gpi, exact ODE-100 decode", "zero-shot", ["e2_ode_gpi_sd?.json"]),
     # E3 (08-31): paper-faithful arms; epoch recorded per-file in table_dataset_fraction.json.
-    ("Paper-faithful Arm A (u'~p0 bootstrap)", "zero-shot", ["eval500_paperfaith_armA_sd?*.json"]),
+    # `sd?` only, NOT `sd?*`: the mid-training `*_ep250000.json` evals of the runs the
+    # 08-31 disk-full killed must not be pooled with the 500k results that replaced them.
+    ("Paper-faithful Arm A (u'~p0 bootstrap)", "zero-shot", ["eval500_paperfaith_armA_sd?.json"]),
     ("Paper-faithful Arm B (psi(s,u,u'), no actor, gpi)", "zero-shot",
-     ["eval500_paperfaith_armB_sd?*.json"]),
+     ["eval500_paperfaith_armB_sd?.json"]),
 ]
 
 # Static provenance notes appended to the markdown table.

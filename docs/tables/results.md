@@ -22,8 +22,8 @@ cube-single-play-singletask-v0. 500-episode evals. Multiple seeds are mean ± 95
 | PSMFlow re-eval, actor, exact ODE-100 decode | zero-shot | 0.182 ± 0.019 | 5 |
 | PSMFlow re-eval, gpi, one-step decode | zero-shot | 0.054 ± 0.032 | 5 |
 | PSMFlow re-eval, gpi, exact ODE-100 decode | zero-shot | 0.044 ± 0.043 | 5 |
-| Paper-faithful Arm A (u'~p0 bootstrap) | zero-shot | 0.189 ± 0.089 | 2 |
-| Paper-faithful Arm B (psi(s,u,u'), no actor, gpi) | zero-shot | 0.006 [0.002, 0.018] | 1 |
+| Paper-faithful Arm A (u'~p0 bootstrap) | zero-shot | 0.171 ± 0.113 | 3 |
+| Paper-faithful Arm B (psi(s,u,u'), no actor, gpi) | zero-shot | 0.083 ± 0.191 | 3 |
 
 ## Data fraction
 

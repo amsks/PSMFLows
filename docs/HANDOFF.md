@@ -18,13 +18,67 @@ hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RES
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
 Branch: `feat/inversion-integration` · Machine: `midi-01` (UT CS)
-Date: **2026-08-31** (latest) · prior: 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+Date: **2026-09-01** (latest) · prior: 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
 
 ---
 
 <!-- _class: lead -->
 
-## 2026-08-31 — oracle-aim: the reachable set is fine (0.934), the loss is ranking; paper-faithful arms are training
+## 2026-09-01 — E3 landed: the paper's construction does not work on cube
+
+Closes `docs/plans/2026-08-31-interface-fork-experiments.md`. Both arms ran 3 seeds ×
+500k steps, evaluated at 500 episodes on the post-P0.2 pinned-stream harness. Table
+rows regenerated from the eval JSONs; CIs are the repo's t95-across-seeds.
+
+| arm | success | matched control |
+|---|---|---|
+| Arm A — `backup_explore_frac=1.0`, `acting=actor` | **0.171 ± 0.113** (3) | point arm, actor: 0.220 ± 0.037 (5) |
+| Arm B — ψ(s, u, u′), no actor, `acting=gpi` | **0.083 ± 0.191** (3) | point arm, gpi: 0.054 ± 0.032 (5) |
+
+Controls: BC per-step prior 0.068 [0.049, 0.093]; FB 0.721 ± 0.020; FQL 0.949 ± 0.063.
+Each arm is quoted against the control that ACTS the same way — Arm B selects by latent
+argmax, so the actor-arm 0.220 is not its comparison and using it would price the removal
+of the actor as if it were the index change.
+
+**Arm A is within noise of its control.** Making every bootstrap action a genuine p0
+decode — the hypothesis Prop. "insample" needs for C=1, which no shipped run ever
+satisfied — changes nothing. Pre-registered expectation held: a correct backup
+distribution does not by itself create ranking signal.
+
+**Arm B lands at BC level.** 0.083 ± 0.191 against a gpi control of 0.054 ± 0.032, with a
+seed spread (0.006 / 0.160 / 0.084) far wider than any effect. It does not separate from
+the 0.068 BC control, and is nowhere near the 0.45 bar or FB's 0.721. The pre-registered
+reading fires: **the writeup's construction is refuted on its own terms on cube.**
+
+What this does NOT isolate: Arm B changes the ψ index and drops the actor together, per
+§8, so it does not price the policy-index idea alone. What it does establish is that the
+algorithm as written does not work here, and that is coherent with E1 — Arm B's only means
+of choosing an action is ranking latents by ψᵀw, and E1 showed ranking is the broken
+faculty. The oracle reached 0.934 selecting from the same action set these agents fail in.
+
+Taken with E1 and E2, the three experiments converge on one statement: the interface is
+not the problem (oracle-aim 0.934), the decoder is not the problem (exact decode costs
+−0.038 ± 0.027 paired), and neither of the paper's two deviations was load-bearing. The
+open problem is a critic that can rank latents.
+
+### Infrastructure, same session
+
+`/var/local` (24 GB) hit 100% at 16:42 and killed all six runs mid-training with
+`OSError: [Errno 28]`, losing ~3.5 h; they were relaunched on `/data-local` at 17:40 and
+the numbers above are from those clean 500k runs. `scripts/launch_psmflow.sh` now takes
+`STORE=`, defaulting to `/var/local` so older launch lines reproduce. 11.82 GiB of
+finished July experiments were uploaded to `amsks/psmflows-checkpoint-archive`, verified
+file-by-file, then deleted (`docs/reference/archived-checkpoints.md`).
+
+Two mid-training `*_ep250000.json` evals of the killed runs exist in the logs. They are at
+half the specified budget and `tools/make_tables.py` now globs `sd?` rather than `sd?*` so
+they cannot be pooled into the arm rows.
+
+---
+
+<!-- _class: lead -->
+
+## 2026-08-31 — oracle-aim: the reachable set is fine (0.934), the loss is ranking; paper-faithful arms launched
 
 Plan and pre-registered readings: `docs/plans/2026-08-31-interface-fork-experiments.md`.
 Everything below is cube unless stated. Table regeneration: commit `8e89d76`.
