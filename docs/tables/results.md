@@ -48,6 +48,12 @@ cube-single-play-singletask-v0. 500-episode evals. Multiple seeds are mean ± 95
 
 Mean min-distance to the oracle action over K: 0.062 (p90 0.096). Verdict: selection: reachable set is fine, the loss is ranking.
 
+## E4a: FQL-critic-as-scorer (same K=512 candidates + ODE decode as E1)
+
+Success 0.032 [0.020, 0.051] — below the one-step random floor (0.086). Per-step Spearman vs the oracle ranking: mean 0.285, median 0.346, 54% of steps above 0.3 — the expert's critic ranks moderately, but argmax over 512 candidates picks 0.426 from the expert action when 0.105 was available. Verdict: decode-then-score is dead: even a proven ranker fails under per-step GPI.
+
+E4b (mixture-trained checkpoint, 500k): ranking Spearman 0.054, Q spread 0.86% of |Q| — same band as the point arm (0.10 / 1.1%) and Arm B (0.079 / 0.9%). The mixture does not create ranking signal.
+
 ## Provenance notes
 
 - The FB-graft rows aggregate every `eval500_fbgraft_sd?_*.json` present; the previously quoted single-seed 0.064 predates sd0's JSONs landing (08-14 23:05).

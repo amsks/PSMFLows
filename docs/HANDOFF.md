@@ -120,6 +120,47 @@ evals follow separately). Everything below is
   inability to rank latents — now measured directly against an oracle over the very
   candidate set it deploys on.
 
+### E4 (same evening) — the ranking failure is the deployment scheme, not our critics
+
+**E4a, the known-good-ranker control** (`e4a_fql_critic_aim_cube_sd0.json`): the E1
+harness with one change — candidates scored by the frozen FQL expert's OWN critic
+(ensemble mean, its own reduction) instead of oracle distance. Success **0.032**
+[0.020, 0.051] — below the one-step random floor (0.086). The nuance that explains
+it: per-step Spearman vs the oracle ranking is bimodal (mean 0.285, median 0.346,
+54% of steps above 0.3, p10 −0.33) — the expert's critic ranks *moderately well on
+most steps*, but argmax over K=512 reliably lands on its most overestimated
+candidate: picked action 0.426 from the expert vs 0.105 available. Winner's curse at
+K=512. Pre-registered branch: **decode-then-score is dead as a deployment scheme;
+even a proven ranker fails under per-step best-of-K GPI.** This exonerates ψᵀw as
+the specific culprit — lambda-rank, FB-graft, Arm B, and the FQL critic all fail
+the same way — and kills the "critic with a direct action pathway" fix on its own
+pre-registration.
+
+**E4b, mixture-checkpoint probes** (`d1a_latent_ranking_mixhpo_ep500k.json`,
+`d3_q_landscape_mixhpo_ep500k.json`): the mixture-trained 500k checkpoint shows
+ranking Spearman **0.054** and Q spread **0.86%** of |Q| — the same band as the
+point arm (0.10 / 1.1%) and Arm B (0.079 / 0.9%). As pre-registered: mixture
+training does not create ranking signal; the mixture arm stays closed.
+
+**Where this leaves the fork:** E1 (oracle 0.934) + E4a (every learned critic
+fails at K=512 argmax) means the remaining live directions are (a) actor-based
+improvement in latent space — no argmax over a large candidate set, the actor
+moves smoothly against the (weak but locally usable) critic gradient, which is
+where the eps=0.05 residual's 0.96 peak also lives; and (b) small-K or
+regularized selection (K where the winner's curse is weaker than the ranking
+signal — the E4a Spearman distribution says an optimal K may exist and is small).
+Both are specced next-step candidates, not started.
+
+### Housekeeping from the 16:40 incident
+
+The teardown cause was `/var/local` filling (killed six runs; since cleaned to
+47%). Repo policy going forward: experiment STORE on `/data-local`. My armB
+sd1/sd2 relaunches to /var/local died of the same disk exhaustion at ~100k with no
+checkpoint and are DROPPED — Arm A/B seed replication rides on the other session's
+full-500k b-runs (`psmflow_paperfaith_arm{A,B}_20260831b`, 3 seeds each on
+/data-local, ~300k/500k as of this entry); their Arm B results supersede the
+250k sd0 numbers above when they land.
+
 
 
 ---

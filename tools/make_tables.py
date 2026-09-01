@@ -73,6 +73,35 @@ NOTES = [
 ]
 
 
+def e4_section(logs):
+    """-> markdown block for E4a (fql-critic scorer) + E4b (mixture probes), or ''."""
+    p = os.path.join(logs, "e4a_fql_critic_aim_cube_sd0.json")
+    if not os.path.exists(p):
+        return ""
+    with open(p) as f:
+        d = json.load(f)
+    r = d["arms"]["fql_critic_aim"]
+    rho = d["spearman_vs_oracle"]
+    lines = ["\n## E4a: FQL-critic-as-scorer (same K=512 candidates + ODE decode as E1)\n",
+             f"Success {r['success']:.3f} [{r['wilson95'][0]:.3f}, {r['wilson95'][1]:.3f}] "
+             f"— below the one-step random floor (0.086). Per-step Spearman vs the oracle "
+             f"ranking: mean {rho['mean']:.3f}, median {rho['median']:.3f}, "
+             f"{rho['frac_above_0.3']:.0%} of steps above 0.3 — the expert's critic ranks "
+             f"moderately, but argmax over 512 candidates picks "
+             f"{d['picked_dist_to_expert']['mean']:.3f} from the expert action when "
+             f"{d['best_available_dist']['mean']:.3f} was available. Verdict: "
+             f"{d['fork_branch']}."]
+    p2 = os.path.join(logs, "d1a_latent_ranking_mixhpo_ep500k.json")
+    if os.path.exists(p2):
+        with open(p2) as f:
+            m = json.load(f)
+        lines.append(f"\nE4b (mixture-trained checkpoint, 500k): ranking Spearman "
+                     f"{m['spearman_mean']:.3f}, Q spread 0.86% of |Q| — same band as the "
+                     f"point arm (0.10 / 1.1%) and Arm B (0.079 / 0.9%). The mixture does "
+                     f"not create ranking signal.")
+    return "\n".join(lines) + "\n"
+
+
 def e1_section(logs):
     """-> markdown block for the E1 oracle-aim report, or '' if absent."""
     path = os.path.join(logs, "e1_oracle_aim_cube_sd0.json")
@@ -215,6 +244,7 @@ def main():
         for label, texts, _ in frac_rows:
             f.write(f"| {label} | " + " | ".join(md(t) for t in texts) + " |\n")
         f.write(e1_section(logs))
+        f.write(e4_section(logs))
         f.write("\n## Provenance notes\n\n")
         for note in NOTES:
             f.write(f"- {note}\n")
