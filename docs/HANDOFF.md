@@ -24,6 +24,68 @@ Date: **2026-09-01** (latest) · prior: 2026-08-31, 2026-08-30, 2026-08-29, 2026
 
 <!-- _class: lead -->
 
+## 2026-09-01 (later) — inversion HPO redone on the corrected target; cube regenerating, antmaze not
+
+The 08-28 50-trial sweeps and every mixture npz they produced measured the OLD inversion
+(un-squared likelihood, alpha^2 Laplace covariance). Both were redone on the corrected
+target, same settings as 08-28 (`n_rows=256 sample_k=32 cov_k=16`, `flow_steps=100`,
+`num_samples=128` pinned, alpha in [2,100] log, `prior_scale` in [0.3,1.0],
+`n_steps` in [5,20]), 50 trials each. Logs: `logs/hpo_{cube,antmaze}_fixed.log`.
+
+| env | alpha | prior_scale | n_steps | coverage@16 | decode_mix | ESS | E\|u\|^2 / d_a |
+|---|---|---|---|---|---|---|---|
+| cube | 25.26 | 0.677 | 17 | **0.982** | 0.2165 | 68.2 | 1.04 |
+| antmaze | 26.51 | 0.597 | 5 | **0.036** | 0.2653 | 8.5 | 1.07 |
+
+Three readings.
+
+**Both incumbents sit exactly on the decode budget** (0.2165 vs 0.22; 0.2653 vs 0.28). The
+objective maximizes coverage subject to a fidelity hinge, so the optimizer widens until the
+hinge binds. That is a frontier position, not evidence of latent multiplicity: the exact
+inverse of a diffeomorphism is unique, and the corrected alpha sweep reproduces the same
+width-is-temperature collapse (cube cov_k16 0.945 at alpha=20 down to 0.003 at alpha=3200).
+
+**Typicality is what the fix actually bought.** E\|u\|^2 / d_a is now 1.04 (cube) and 1.07
+(antmaze) against the prior's 1.0. The shipped npz built under the old target sits at
+3.92/5 = 0.78 -- measurably UNDER-dispersed. Lemma "typicality" says an exact flow's
+preimages are prior-distributed; the corrected target nearly satisfies it, the old one did
+not. This is the first mixture arm whose latents look like the ones the actor emits.
+
+**Antmaze was not rescued.** Coverage 0.036 at its own optimum against cube's 0.982. The
+corrected inversion does not close the cube/antmaze gap, consistent with the 08-30 Jacobian
+probe having already excluded local geometry. Regenerating 1M antmaze rows at 3.6% coverage
+would cost ~13 h for a file already measured useless as augmentation; **not run**.
+
+**Cube is regenerating** at the runner-up alpha=20.57 / prior_scale=0.691 / n_steps=12
+(cost -0.9805 vs the incumbent's -0.9819, coverage 0.981 vs 0.982, decode 0.2117, ESS 62) --
+a statistical tie at ~23 h instead of ~33 h, since EM cost scales with n_steps.
+`num_samples` 128 -> 200 for the real file (the HPO pins it during the width search so the
+optimizer cannot buy coverage with compute). Output
+`preimages_cube_single_fixed_a20p6_ps0p69_ns12_N200.npz`, tmux `pre-cube-fixed`, ETA
+2026-09-02 ~19:00 CDT.
+
+**Why this is worth running at all**, given the mixture arm's record: every mixture result
+on file is confounded. Pre-08-14 arms had no prior factor; the 08-28 HPO and its npz had the
+un-squared target and alpha^2 covariance; E4b's probe used that same npz. So the mixture has
+never been tested with a proposal that has a Laplace mode at its own centre. The mechanism
+under test is NOT "the preimage is a set" -- that is dead -- but whether a wider, typical,
+faithful latent target regularizes psi. Against it stands the transition-label bias:
+any u~ != u* pairs a perturbed action with the recorded s'.
+
+**Gate, pre-registered.** Judge the resulting Stage-C runs on representation identifiability
+before success: D1 policy-ranking Spearman (point arm 0.10, Arm B 0.079, old mixture 0.054),
+D3 relative Q spread (1.1% / 0.9% / 0.86%), and the actor's percentile under Q (44th). If
+those do not move, the mixture does not create ranking signal and the arm closes for good.
+
+**Point preimages are unaffected and this was measured, not assumed.** `noise_preimage_point`
+is the backward-ODE solution and takes no alpha or prior_scale; recomputing 4096 cube rows
+with today's code reproduces the 08-04 npz **bit-identically** (max abs diff 0.000e+00). So
+no shipped result, and neither E3 arm, is invalidated by the inversion bugs.
+
+---
+
+<!-- _class: lead -->
+
 ## 2026-09-01 — E3 landed: the paper's construction does not work on cube
 
 Closes `docs/plans/2026-08-31-interface-fork-experiments.md`. Both arms ran 3 seeds ×
