@@ -53,15 +53,13 @@ export MUJOCO_GL=egl                    # no DISPLAY on a compute node
 export OGBENCH_DATASET_DIR="${OGBENCH_DATASET_DIR:-$PSM_DATA/ogbench}"
 mkdir -p "$PSM_DATA" "$OGBENCH_DATASET_DIR"
 
-echo "=== 1/3 pull the frozen Stage-A flow ($FLOW) ==="
-# Any published artifact of this env carries the same flow; take the canonical one and
-# keep only the flow half. --with-flow also repairs the sidecar, which we do not need here
-# (we are producing a new npz, not consuming one), but it is the cheapest way to get the
-# checkpoint and its flags together.
+EPOCH="${EPOCH:-500000}"
+echo "=== 1/3 pull the frozen Stage-A flow ($FLOW @ $EPOCH) ==="
+# Decoder only. A Stage-B job produces latents; it has no use for anyone else's, and the
+# canonical npz is 0.3-0.5 GB of download that would be discarded.
 "$PY" scripts/hf_preimages.py --repo "$HF_REPO" pull \
-    --name "$FLOW" --flow-name "$FLOW" --dest "$PSM_DATA" --with-flow
+    --name "$FLOW" --flow-name "$FLOW" --dest "$PSM_DATA" --flow-only --flow-epoch "$EPOCH"
 FLOW_DIR="$PSM_DATA/flow/$FLOW"
-EPOCH=$("$PY" -c "import json;print(json.load(open('$PSM_DATA/preimages/$FLOW.npz.meta.json'))['restore_epoch'])")
 
 OUT="$PSM_DATA/preimages_${NAME}.npz"
 echo "=== 2/3 invert the dataset -> $OUT ==="

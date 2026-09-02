@@ -111,6 +111,16 @@ def cmd_pull(args):
         return hf_hub_download(args.repo, path_in_repo, repo_type='dataset',
                                local_dir=dest)
 
+    if args.flow_only:
+        # A Stage-B job needs the DECODER, not anyone else's latents: it is about to
+        # produce its own. Skipping the npz saves 0.3-0.5 GB of download per job.
+        flow_name = args.flow_name or args.name
+        grab(f'flow/{flow_name}/flags.json')
+        epoch = args.flow_epoch
+        ckpt = grab(f'flow/{flow_name}/params_{epoch}.pkl')
+        print(f'flow {flow_name} @ {epoch} -> {os.path.dirname(ckpt)}')
+        return
+
     npz = grab(f'preimages/{args.name}.npz')
     meta_path = grab(f'preimages/{args.name}.npz.meta.json')
     with open(meta_path) as f:
@@ -159,6 +169,11 @@ def main():
     p.add_argument('--dest', required=True, help='e.g. $PSM_DATA')
     p.add_argument('--with-flow', action='store_true',
                    help='also fetch the flow and repair the sidecar (needed to train)')
+    p.add_argument('--flow-only', action='store_true',
+                   help='fetch ONLY the decoder, no npz -- what a Stage-B job needs')
+    p.add_argument('--flow-epoch', type=int, default=500000,
+                   help='checkpoint epoch for --flow-only (ignored otherwise: a full '
+                        'pull reads the epoch from the sidecar)')
     p.add_argument('--flow-name')
     p.set_defaults(func=cmd_pull)
 
