@@ -374,3 +374,65 @@ lists what it would push; drop `--dry-run` to upload.
 Each `.npz` carries the OGBench transitions plus the preimage arrays, so it is a drop-in
 training input. Array shapes and per-environment quality numbers are in the dataset card
 on Hugging Face (`amsks/psmflows-preimages`).
+
+---
+
+## Generating preimages on another cluster (SLURM)
+
+Stage B is 12-25 h of single-GPU work per environment and needs nothing from this machine
+except the frozen Stage-A flow. The Hugging Face dataset repo is the only shared state
+between clusters: pull the flow, invert, push the npz back.
+
+`scripts/hf_preimages.py` is the transport (`scripts/upload_preimages_hf.py` still
+publishes the three canonical environments from hardcoded paths; this one moves arbitrary
+artifacts under arbitrary names, which is what variants need).
+
+### One-time setup on the cluster
+
+```bash
+git clone https://github.com/amsks/PSMFLows.git && cd PSMFLows
+# create .venv per the repo README, then:
+export HF_TOKEN=hf_...            # the repo is private; a WRITE token to push back
+export PSM_REPO=$PWD
+export PSM_DATA=/scratch/$USER/psmflows     # ~2 GB per environment
+python scripts/hf_preimages.py list         # confirms auth and shows what exists
+```
+
+OGBench datasets download themselves on first use into `$OGBENCH_DATASET_DIR`; they are
+deterministic, so the rows a cluster inverts are the same rows this machine trains on.
+`main.py` verifies that anyway (row count, plus the first and last 1000 rows compared
+against the env dataset).
+
+### Submit
+
+```bash
+sbatch --partition=<gpu-partition> --account=<acct> \
+  --export=ALL,ENVKEY=antmaze,NAME=antmaze-medium-navigate-a26p5-ps0p60-ns5-N200,\
+ALPHA=26.51,PRIOR_SCALE=0.597,N_STEPS=5,NUM_SAMPLES=200 \
+  scripts/slurm/precompute_preimages.sbatch
+```
+
+`ENVKEY` is `cube|antmaze|pointmaze`. `NAME` is free-form; put the inversion settings in it,
+because two npz files that differ only in `alpha` are otherwise indistinguishable after
+download. The job pulls the flow, runs `tools/precompute_preimages.py`, and pushes the npz
+plus its sidecar back. Wall clock defaults to 36 h -- raise it rather than lose a 20 h job.
+
+Pick `ALPHA` / `PRIOR_SCALE` / `N_STEPS` from an HPO sweep on the same corrected target
+(`tools/hpo_preimage_inversion.py`, ~30 min for 50 trials), not from the frontier table in
+`configs/inversion/default.yaml`, which is a coarser grid.
+
+### Retrieve on the training machine
+
+```bash
+python scripts/hf_preimages.py pull --name <NAME> --dest $PSM_DATA --with-flow
+```
+
+`--with-flow` is not optional if you intend to train. Every npz records the ABSOLUTE path of
+the checkpoint it was inverted from, on the producing machine, and `main.py` compares
+realpaths and refuses a mismatch; `--with-flow` downloads the flow and rewrites the sidecar
+to point at the local copy. The command prints the exact
+`agent.preimage_path=... agent.flow_ckpt_path=... agent.flow_ckpt_epoch=...` to paste into a
+launch line.
+
+Verified end to end on 2026-09-02: `pull --with-flow` of the published pointmaze artifact
+into a clean directory, then 20 training steps through `main.py`, pairing guards passing.
