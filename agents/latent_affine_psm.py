@@ -1,23 +1,9 @@
 """Affine PSM over the behavior flow's LATENT action space.
 
-`agents/affine_psm.py` is the full PSM — affine measure M(s,a,x) = Phi(s,a,x)·w + b(s,a,x),
-a basis learned against a hash codebook of policies, and the constrained-LP task inference
-the affine form makes well-defined. It operates on raw actions, so its measure covers the
-whole action space, including actions the dataset never contains.
-
-This agent makes one substitution: the measure's action slot carries the flow's latent u,
-and an action appears only at act time, by decoding u through the FROZEN behavior flow.
-Every policy the measure can express is therefore a flow decode. Single latent by
-construction — one u per transition, filling the slot the action filled.
-
-Code <-> PSM:
-  measure (FactoredAffineMeasureNet)  ->  M(s, u, x) = Phi(s,u,x)·w + b(s,u,x)
-  w (WNet)                            ->  task coordinate for a codebook code z
-  proto codebook                      ->  latent policies pi_z(s) = table[hash(z, s)]
-  actor                               ->  u(s, w), amortized, tanh * u_clip
-  flow_vf / flow_onestep              ->  G_theta, FROZEN (FQL Stage-A checkpoint)
-  batch['noise_preimage']             ->  u = E_theta(s, a), the dataset latent
-  infer_eval                          ->  w_inf by LP (`full`) or closed form (`zero_shot`)
+`agents/affine_psm.py` is the full PSM on raw actions. This agent substitutes the latent u
+for the action in the measure's action slot; an action appears only at act time, by
+decoding u through the FROZEN behavior flow, so every expressible policy is a flow decode.
+Single latent per transition by construction.
 
 Requires a preimage-augmented dataset (tools/precompute_preimages.py) and the Stage-A
 checkpoint it was inverted from; main.py loads the npz and asserts the pairing.

@@ -1,22 +1,11 @@
-"""PSM (Proto Successor Measure) agent — JAX/Flax port of the PyTorch reference.
+"""PSM (Proto Successor Measure) agent — JAX/Flax port of the PyTorch reference
+(arXiv 2411.19418). M = psi . phi^T, with a proto branch over a hash codebook of policies
+and an sf branch for the task policy; w = E[r.phi] at eval.
 
-Code <-> paper (arXiv 2411.19418):
-  phi (PhiMap)          -> phi_s(s+)     basis over future states (the proto basis)
-  sf_psi (PsiMap)       -> psi^pi(s,a)   successor features of the task (continuous-z) policy
-  proto_psi (PsiMap)    -> psi^{pi_z}    successor features of the codebook policies pi_z
-  task_z / StepInputs   -> w             task coordinates (inferred from reward at eval)
-  proto_seed            -> z             binary codebook seed in pi(a|s,z)
-  M = psi . phi^T       -> M^pi(s,a,s+)  the successor measure
-  proto_next_action     -> pi(a|s,z)=UniformSample(z+hash(s))  codebook behavior policy
-  contrastive_loss      -> Eq.7 off-diag (TD residual) + diag (source) terms
-  ortho_loss            -> orthonormality regularizer (phi phi^T -> I)
-  infer_z: w = E[r.phi] -> reward inference (closed form)
-
-The update is a 3-stage SEQUENTIAL procedure (proto -> sf -> actor): each network is
-its own `TrainState` (module + optimizer), stepped in turn with target soft-updates
-interleaved; the SF stage reads the phi the proto stage just updated. This differs from
-FQL's single-optimizer combined loss, so PSM uses one TrainState per network rather than
-a single shared ModuleDict optimizer.
+The update is a 3-stage SEQUENTIAL procedure (proto -> sf -> actor): each network is its
+own `TrainState` (module + optimizer), stepped in turn with target soft-updates
+interleaved, and the SF stage reads the phi the proto stage just updated. That is why this
+agent uses one TrainState per network rather than FQL's single shared ModuleDict optimizer.
 """
 
 import copy

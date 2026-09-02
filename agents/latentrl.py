@@ -1,22 +1,12 @@
 """Per-task offline RL in the flow's latent space -- the ceiling probe (P2).
 
-This is NOT a zero-shot method and is not meant to be one. The preimage npz already turns
-the dataset into a latent-action dataset (u* per transition), so we can run ordinary
-per-task offline RL over latents: a scalar critic Q(s, u) trained by TD on the ACTUAL task
-reward, an actor emitting a latent, and the executed action being the frozen flow's decode
-of that latent. No psi, no phi, no task vector w.
+NOT a zero-shot method and not meant to be one. Ordinary per-task offline RL over the
+preimage npz's latents: scalar Q(s, u) trained on the actual task reward, an actor emitting
+a latent, executed action = the frozen flow's decode. No psi, no phi, no task vector.
 
-What it answers: can the latent action space support a working improvement loop at all?
-
-  lands near FQL (0.949)  -> the latent space and frozen flow are innocent; whatever is
-                             wrong is in the zero-shot representation, and transplanting
-                             our actor into a working loop (LatentFB) has headroom.
-  caps low (~0.3)         -> the support constraint itself costs the performance; a better
-                             representation cannot exceed this, and LatentFB would have
-                             capped here too.
-
-Deliberately the smallest thing that answers the question: FQL's critic recipe with the
-action replaced by the latent, and psmflow's frozen decode reused verbatim.
+It answers whether the latent action space supports a working improvement loop at all:
+near FQL (0.949) means the latent space and frozen flow are innocent; a low cap means the
+support constraint itself costs the performance.
 """
 
 from typing import Any

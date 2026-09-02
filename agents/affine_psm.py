@@ -1,19 +1,13 @@
 """Affine (full) PSM agent — successor measure M(s,a,x) = Phi(s,a,x)·w + b(s,a,x).
 
-The affine decomposition (originating in RLU controllable_agent/url_benchmark/agent/psm.py
-and the PSM paper, arXiv 2411.19418) makes the task coordinate `w` enter LINEARLY, which is
-what makes the constrained-LP `full` inference well-defined — the distinguishing feature vs
-the bilinear agents/psm.py (M = psi·phi, no bias).
+The affine decomposition (RLU controllable_agent, and arXiv 2411.19418) makes the task
+coordinate `w` enter LINEARLY, which is what makes the constrained-LP `full` inference
+well-defined — the distinguishing feature vs the bilinear agents/psm.py.
 
-Design (see docs/design/2026-07-22-affine-psm-design.md and the session audit):
-  * Networks live in utils/psm_networks.py: AffineMeasureNet (Phi, b), WNet (z->w),
-    LagrangeNet (dual multiplier), PSMActor. This agent holds only losses + orchestration.
-  * Stability: Phi is sqrt(d)-normalized, w is sqrt(d)-normalized, and the bias b is
-    tanh-bounded, so the measure Phi·w+b is bounded and the TD bootstrap cannot diverge.
-    An orthonormality regularizer (ortho_coef, the Factored-FB cube recipe) decorrelates Phi.
-  * Policy extraction: an FB-style AMORTIZED actor pi(s, w) trained IN the main loop (not the
-    paper's from-scratch eval-time distillation) — see actor_loss.
-  * Inference: `full` (constrained LP, infer_w_goal) or `zero_shot` (closed-form, infer_w_zeroshot).
+Networks live in utils/psm_networks.py; this agent holds only losses and orchestration.
+Phi and w are sqrt(d)-normalized and b is tanh-bounded so the TD bootstrap cannot diverge.
+Inference is `full` (LP) or `zero_shot` (closed form).
+See docs/design/2026-07-22-affine-psm-design.md.
 """
 import copy
 from typing import Any

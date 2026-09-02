@@ -1,36 +1,13 @@
 """PSMFlow agent — measure learning in a frozen behavior flow's latent action space.
 
-Policy identity lives in the task vector w, actions live in the flow's latent space, and
-the deployed action is always a flow decode, so every policy stays inside the cloned
-behaviour. NOTE the measure branch below is FB-shaped (single branch, basis trained
-against the task head) rather than PSM's proto/sf split; see docs/HANDOFF.md 2026-08-30.
-The earlier fixed-u policy family it replaced was measured non-goal-covering
-(HANDOFF 2026-08-05).
+Actions live in the flow's latent space and the deployed action is always a flow decode,
+so every policy stays inside the cloned behaviour. The measure branch is FB-shaped (one
+branch, basis trained against the task head), not PSM's proto/sf split.
 
-Code <-> write-up:
-  phi (PhiMap)            -> varphi(x)        shared basis over future states
-  psi (PsiMap)            -> psi(s, w, u)     measure head: index slot = task vector w,
-                                              action-slot = current latent u.
-                                              Under policy_index='latent' the index slot
-                                              instead carries a policy latent u' ~ p0,
-                                              i.e. the write-up's psi(s, u, u')
-  actor                   -> u(s, w, noise)   per-step latent actor (flowBC recipe)
-  flow_vf / flow_onestep  -> G_theta          FROZEN behavior flow (FQL Stage-A ckpt)
-  batch['noise_preimage'] -> u = E_theta(s,a) dataset latent (preimage pipeline)
-  infer_z                 -> w = E[r varphi]  closed-form reward inference
-  sample_actions          -> decode(actor latent) (acting=actor, default) or per-step
-                             argmax_u psi(s,w,u)^T w over prior draws (acting=gpi)
-
-TD target: M^{pi_w}(s, u_data, .) backs up onto psi(s', w, u(s', w)) — the ACTOR's
-latent at s' (PSM's sf_next_action, in latent space). Policy improvement happens in
-latent space; every action either branch implies is still a flow decode. u_data (the
-Stage-B preimage) is the dataset action in latent space — the in-sample anchor of the TD.
-
-NOTE on C=1: the bootstrap latent above is the actor's, which is NOT independent of s',
-so Prop. insample's hypothesis (u' ~ p0 drawn independently) does not hold for this path
-and its C=1 does not apply to it. Two config-level routes to the hypothesis, both off by
-default: backup_explore_frac=1.0 replaces every bootstrap latent with a prior draw, and
-policy_index='latent' makes the index itself the continuation (see _index).
+Two config flags select what psi is indexed by and what the TD bootstrap is; both default
+to the shipped behaviour, under which Prop. insample's C=1 does NOT apply (the bootstrap
+latent is the actor's, hence not independent of s'). See `_index`, `backup_explore_frac`,
+and docs/COMPENDIUM.md §3 for the full code <-> write-up correspondence.
 """
 
 import copy
