@@ -165,8 +165,7 @@ class Dataset(FrozenDict):
         result = jax.tree_util.tree_map(lambda arr: arr[idxs], self._dict)
         if self.return_index:
             # Global replay-buffer row index of each sampled transition. PSM's proto
-            # behavior sampler keys its deterministic next-action on this (reference
-            # train.py with_index -> batch["index"]).
+            # behavior sampler keys its deterministic next-action on this.
             result['index'] = np.asarray(idxs)
         if self.return_next_actions:
             # WARNING: This is incorrect at the end of the trajectory. Use with caution.

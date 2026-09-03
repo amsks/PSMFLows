@@ -21,7 +21,7 @@ from utils.networks import ActorVectorField
 class LatentAffinePSMAgent(AffinePSMAgent):
     """Affine PSM whose action slot is the frozen flow's latent space."""
 
-    # Frozen behaviour flow. Params are pytree leaves (they never receive gradients — no
+    # Frozen behaviour flow. Params are pytree leaves (they never receive gradients, no
     # TrainState, no optimizer); the module defs are static aux like psmflow's.
     flow_vf: Any = None
     flow_onestep: Any = None

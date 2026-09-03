@@ -60,12 +60,9 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         c = self.config
         B = batch["observations"].shape[0]
         r_seed, r_goal, r_flow = jax.random.split(rng, 3)      # keys: codebook code, goal, flow draws
-        # --- codebook codes z: B DISTINCT codes, one per row (RLU sample_z(batch_size),
-        # psm.py:431). We previously drew a single code for the whole batch, which trained
-        # the basis on one proto-policy per step instead of B. The code is tied to the
-        # SOURCE/row index i (so row i's target uses pi_{z_i}(s'_i)) — the alignment
-        # discrete_psm.py:596 gets right via repeat_interleave, and which psm.py:432 gets
-        # wrong by tying z to the goal/column instead. ---
+        # --- codebook codes z: B distinct codes, one per row, so each step trains the
+        # basis on B proto-policies. Each code is tied to the source/row index i, so row
+        # i's target uses pi_{z_i}(s'_i). Tying z to the goal/column instead misaligns. ---
         n_bits = c["max_log_seed"]                             # binary code width
         codes = jax.random.randint(r_seed, (B,), 0, 2 ** n_bits)         # B integer seeds
         bits = ((codes[:, None] >> jnp.arange(n_bits)) & 1).astype(jnp.float32)  # LSB-first
@@ -74,15 +71,15 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         obs_hash = batch["index"] if "index" in batch else jnp.arange(B)   # key on global row index if present
         # pi_z(s') = table[(z·powers + hash(s')) mod max_seed]: the codebook action at each s'.
         proto_next_action = proto_sample(seed_to_action, powers, obs_hash, proto_seed, c["proto_max_seed"])
-        # --- amortized-actor goal: a random future state from the batch. Over training this
-        # covers the goal distribution, so the w-conditioned actor learns to reach any goal. ---
+        # --- amortized-actor goal: a random future state. Over training this covers the
+        # goal distribution, so the w-conditioned actor learns to reach any goal. ---
         gidx = jax.random.randint(r_goal, (), 0, B)
         actor_goal = batch["next_observations"][gidx]
         if c["actor_type"] != "flow":
             return StepInputs(proto_seed=proto_seed, proto_next_action=proto_next_action,
                               actor_goal=actor_goal)
-        # --- flow-actor draws: the conditional-flow-matching pair (u0, t) for the velocity
-        # field, and the noise fed to the one-step noise actor (mirrors agents/psm.py). ---
+        # --- flow-actor draws: the flow-matching pair (u0, t) for the velocity field, and
+        # the noise for the one-step actor (mirrors agents/psm.py). ---
         adim = c["action_dim"]
         r_x0, r_t, r_noise = jax.random.split(r_flow, 3)
         return StepInputs(proto_seed=proto_seed, proto_next_action=proto_next_action,
@@ -92,11 +89,10 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
                           flow_noise=jax.random.normal(r_noise, (B, adim)))
 
     # ---- action-slot seams ----
-    # The measure, the actor and the codebook all read ONE array per transition: the
-    # thing that fills M(s, ., x)'s middle slot. Here that is the dataset action. The
-    # latent subclass (agents/latent_affine_psm.py) serves the flow's preimage latent
-    # instead and decodes it back to an action only at act time, so the PSM machinery
-    # below never needs to know which space it is working in.
+    # The measure, actor and codebook all read one array per transition: whatever fills
+    # M(s, ., x)'s middle slot. Here that is the dataset action. The latent subclass
+    # (agents/latent_affine_psm.py) serves a flow preimage latent and decodes it only at
+    # act time, so nothing below needs to know which space it is in.
 
     def measure_action(self, batch):
         """The array filling the measure's action slot for this batch."""
@@ -118,6 +114,7 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
 
     def measure_loss(self, batch, sampled, measure_params, w_params):
         """PSM contrastive TD loss on the affine measure M(s,a,x) = Phi(s,a,x)·w(z) + b.
+        Cor. 4.2 measure, fit by Eq. 7 under E_z (Eq. 9).
 
         Reproduces RLU-continuous `update_psm`: a squared off-diagonal TD residual plus a
         diagonal source term, over the B^2 grid of (source (s_i,a_i), measure-arg x_j) pairs.
@@ -135,11 +132,10 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         twz = project_z(self.w(z, params=self.target_w), True)
 
         if c["measure_factored"]:
-            # --- FACTORIZED mesh (Prop. 4.3): Phi = A(s,a) phi_x(x), so
+            # --- FACTORIZED mesh (Thm 6.3): Phi = A(s,a) phi_x(x), so
             #       M_ij = phi_x(x_j)·(A(s_i,a_i)^T w) + bound(beta_i·phi_x(x_j))
-            # costs B network evals per tower plus two (B,B) matmuls, instead of B^2 evals.
-            # This is what makes batch_size=1024 (the reference cube value) affordable;
-            # the unfactored path below is ~1.1 s/step at B=1024 vs a few ms here.
+            # B evals per tower plus two (B,B) matmuls, instead of B^2 evals. That is what
+            # makes batch_size=1024 affordable: the unfactored path is ~1.1 s/step vs a few ms.
             def mesh(o, a, xs, mp, wv):
                 A, beta, px, pb = self.measure.model_def.apply(
                     {"params": mp}, o, a, xs, method="mesh_terms")   # (B,d,k),(B,k),(B,k),(B,k)
@@ -157,8 +153,8 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
             m_obs, m_act = obs[i_idx], action[i_idx]                    # source (s_i, a_i)
             m_next_obs, m_next_act = next_obs[i_idx], proto_na[i_idx]   # bootstrap (s'_i, pi_z(s'_i))
             m_x = x[j_idx]                                             # measure argument x_j
-            # w is sqrt(d)-normalized (project_z); with ||Phi||=sqrt(d) too, M is bounded so
-            # the TD bootstrap cannot diverge (fixes the observed 108-spike-then-collapse).
+            # w and Phi are both sqrt(d)-normalized, so M is bounded and the TD bootstrap
+            # cannot diverge.
             phi, b = self.measure(m_obs, m_act, m_x, params=measure_params)   # (B^2,d), (B^2,1)
             M = ((phi * wz[i_idx]).sum(-1, keepdims=True) + b).reshape(B, B)
             tphi, tb = self.measure(m_next_obs, m_next_act, m_x, params=self.target_measure)
@@ -166,22 +162,21 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
             phi_basis = None
         target_M = jax.lax.stop_gradient(target_M)           # no gradient through the target
 
-        # --- contrastive loss = off-diagonal TD residual + diagonal source term ---
+        # --- contrastive loss = off-diagonal TD residual + diagonal source term (Eq. 7) ---
         diff = M - c["discount"] * target_M                  # Bellman residual (B,B)
         offdiag = 0.5 * jnp.sum((diff * off) ** 2) / off_sum  # mean squared residual on s' != s
-        diag = -((1 - c["discount"]) * jnp.diagonal(M)).mean()   # RLU psm.py:352 source term
+        diag = -((1 - c["discount"]) * jnp.diagonal(M)).mean()   # RLU psm.py:352 source term; App. B.3.2
         loss = offdiag + diag
         info = {"psm_loss": loss, "psm_diag": diag, "psm_offdiag": offdiag}
 
-        # --- orthonormality regularizer on Phi (the Factored-FB stability lever) ---
-        # On sqrt(d)-normalized Phi the diagonal term is inert, so a large ortho_coef acts as
-        # a pure decorrelator (Phi Phi^T -> I), preventing rank collapse of the basis.
+        # --- orthonormality regularizer on Phi ---
+        # On sqrt(d)-normalized Phi the diagonal term is inert, so a large ortho_coef acts
+        # as a pure decorrelator (Phi Phi^T -> I) and stops rank collapse.
         if c["ortho_coef"] > 0:
             if c["measure_factored"]:
-                # Regularize the x-side basis phi_x — the factored net's analogue of the
-                # reference's phi(g), and the piece that is sqrt(k)-normalized. Applying it
-                # to the UNNORMALIZED product Phi would make the diagonal term live and turn
-                # ortho_coef=1000 into a norm-shrinker instead of a decorrelator.
+                # Regularize the x-side basis phi_x: it is the sqrt(k)-normalized piece.
+                # On the unnormalized product Phi the diagonal term goes live and
+                # ortho_coef=1000 shrinks norms instead of decorrelating.
                 phi_batch = phi_basis
             else:
                 phi_batch, _ = self.measure(obs, action, x, params=measure_params)   # (B,d)
@@ -272,8 +267,8 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         q_loss = -Q.mean()
         info = {"actor_q": Q.mean(), "bc_flow_loss": bc_flow_loss}
         if bc_coeff > 0:
-            # Distill the (stop-gradient) ODE rollout: same noise in, so the one-step actor
-            # learns the flow's own noise->action map, then bends it toward high Q.
+            # Distill the stop-gradient ODE rollout: same noise in, so the one-step actor
+            # learns the flow's noise->action map, then bends it toward high Q.
             target = jax.lax.stop_gradient(rollout(vf_params, obs, noise))
             distill = jnp.mean((a - target) ** 2)
             q_loss = q_loss / jax.lax.stop_gradient(jnp.abs(Q).mean() + 1e-6) + bc_coeff * distill
@@ -328,7 +323,7 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
 
     # ---- inference ----
     def infer_w_goal(self, dataset, goal, seed=0):
-        """Solve w_inf by constrained optimization (RLU infer_w_goal/_infer_step_gc).
+        """Solve w_inf by constrained optimization (Eq. 10; RLU infer_w_goal/_infer_step_gc).
         Objective: maximize measure at `goal`; constraint: Phi·w+b >= 0 off-goal.
         Returns a new agent with w_inf set (Python loop; jitted inner step)."""
         c = self.config
@@ -354,9 +349,9 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         @jax.jit
         def step(w_inf, w_state, lam_params, lam_state, obs, act, xperm, goal_rep):
             def primal(w_raw):
-                # Re-project onto the sqrt(d) sphere at every use, as discrete_psm.py does
-                # (698, 743). Without this the objective -mean(phi_g·w) is LINEAR and hence
-                # UNBOUNDED BELOW in w: only the step budget was keeping it finite.
+                # Re-project onto the sqrt(d) sphere at every use. Without it the objective
+                # -mean(phi_g·w) is linear in w and unbounded below; only the step budget
+                # kept it finite.
                 w = project_z(w_raw, True)
                 phi_g, _ = self.measure(obs, act, goal_rep)
                 phi_p, b_p = self.measure(obs, act, xperm)
@@ -379,17 +374,16 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
                     lam = lam_def.apply({"params": lp}, obs, act, xperm)
                     return (Mp * lam).mean()
 
-                # RLU minimizes (M*lam) w.r.t. lam (psm.py:559-565): with the primal penalty
-                # -(M*lam), this GROWS lam where M<0 (violated). optax minimizes, so feed the
-                # raw grad — the prior negation inverted constraint enforcement (audit bug 5b).
+                # RLU minimizes (M*lam) w.r.t. lam; against the primal penalty -(M*lam) that
+                # grows lam where M<0. optax minimizes, so feed the raw grad: negating it
+                # inverts constraint enforcement.
                 gl = jax.grad(dual)(lam_params)
                 ul, lam_state = lam_opt.update(gl, lam_state, lam_params)
                 lam_params = optax.apply_updates(lam_params, ul)
             return w_inf, w_state, lam_params, lam_state, obj, con
 
-        # Seeded off `seed`: default_rng() with no argument draws from OS entropy, so two
-        # runs with identical cfg.seed and identical weights got different constraint sets
-        # xperm — and hence different w_inf and eval success — defeating the seeded eval.
+        # Seed the permutation: default_rng() with no argument draws OS entropy, so equal
+        # seeds and weights gave different constraint sets xperm, and different w_inf.
         perm_rng = np.random.default_rng(seed)
         for _ in range(int(ic["num_inference_steps"])):
             b = dataset.sample(c["batch_size"])
@@ -403,11 +397,8 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
 
         if bool(ic["norm_w"]):
             w_inf = project_z(w_inf, True)
-        # The amortized actor was trained only on w_g = the CLOSED-FORM (zero_shot) task
-        # coordinate. The LP solution above is a different distribution, so acting with the
-        # amortized actor on it queries the actor off-distribution — which silently broke
-        # `full` mode when d80f7f0 replaced eval-time distillation. Fine-tune the actor
-        # against the w_inf we actually solved for.
+        # The amortized actor was trained on the closed-form w_g only. The LP w_inf is a
+        # different distribution, so fine-tune the actor against the w_inf just solved for.
         return self.replace(w_inf=w_inf, task_goal=goal).distill_actor(dataset, goal)
 
     def distill_actor(self, dataset, goal, steps=None):
@@ -455,12 +446,12 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         return self.replace(actor=actor, rng=rng)
 
     def infer_w_zeroshot(self, dataset, goal, num_samples=4096):
-        """Closed-form goal code (no test-time optimization): w = sqrt(d)*normalize(
+        """Closed-form goal code (not Eq. 10; FB get_goal_meta analogue): w = sqrt(d)*normalize(
         E_{(s,a)~D}[Phi(s,a,goal)]) — the affine-net analogue of FB get_goal_meta."""
         c = self.config
         goal = jnp.asarray(goal, jnp.float32)
-        # Deterministic full-array reduction when the dataset exposes its raw arrays
-        # (unit-test _FakeDataset). Production ReplayBuffer has no `.obs`, so it samples.
+        # Full-array reduction when the dataset exposes raw arrays (test fakes). The
+        # production ReplayBuffer has no `.obs`, so it samples.
         if hasattr(dataset, "obs") and hasattr(dataset, "act") and num_samples >= getattr(dataset, "n", 0):
             obs = jnp.asarray(dataset.obs); act = jnp.asarray(dataset.act)
         else:
@@ -484,8 +475,8 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
 
     @jax.jit
     def sample_actions(self, observations, seed=None, temperature=1.0):
-        # The actor is amortized (trained in-loop) and conditioned on the task coord w.
-        # infer_eval sets w_inf (LP or closed-form); the actor acts greedily for it.
+        # The actor is amortized and conditioned on w. infer_eval sets w_inf (LP or closed
+        # form); the actor acts greedily for it.
         w = jnp.broadcast_to(self.w_inf, (*observations.shape[:-1], self.config["d_dim"]))
         if self.config["actor_type"] == "flow":
             # One-step noise actor: draw the flow latent, decode, clip (mirrors agents/psm.py).
@@ -513,7 +504,7 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         factored = bool(mcfg["factored"]) if "factored" in mcfg else False
         if factored:
             # Factorized basis Phi = A(s,a) phi_x(x): the B^2 mesh becomes B evals + two
-            # matmuls, which is what makes the reference batch_size=1024 affordable.
+            # matmuls, which makes batch_size=1024 affordable.
             measure_def = FactoredAffineMeasureNet(
                 d_dim=d_dim, k_dim=int(mcfg["k_dim"]) if "k_dim" in mcfg else 0,
                 hidden_dim=mcfg["hidden_dim"], hidden_layers=mcfg["hidden_layers"],
@@ -533,14 +524,13 @@ class AffinePSMAgent(flax.struct.PyTreeNode):
         actor_cfg = config["actor"]
         actor_type = actor_cfg["type"] if "type" in actor_cfg else "ddpgbc"
         assert actor_type in ("ddpgbc", "flow"), f"unknown actor.type {actor_type!r}"
-        # actor LR defaults to the measure LR; set below it (config lr_actor) for a
-        # two-timescale scheme (slow actor tracking a quasi-static measure/Q).
+        # actor LR defaults to the measure LR; set it lower (lr_actor) for a two-timescale
+        # scheme, with a slow actor tracking a quasi-static Q.
         lr_actor = float(config.get("lr_actor", config["lr"]))
         actor_vf = None
         if actor_type == "flow":
-            # Flow actor (reference cube recipe, ../Factored-FB psm_flowbc): a one-step
-            # NoiseConditionedActor a = tanh(net(s, w, noise)) distilled from an
-            # unconditional GELU velocity field v(s, x_t, t) trained by flow matching.
+            # Flow actor (reference psm_flowbc): a one-step NoiseConditionedActor
+            # a = tanh(net(s, w, noise)), distilled from a GELU velocity field v(s, x_t, t).
             def _acfg(key, default):
                 return actor_cfg[key] if key in actor_cfg else default
             actor_def = NoiseConditionedActor(

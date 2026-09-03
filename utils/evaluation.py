@@ -72,19 +72,16 @@ def evaluate(
     Returns:
         A tuple containing the statistics, trajectories, and rendered videos.
     """
-    # Action noise was seeded from OS entropy regardless of `seed`, so re-evaluating the
-    # same weights drew a different action stream every time: pinning the env's episode
-    # inits alone did not make eval reproducible. Stochastic actors (flow decode, the
-    # residual path) move by more than rounding under a different key.
+    # Seed the action noise too. Pinning the env's episode inits alone left the action
+    # stream drawn from OS entropy, so re-evaluating the same weights gave different
+    # results: stochastic actors (flow decode, residual path) move by more than rounding.
     actor_key = seed if seed is not None else np.random.randint(0, 2**32)
     actor_fn = supply_rng(agent.sample_actions, rng=jax.random.PRNGKey(actor_key))
     trajs = []
     stats = defaultdict(list)
 
-    # Pin the env's episode-init RNG to `seed` once per eval. The per-episode
-    # resets below stay unseeded so they advance this seeded generator (matches
-    # the reference: create_ogbench_env resets with seed, then rollout resets
-    # unseeded per episode).
+    # Pin the env's episode-init RNG to `seed` once per eval. The per-episode resets below
+    # stay unseeded so they advance this seeded generator, as the reference does.
     if seed is not None:
         env.reset(seed=seed)
 

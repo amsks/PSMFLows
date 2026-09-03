@@ -195,13 +195,11 @@ def restore_agent(agent, restore_path, restore_epoch):
     with open(restore_path, 'rb') as f:
         load_dict = pickle.load(f)
 
-    # Backward compatibility across added agent FIELDS (not weights): a checkpoint
-    # written before a branch existed — e.g. every psmflow run predating the Idea-1
-    # action critic — has no entry for psi_a/target_psi_a/residual, and
-    # `from_state_dict` refuses a state dict that is missing any field of its target.
-    # Those runs also have the branch disabled, so its freshly-initialised params are
-    # never read; keep them and say so. The reverse case (checkpoint carries something
-    # the agent has no slot for) stays a hard error: that is trained state being dropped.
+    # Backward compatibility across added agent fields (not weights): a checkpoint written
+    # before a branch existed has no entry for it, and `from_state_dict` refuses a state dict
+    # missing any field. Those runs have the branch disabled, so its fresh params are never
+    # read; keep them and log it. The reverse case, a checkpoint carrying a field the agent
+    # has no slot for, stays a hard error: that would drop trained state.
     saved = dict(load_dict['agent'])
     current = flax.serialization.to_state_dict(agent)
     missing = [k for k in current if k not in saved]

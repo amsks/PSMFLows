@@ -167,8 +167,8 @@ class LatentRLAgent(flax.struct.PyTreeNode):
             tx=optax.adam(config["lr"]))
 
         # W4 residual head: (s, u) -> per-dim correction, scaled by eps and tanh-bounded.
-        # NoiseConditionedActor already tanh-bounds its output, so it IS delta with the
-        # tanh applied; `execute` therefore scales it by eps without tanh-ing again.
+        # NoiseConditionedActor already tanh-bounds its output, so it is delta post-tanh;
+        # `execute` only scales it by eps.
         residual_def = NoiseConditionedActor(
             action_dim=action_dim, hidden_dim=config["residual"]["hidden_dim"],
             hidden_layers=config["residual"]["hidden_layers"],
