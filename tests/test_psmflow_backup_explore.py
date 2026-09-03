@@ -69,3 +69,30 @@ def test_update_still_runs_with_exploration_on():
     agent2, info = agent.update(_batch())
     for k in ("psm_loss", "orth_loss", "actor_loss"):
         assert math.isfinite(float(info[k])), (k, info[k])
+
+
+def test_explore_keys_are_folded_not_split_from_a_consumed_key():
+    """r_next is the bootstrap-noise SAMPLE key; it must not also be a split parent.
+
+    Pre-2026-09-03 the branch did `jax.random.split(r_next)` after
+    `jax.random.normal(r_next, ...)` had already consumed it -- the documented JAX
+    anti-pattern. The explore keys now come from `fold_in(rng, 107)`. The default path
+    (frac=0) is byte-identical either way, which is what
+    `test_default_is_off_and_matches_actor_latent` pins; what is pinned here is that the
+    ENABLED branch no longer derives its draws from the consumed key.
+    """
+    agent = _agent(backup_explore_frac=1.0)
+    batch = _batch()
+    B, adim = batch["observations"].shape[0], agent.config["action_dim"]
+    rng = jax.random.PRNGKey(0)
+    s = _sampled(agent)
+
+    clip = agent.config["u_clip"]
+    _, _, _, r_next, _, _, _ = jax.random.split(rng, 7)
+    old_expl, _ = jax.random.split(r_next)                      # the old, reused parent
+    new_expl, _ = jax.random.split(jax.random.fold_in(rng, 107))  # the fixed one
+    old_u = jnp.clip(jax.random.normal(old_expl, (B, adim)), -clip, clip)
+    new_u = jnp.clip(jax.random.normal(new_expl, (B, adim)), -clip, clip)
+    # At frac=1.0 every bootstrap latent is a prior draw, so u_next IS that draw.
+    assert bool(jnp.array_equal(s.u_next, new_u)), "explore draw is not folded out of rng"
+    assert not bool(jnp.array_equal(s.u_next, old_u)), "still splitting the consumed r_next"

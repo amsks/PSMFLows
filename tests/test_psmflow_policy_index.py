@@ -100,3 +100,39 @@ def test_acting_actor_without_an_actor_is_refused():
     agent = _agent(policy_index="latent", train_actor=False, acting="actor")
     with pytest.raises(AssertionError, match="untrained actor"):
         agent.sample_actions(_batch()["observations"][0], seed=jax.random.PRNGKey(0))
+
+
+def test_latent_index_with_a_trained_actor_takes_a_finite_step():
+    """policy_index='latent' + train_actor=true: psi's index slot is the POLICY LATENT.
+
+    `flow_actor_loss` used to hardcode the task vector `w` in psi's index slot, so this
+    combination raised ScopeParamShapeError on the very first update (the slot is d_a
+    wide, not z_dim) -- and nothing asserted against it, leaving a hole in Arm B's guard
+    rail. The coherent semantics, and what the code now does: the actor stays
+    w-conditioned (it is the policy the deployed action comes from), the index slot
+    carries u' exactly as `measure_loss` and `gpi_select` read it, and the readout stays
+    Q = psi(s, u', u_a)^T w.
+    """
+    agent = _agent(policy_index="latent", train_actor=True, acting="gpi")
+    agent2, info = agent.update(_batch())
+    for k in ("psm_loss", "orth_loss", "actor_loss", "actor_q", "actor_bc_error"):
+        assert k in info, f"{k} missing -- the actor branch did not run"
+        assert math.isfinite(float(info[k])), (k, info[k])
+    assert not all(bool(jnp.array_equal(x, y)) for x, y in
+                   zip(jax.tree_util.tree_leaves(agent.actor.params),
+                       jax.tree_util.tree_leaves(agent2.actor.params))), "actor did not train"
+
+
+def test_actor_loss_reads_psi_at_the_policy_index_not_the_task_vector():
+    """The index the actor's Q is read at is `_index(sampled)`, i.e. u' under Arm B."""
+    agent = _agent(policy_index="latent", train_actor=True, acting="gpi")
+    s = agent.sample_step_inputs(_batch(), jax.random.PRNGKey(0))
+    assert agent._index(s) is s.u_index
+    # A z_dim-wide task vector in that slot cannot even be evaluated: this is the exact
+    # failure the fix removes, and it is what pins the slot to the latent.
+    obs = _batch()["observations"]
+    u_a = agent.config["u_clip"] * agent.actor(obs, s.task_w, s.flow_noise)
+    ok = agent.psi(obs, s.u_index, u_a)          # the fixed call
+    assert np.isfinite(np.asarray(ok)).all()
+    with pytest.raises(Exception):               # noqa: B017 -- flax raises ScopeParamShapeError
+        agent.psi(obs, s.task_w, u_a)            # the old, hardcoded-w call

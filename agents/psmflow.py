@@ -177,7 +177,10 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         # the actor already occupies. Keys are drawn inside the branch, so at frac=0 the
         # random stream is unchanged.
         if c["backup_explore_frac"] > 0.0:
-            r_expl, r_emask = jax.random.split(r_next)
+            # Folded out of `rng` (not split from `r_next`, which normal() above already
+            # consumed as a sample key -- the documented reuse anti-pattern). Folding keeps
+            # the frac=0 stream byte-identical, exactly as the `104`/`106` branches do.
+            r_expl, r_emask = jax.random.split(jax.random.fold_in(rng, 107))
             u_prior = jnp.clip(jax.random.normal(r_expl, (B, adim)),
                                -c["u_clip"], c["u_clip"])
             emask = (jax.random.uniform(r_emask, (B,)) < c["backup_explore_frac"])[:, None]
@@ -241,7 +244,13 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         u_a = u_clip * self.actor(obs, w, noise, params=actor_params)
         # psi at its stored params: the DPG gradient reaches the actor THROUGH psi's
         # inputs; psi's own params are outside the argnums and receive no gradient.
-        Qs = (self.psi(obs, w, u_a) * w).sum(-1)  # (P, B)
+        # psi's index slot is whatever `_index` says it is: the task vector w on the
+        # shipped path, the policy latent u' under policy_index='latent'. Hardcoding `w`
+        # here contradicted `measure_loss`/`gpi_select` and, under 'latent', both mis-typed
+        # the head (the actor would maximize a head indexed by the wrong object) and raised
+        # a ScopeParamShapeError on the first update, since the slot is d_a wide, not z_dim.
+        # The actor stays w-conditioned and the READOUT stays `* w`; only the index moves.
+        Qs = (self.psi(obs, self._index(sampled), u_a) * w).sum(-1)  # (P, B)
         qmean, qunc = targets_uncertainty(Qs, c["num_parallel"])
         Q = qmean - c["actor_pessimism_penalty"] * qunc
         q_loss = -Q.mean() / jax.lax.stop_gradient(jnp.abs(Qs).mean() + 1e-8)
