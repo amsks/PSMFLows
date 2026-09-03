@@ -1,38 +1,27 @@
 """Per-task offline RL in the flow's latent space -- the ceiling probe (P2).
 
-This is NOT a zero-shot method and is not meant to be one. The preimage npz already turns
-the dataset into a latent-action dataset (u* per transition), so we can run ordinary
-per-task offline RL over latents: a scalar critic Q(s, u) trained by TD on the ACTUAL task
-reward, an actor emitting a latent, and the executed action being the frozen flow's decode
-of that latent. No psi, no phi, no task vector w.
+NOT a zero-shot method and not meant to be one. Ordinary per-task offline RL over the
+preimage npz's latents: scalar Q(s, u) trained on the actual task reward, an actor emitting
+a latent, executed action = the frozen flow's decode. No psi, no phi, no task vector.
 
-What it answers: can the latent action space support a working improvement loop at all?
-
-  lands near FQL (0.949)  -> the latent space and frozen flow are innocent; whatever is
-                             wrong is in the zero-shot representation, and transplanting
-                             our actor into a working loop (LatentFB) has headroom.
-  caps low (~0.3)         -> the support constraint itself costs the performance; a better
-                             representation cannot exceed this, and LatentFB would have
-                             capped here too.
-
-Deliberately the smallest thing that answers the question: FQL's critic recipe with the
-action replaced by the latent, and psmflow's frozen decode reused verbatim.
+It answers whether the latent action space supports a working improvement loop at all:
+near FQL (0.949) means the latent space and frozen flow are innocent; a low cap means the
+support constraint itself costs the performance.
 
 `critic_input` (2026-09-03) selects WHAT THE CRITIC SCORES, and the two settings are two
 different algorithms sharing one acting path:
 
   action  (default, and what every earlier run did) -- Q(s, a) over the EXECUTED action.
-          The actor gradient reaches the latent THROUGH the frozen decoder, and the
-          residual head is meaningful because the critic can see it.
+          The actor gradient reaches the latent THROUGH the frozen decoder, so the residual
+          head is meaningful: the critic can see it. Byte-for-byte the pre-switch
+          computation -- same rng splits, shapes and logged values, pinned by
+          tests/test_latentrl_smoke.py.
   latent  -- Q(s, u). The offline variant of DSRL (Wagenmaker et al. 2025), which steers a
           frozen generative policy through its input noise. Its offline form needs noise
           aliasing (offline data has actions but no noise); Stage-B preimages ARE that
           aliasing, so `u_data = clip(noise_preimage)` is the in-sample TD anchor. The
           frozen flow is never called during training -- no decode in the critic, none in
           the actor loss -- and reappears only in `sample_actions`. residual_eps must be 0.
-
-`action` is byte-for-byte the pre-switch computation: same rng splits, same shapes, same
-logged values (tests/test_latentrl_smoke.py pins them).
 """
 
 from typing import Any
@@ -265,8 +254,8 @@ class LatentRLAgent(flax.struct.PyTreeNode):
             tx=optax.adam(config["lr"]))
 
         # W4 residual head: (s, u) -> per-dim correction, scaled by eps and tanh-bounded.
-        # NoiseConditionedActor already tanh-bounds its output, so it IS delta with the
-        # tanh applied; `execute` therefore scales it by eps without tanh-ing again.
+        # NoiseConditionedActor already tanh-bounds its output, so it is delta post-tanh;
+        # `execute` only scales it by eps.
         residual_def = NoiseConditionedActor(
             action_dim=action_dim, hidden_dim=config["residual"]["hidden_dim"],
             hidden_layers=config["residual"]["hidden_layers"],

@@ -97,9 +97,8 @@ def setup_wandb(
         group=group,
         dir=wandb_output_dir,
         name=name,
-        # wandb >= 0.29 removed `start_method` and renamed `_disable_stats`; passing
-        # either raises a pydantic ValidationError before the run starts. The defaults
-        # (thread start method, stats enabled) are what these were asking for anyway.
+        # wandb >= 0.29 removed `start_method` and renamed `_disable_stats`; passing either
+        # raises a ValidationError before the run starts. The defaults match what we wanted.
         settings=wandb.Settings(),
         mode=mode,
         save_code=True,

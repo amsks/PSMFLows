@@ -1,22 +1,11 @@
-"""PSM (Proto Successor Measure) agent — JAX/Flax port of the PyTorch reference.
+"""PSM (Proto Successor Measure) agent — JAX/Flax port of the PyTorch reference
+(arXiv 2411.19418). M = psi . phi^T, with a proto branch over a hash codebook of policies
+and an sf branch for the task policy; w = E[r.phi] at eval.
 
-Code <-> paper (arXiv 2411.19418):
-  phi (PhiMap)          -> phi_s(s+)     basis over future states (the proto basis)
-  sf_psi (PsiMap)       -> psi^pi(s,a)   successor features of the task (continuous-z) policy
-  proto_psi (PsiMap)    -> psi^{pi_z}    successor features of the codebook policies pi_z
-  task_z / StepInputs   -> w             task coordinates (inferred from reward at eval)
-  proto_seed            -> z             binary codebook seed in pi(a|s,z)
-  M = psi . phi^T       -> M^pi(s,a,s+)  the successor measure
-  proto_next_action     -> pi(a|s,z)=UniformSample(z+hash(s))  codebook behavior policy
-  contrastive_loss      -> Eq.7 off-diag (TD residual) + diag (source) terms
-  ortho_loss            -> orthonormality regularizer (phi phi^T -> I)
-  infer_z: w = E[r.phi] -> reward inference (closed form)
-
-The update is a 3-stage SEQUENTIAL procedure (proto -> sf -> actor): each network is
-its own `TrainState` (module + optimizer), stepped in turn with target soft-updates
-interleaved; the SF stage reads the phi the proto stage just updated. This differs from
-FQL's single-optimizer combined loss, so PSM uses one TrainState per network rather than
-a single shared ModuleDict optimizer.
+The update is a 3-stage SEQUENTIAL procedure (proto -> sf -> actor): each network is its
+own `TrainState` (module + optimizer), stepped in turn with target soft-updates
+interleaved, and the SF stage reads the phi the proto stage just updated. That is why this
+agent uses one TrainState per network rather than FQL's single shared ModuleDict optimizer.
 """
 
 import copy
@@ -58,6 +47,7 @@ class StepInputs:
 # ----------------------------- pure helpers -----------------------------
 
 def contrastive_loss(M, target_M, discount, off_diag, off_diag_sum):
+    # Eq. 7 (App. B.3.2 pseudocode); diag term takes diag(diff) x num_parallel, not (1-g)*diag(M)
     diff = M - discount * target_M
     offdiag = 0.5 * jnp.sum((diff * off_diag) ** 2) / off_diag_sum
     diag = -jnp.mean(jnp.diagonal(diff, axis1=1, axis2=2)) * M.shape[0]
@@ -65,6 +55,7 @@ def contrastive_loss(M, target_M, discount, off_diag, off_diag_sum):
 
 
 def ortho_loss(phi, off_diag, off_diag_sum):
+    # Table 2 orthonormality reg; enforces E_rho[phi phi^T] = I, the Lemma 6.2 condition
     cov = phi @ phi.T
     offdiag = 0.5 * jnp.sum((cov * off_diag) ** 2) / off_diag_sum
     diag = -jnp.mean(jnp.diagonal(cov))
@@ -80,6 +71,7 @@ def targets_uncertainty(preds, num_parallel):
 
 
 def proto_sample(seed_to_action, powers, obs_hash, z, max_seed):
+    # Eq. 8: pi(a|s,z) = UniformSample(seed = z + hash(s))
     seed_long = jnp.sum(z * powers, axis=1)
     final = ((seed_long + obs_hash.reshape(-1)) % max_seed).astype(jnp.int32)
     return seed_to_action[final].astype(jnp.float32)
@@ -129,6 +121,7 @@ class PSMAgent(flax.struct.PyTreeNode):
     # ---- branch losses ----
     def proto_loss(self, batch, sampled, phi_params, proto_psi_params):
         """Proto branch: learn the basis phi from the codebook policies' measure."""
+        # Eq. 9: argmin_{Phi,b,w(z)} E_z[L^{pi_z}]
         c = self.config
         obs, action, next_obs = batch["observations"], batch["actions"], batch["next_observations"]
         goal = next_obs  # phi_input='s', Identity normalizer/encoder for state
@@ -137,7 +130,7 @@ class PSMAgent(flax.struct.PyTreeNode):
         z_psm, proto_na = sampled.proto_seed, sampled.proto_next_action
 
         phi_g = self.phi(goal, params=phi_params)
-        M = self.proto_psi(obs, z_psm, action, params=proto_psi_params) @ phi_g.T
+        M = self.proto_psi(obs, z_psm, action, params=proto_psi_params) @ phi_g.T  # Lemma 6.2
         tphi = self.phi(goal, params=self.target_phi)
         tM = self.proto_psi(next_obs, z_psm, proto_na, params=self.target_proto_psi) @ tphi.T
         tmean, tunc = targets_uncertainty(tM, P)
@@ -150,6 +143,7 @@ class PSMAgent(flax.struct.PyTreeNode):
 
     def sf_loss(self, batch, sampled, sf_params, phi_params):
         """SF branch: fit the task successor features on the (frozen) basis phi.
+        Not in the paper: FB-style continuous-w head on the Thm 6.3 basis.
 
         `phi_params` is the *just-updated* online phi; the target measure uses the same
         online phi (NOT target_phi, matching the reference) and target_sf_psi.
@@ -171,7 +165,7 @@ class PSMAgent(flax.struct.PyTreeNode):
         return cl, {"sf_loss": cl, "sf_diag": cdiag, "sf_offdiag": coff}
 
     def actor_loss(self, batch, sampled, actor_params, sf_params):
-        """DDPGBC actor: TD3 mean + truncated exploration sample, optional BC term.
+        """DDPGBC actor: TD3 mean + truncated exploration sample, optional BC term. (Sec. 5.3)
 
         `sf_params` (the just-updated sf_psi) supplies Q; it is a constant here.
         """
@@ -266,8 +260,7 @@ class PSMAgent(flax.struct.PyTreeNode):
         target_phi = polyak_update(phi.params, self.target_phi, tau)
         target_proto_psi = polyak_update(proto_psi.params, self.target_proto_psi, tau)
 
-        # stage 2: sf reads the just-updated phi -> step sf_psi, soft-update its target.
-        # sf_loss reads self.target_sf_psi (still the pre-update target) + phi.params (updated).
+        # stage 2: sf_psi steps against the updated phi and the pre-update target_sf_psi.
         (_, sf_i), g_sf = jax.value_and_grad(self.sf_loss, argnums=2, has_aux=True)(
             batch, sampled, self.sf_psi.params, phi.params)
         sf_psi = self.sf_psi.apply_gradients(grads=g_sf)
@@ -299,7 +292,7 @@ class PSMAgent(flax.struct.PyTreeNode):
         obs, next_obs = batch["observations"], batch["next_observations"]
         r1, r2, r5, rperm, rtail = jax.random.split(rng, 5)
         # task vector w: Gaussian, with a mix_ratio fraction replaced by project_z(phi(goal[perm]))
-        # (reference sample_mixed_z, as a jit-friendly mask instead of dynamic indexing).
+        # (reference sample_mixed_z).
         gauss_z = project_z(jax.random.normal(r1, (B, c["z_dim"])), c["norm_z"])
         goal = next_obs
         perm = jax.random.permutation(rperm, B)
@@ -312,10 +305,8 @@ class PSMAgent(flax.struct.PyTreeNode):
         proto_seed = zbin.astype(jnp.float32)
         seed_to_action, powers = self.proto
         max_seed = c["proto_max_seed"]
-        # Proto behavior policy is keyed on the GLOBAL replay-buffer row index of each
-        # transition (reference next_obs_hash = batch["index"]). Falling back to arange(B)
-        # (batch position) makes the proto next-action depend on where a transition lands in
-        # the batch — inconsistent across resamples. Use the injected index when present.
+        # Proto policy keys on the global replay row index, not batch position, so the
+        # next-action is stable across resamples. Falls back to arange(B) if absent.
         obs_hash = batch["index"] if "index" in batch else jnp.arange(B)
         proto_next_action = proto_sample(seed_to_action, powers, obs_hash, proto_seed, max_seed)
 
@@ -341,10 +332,9 @@ class PSMAgent(flax.struct.PyTreeNode):
 
     @jax.jit
     def update(self, batch):
-        # Jitted training step. Each TrainState carries its (nonpytree) module/optimizer as
-        # static aux and its params/opt_state as traced leaves, so `self` is a valid jit
-        # argument. The equivalence tests call apply_update/losses_and_grads directly
-        # (un-jitted), so their numerics are unaffected by any op-fusion here.
+        # Jitted step. TrainState holds its module/optimizer as static aux and its params
+        # as traced leaves, so `self` is a valid jit argument. The equivalence tests call
+        # apply_update/losses_and_grads un-jitted, so op fusion here cannot affect them.
         new_rng, rng = jax.random.split(self.rng)
         sampled = self.sample_step_inputs(batch, rng)
         new_agent, info = self.apply_update(batch, sampled)
@@ -352,9 +342,8 @@ class PSMAgent(flax.struct.PyTreeNode):
 
     @jax.jit
     def sample_actions(self, observations, seed=None, temperature=1.0):
-        # PSM acts conditioned on the task latent task_z (inferred from rewards via
-        # infer_eval_z; defaults to zeros until inferred). DDPGBC returns the TD3 actor
-        # mean; flow runs the one-step, z-conditioned noise actor.
+        # Acts on task_z (set by infer_eval_z, zeros before that). ddpgbc returns the TD3
+        # mean; flow runs the one-step noise actor.
         z = jnp.broadcast_to(self.task_z, (*observations.shape[:-1], self.config["z_dim"]))
         if self.config["actor_type"] == "flow":
             seed = self.rng if seed is None else seed
@@ -376,6 +365,7 @@ class PSMAgent(flax.struct.PyTreeNode):
         return psm_l + sf_l + a_l, {**psm_i, **sf_i, **a_i}
 
     def infer_z(self, next_observations, rewards):
+        # Sec. 6 closed form z = E_rho[phi(s) r(s)] (NOT the Eq. 10 constrained dual)
         phi = self.phi(next_observations)
         z = (rewards.reshape(1, -1) @ phi).reshape(-1) / phi.shape[0]
         return project_z(z, self.config["norm_z"])
@@ -389,9 +379,8 @@ class PSMAgent(flax.struct.PyTreeNode):
     def create(cls, seed, ex_observations, ex_actions, config):
         rng = jax.random.PRNGKey(seed)
         rng, rphi, rsf, rpsm, ract, rproto = jax.random.split(rng, 6)
-        # PSM's bespoke phi/psi/actor operate on raw states; visual encoders are not
-        # supported yet (pixel envs are out of scope). Fail loudly rather than silently
-        # ignore a requested encoder.
+        # phi/psi/actor take raw states; no visual encoder support yet. Fail loudly rather
+        # than ignore a requested one.
         assert config.get("encoder", None) is None, "PSM does not support visual encoders yet."
         action_dim = ex_actions.shape[-1]
         z_dim = config["z_dim"]
@@ -421,9 +410,8 @@ class PSMAgent(flax.struct.PyTreeNode):
         lr_actor_vf = float(actor_cfg["lr_actor_vf"]) if "lr_actor_vf" in actor_cfg else 3e-4
         actor_vf = None
         if actor_type == "flow":
-            # Flow actor: a faithful NoiseConditionedActor head (a = tanh(net(obs, z, noise))
-            # via dual LayerNorm/Tanh/ReLU embeddings) + an unconditional GELU velocity field
-            # v(s, x_t, t). Ports agents/psm/flow_bc + nn_models.{NoiseConditionedActor,VectorField}.
+            # Flow actor: NoiseConditionedActor head a = tanh(net(obs, z, noise)) plus an
+            # unconditional GELU velocity field v(s, x_t, t). Ports flow_bc + nn_models.
             def _acfg(key, default):
                 return actor_cfg[key] if key in actor_cfg else default
             actor_def = NoiseConditionedActor(
@@ -450,13 +438,11 @@ class PSMAgent(flax.struct.PyTreeNode):
         target_proto_psi = copy.deepcopy(proto_psi.params)
         target_sf_psi = copy.deepcopy(sf_psi.params)
 
-        # proto table (jax-generated; used only for training — tests inject it). The table
-        # + powers are a traced pytree leaf (so `update` can be jitted); max_seed is a
-        # static python int kept in config.
+        # proto table + powers are a traced pytree leaf so `update` can be jitted; max_seed
+        # stays a static int in config. Tests inject their own table.
         max_seed = 2 ** config["max_log_seed"] + 20000
-        # Optional: transplant the reference torch proto table (per-row manual_seed(i))
-        # to remove the last cross-framework RNG difference in the behavior policy. Same
-        # distribution as the JAX draw ((rand-1)*2 in [-2,0)); only the exact draws differ.
+        # Optional reference torch table, to drop the last cross-framework RNG difference.
+        # Same distribution as the JAX draw ((rand-1)*2 in [-2,0)); only the draws differ.
         proto_path = config.get("proto_table_path", None)
         if proto_path:
             import numpy as _np
@@ -469,14 +455,14 @@ class PSMAgent(flax.struct.PyTreeNode):
         powers = (2 ** jnp.arange(config["max_log_seed"]))[::-1].astype(jnp.float32)
         proto = (table.astype(jnp.float32), powers)
 
-        # Store a fully-plain config (nested ConfigDicts -> dicts, lists -> tuples) so the
-        # FrozenDict is hashable and can serve as the jit static aux for `update`.
+        # Plain config (ConfigDict -> dict, list -> tuple) so the FrozenDict is hashable
+        # and can serve as the jit static aux for `update`.
         config = _plain_config(config)
         config["ob_dims"] = tuple(ex_observations.shape[1:])
         config["action_dim"] = action_dim
         config["proto_max_seed"] = max_seed
-        # Hoist actor-dispatch scalars to the top level so runtime methods read plain
-        # values (equiv-test configs omit these -> ddpgbc with bc_coeff=0 == legacy path).
+        # Hoist actor-dispatch scalars to the top level so runtime methods read plain values.
+        # Equiv-test configs omit them, giving ddpgbc with bc_coeff=0.
         config["actor_type"] = actor_type
         config["bc_coeff"] = float(actor_cfg["bc_coeff"]) if "bc_coeff" in actor_cfg else 0.0
         config["flow_steps"] = int(actor_cfg["flow_steps"]) if "flow_steps" in actor_cfg else 10
@@ -515,8 +501,7 @@ def get_config():
             sf=dict(hidden_dim=1024, hidden_layers=1, embedding_layers=2),
             actor=dict(type="ddpgbc", hidden_dim=1024, hidden_layers=1, embedding_layers=2,
                        bc_coeff=3.0, flow_steps=10, lr_actor_vf=3.0e-4,
-                       # flow actor (NoiseConditionedActor) + velocity field (VectorField) dims,
-                       # matching reference configs/agent/psm_flowbc.yaml.
+                       # flow actor + velocity field dims (reference psm_flowbc.yaml).
                        flow_actor_hidden_dim=512, flow_actor_hidden_layers=2,
                        flow_actor_embedding_layers=2,
                        flow_vf_hidden_dim=512, flow_vf_hidden_layers=4),
@@ -538,9 +523,9 @@ def _plain_config(x):
 
 
 # ---------------------------------------------------------------------------
-# Shared helpers still imported by agents/fb.py (the FB agent has not yet been
-# migrated to the per-network TrainState structure). PSM itself no longer uses
-# these — they will move to a shared module when FB is refactored.
+# Shared helpers still imported by agents/fb.py, which is not yet on the per-network
+# TrainState structure. PSM no longer uses them; they move to a shared module when
+# FB is refactored.
 # ---------------------------------------------------------------------------
 
 class _HashableDict(dict):

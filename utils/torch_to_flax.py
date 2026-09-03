@@ -72,9 +72,8 @@ def load_phi_params(fix, prefix="phi"):
 
 
 # ── FB loaders ───────────────────────────────────────────────────────────────
-# The FB reference module attribute names carry a leading underscore
-# (_backward_map, _forward_map, _left_encoder, _actor, _actor_vf), so the fixture
-# keys look like `w___backward_map.net.0.weight` (w__ + _backward_map).
+# FB reference module attributes carry a leading underscore (_backward_map, _forward_map,
+# _left_encoder, _actor, _actor_vf), so fixture keys read `w___backward_map.net.0.weight`.
 
 
 def load_backward_params(fix, prefix="_backward_map"):

@@ -50,7 +50,9 @@ def psm_norm(x):
 
 
 class PhiMap(nn.Module):
-    """phi(goal) -> R^z_dim. Sequence: Dense, ntanh, [Dense, relu]*(L-1), Dense, [norm]."""
+    """phi(goal) -> R^z_dim. Sequence: Dense, ntanh, [Dense, relu]*(L-1), Dense, [norm].
+
+    Lemma 6.2 state feature phi(s+)."""
 
     z_dim: int
     hidden_dim: int
@@ -137,7 +139,9 @@ class PSMActor(nn.Module):
 
 
 class PsiMap(nn.Module):
-    """Ensembled successor-feature net -> [num_parallel, B, output_dim]."""
+    """Ensembled successor-feature net -> [num_parallel, B, output_dim].
+
+    Thm 6.3: psi^pi(s,a) = phi_psi(s,a) w^pi, with w folded into the z-conditioning."""
 
     output_dim: int
     hidden_dim: int
@@ -212,12 +216,12 @@ class FlowVectorField(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Affine (full) PSM networks — the M = Phi(s,a,x)·w + b factorization.
+# Affine (full) PSM networks: M = Phi(s,a,x)·w + b.
 # Distinct from the bilinear PhiMap/PsiMap above; see agents/affine_psm.py.
 # ---------------------------------------------------------------------------
 
 class AffineMeasureNet(nn.Module):
-    """Affine successor-measure net (RLU psm.py PSM). Shared trunk on concat[obs,action,x]
+    """Affine successor-measure net (Cor. 4.2; RLU psm.py PSM). Shared trunk on concat[obs,action,x]
     with two heads: phi (basis, R^d) and b (offset, R^1). M(s,a,x) = phi(s,a,x)·w + b.
 
     `norm=True` L2-normalizes phi to ||phi||=sqrt(d) (like PhiMap / Factored-FB). RLU's
@@ -238,8 +242,8 @@ class AffineMeasureNet(nn.Module):
         inp = jnp.concatenate([obs, action, x], -1)
 
         def path(out_dim, name):
-            # RLU builds mlp_phi and mlp_b as two SEPARATE trunks over the same input
-            # (psm.py:174-187) — no shared features — each 5 Linear deep (3 trunk + 2 head).
+            # RLU builds mlp_phi and mlp_b as two separate trunks over the same input, no
+            # shared features, each 5 Linear deep (3 trunk + 2 head).
             h = inp
             for i in range(self.hidden_layers):
                 h = nn.relu(nn.Dense(self.hidden_dim, kernel_init=_ORTH_RELU,
@@ -252,9 +256,8 @@ class AffineMeasureNet(nn.Module):
             phi = psm_norm(phi)
         b = path(1, "b")
         if self.b_scale > 0:
-            # Hard-bound the bias: raw b is an unconstrained degeneracy sink that explodes
-            # (~+-3000) once phi is normalized. Bounding it to +-b_scale keeps M finite while
-            # phi*w (in +-d) carries the informative part.
+            # Bound the bias: raw b is a degeneracy sink that explodes (~+-3000) once phi
+            # is normalized. Bounding to +-b_scale keeps M finite; phi*w carries the signal.
             b = self.b_scale * jnp.tanh(b)
         return phi, b
 
@@ -307,7 +310,7 @@ class FactoredAffineMeasureNet(nn.Module):
 
     def setup(self):
         k = self._k
-        # Four independent towers: {phi, b} x {(s,a) side, x side}. The phi/b separation is
+        # Four independent towers: {phi, b} x {(s,a) side, x side}. phi/b separation is
         # RLU's; the (s,a)/x separation is what makes the B^2 mesh cost B evals.
         self.a_trunk, self.a_head_h = self._tower("a")
         self.a_out = nn.Dense(self.d_dim * k, kernel_init=_ORTH1, name="a_out")
@@ -362,7 +365,7 @@ class FactoredAffineMeasureNet(nn.Module):
 
 class LagrangeNet(nn.Module):
     """Learned Lagrange multiplier lam(s,a,x) >= 0 for dual gradient descent
-    (RLU psm.py `lmult`, softplus head)."""
+    (Eq. 10; RLU psm.py `lmult`, softplus head)."""
 
     hidden_dim: int
     hidden_layers: int = 2
@@ -376,7 +379,7 @@ class LagrangeNet(nn.Module):
 
 
 class WNet(nn.Module):
-    """Task-coordinate net: binary codebook code z (max_log_seed bits) -> w in R^d
+    """Task-coordinate net (Sec. 5.2): binary codebook code z (max_log_seed bits) -> w in R^d
     (RLU psm.py `self.w`). During reward-free training every codebook policy pi_z gets a
     learnable task coordinate w(z), and the affine measure M = Phi·w(z) + b is fit for it.
     (Default Dense init kept deliberately — matches the trained affine_psm checkpoints.)"""

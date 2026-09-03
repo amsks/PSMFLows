@@ -122,17 +122,15 @@ class FQLAgent(flax.struct.PyTreeNode):
             actions = self.compute_flow_actions(state_b, noises=samples, skills=skills_b)
             dist = alpha * jnp.sum((actions - action[None]) ** 2, axis=-1)
             log_prior = -0.5 * prior_scale * jnp.sum(samples ** 2, axis=-1)
-            # Same exposure as the EM variant: the flow diverges to NaN when integrated
-            # from a tail sample at flow_steps>=100, and one NaN makes the whole softmax
-            # NaN. Give such samples weight zero; uniform if none survive.
+            # The flow diverges to NaN from a tail sample at flow_steps>=100, and one NaN
+            # makes the whole softmax NaN. Zero-weight those; uniform if none survive.
             logits = log_prior - dist - log_prob
             ok = jnp.isfinite(logits)
             logits = jnp.where(ok, logits, -jnp.inf)
             logits = jnp.where(jnp.any(ok), logits, jnp.zeros_like(logits))
             weights = jax.nn.softmax(logits, axis=0)
-            # Report 0, not num_samples, when NOTHING was usable. The uniform fallback above
-            # makes every weight 1/num_samples, so 1/sum(w^2) evaluates to num_samples --
-            # the metric's BEST attainable value -- on total failure. See the EM variant.
+            # Report 0, not num_samples, when nothing was usable: the uniform fallback makes
+            # every weight 1/num_samples, so 1/sum(w^2) would score the metric's best value.
             ess = jnp.where(jnp.any(ok), 1.0 / jnp.sum(weights ** 2), 0.0)
             new_x_0 = jnp.sum(weights[..., None] * samples, axis=0)
             diff = samples - new_x_0[None, :]
@@ -219,20 +217,14 @@ class FQLAgent(flax.struct.PyTreeNode):
             safe_weights = jnp.maximum(weights, 1e-12)
             log_joint = jnp.log(safe_weights[..., None]) + log_likelihoods
             log_q = jax.scipy.special.logsumexp(log_joint, axis=0)
-            # Drop samples we cannot score, for either of two reasons:
-            #   log_q  -- a sample far from EVERY component has log_q = -inf, which poisons
-            #             both the responsibilities and the importance weights.
-            #   energy -- the BC flow itself DIVERGES when integrated from a proposal noise
-            #             in the tail. The Laplace covariance saturates at the 1.0 clip in
-            #             _get_predistribution_proposal, so samples are effectively drawn
-            #             ~N(x_0, I); measured on the cube Stage-A checkpoint, ~0.02% land
-            #             at ||u||~6.8 (mean 3.1) and their trajectory runs 6.5 -> 2.3e10
-            #             -> inf -> NaN. flow_steps 10 and 30 under-resolve the blow-up and
-            #             stay finite, which is why this only appeared at >=100.
-            # Masking matters because softmax over a vector containing a single NaN is NaN
-            # in EVERY position: one diverged sample took out its whole row (measured
-            # cascade: 17% of rows at EM step 0, 69% at step 1, 100% by step 5). A diverged
-            # sample is just a bad preimage candidate, so it takes weight zero.
+            # Drop unscorable samples, for two reasons:
+            #   log_q  -- a sample far from every component has log_q = -inf, poisoning both
+            #             the responsibilities and the importance weights.
+            #   energy -- the BC flow diverges to NaN when integrated from a tail proposal
+            #             noise (~0.02% of cube samples, at ||u||~6.8). Only shows up at
+            #             flow_steps>=100; 10 and 30 under-resolve the blow-up.
+            # A single NaN makes softmax NaN in every position, so one diverged sample would
+            # take out its whole row. It is just a bad candidate, so it takes weight zero.
             q_ok = jnp.isfinite(log_q)
             log_q = jnp.where(q_ok, log_q, 0.0)
             ok = q_ok & jnp.isfinite(log_energy)
@@ -248,19 +240,13 @@ class FQLAgent(flax.struct.PyTreeNode):
 
             n_k = jnp.sum(gamma, axis=1)
             new_weights = n_k / jnp.sum(n_k)
-            # A component whose responsibility mass collapses gets its scatter divided by a
-            # near-zero n_k, producing a huge or non-PSD covariance; the next iteration's
-            # MultivariateNormalFullCovariance then returns NaN. Measured on
-            # cube-single-play this hit ~1% of transitions (always at the last EM step),
-            # which over precompute_preimages.py's ~1M transitions is ~10k corrupted
-            # latents. Symmetrize and floor the spectrum to keep every component PSD.
-            # The floor must be RELATIVE to the largest eigenvalue, not absolute: this EM
-            # grows the covariance scale by ~4x per iteration (measured: max eigenvalue
-            # 1 -> 6 -> 34 -> 305 -> 2281 -> 6095 over 8 steps), and an absolute 1e-6 floor
-            # against a 6e3 top eigenvalue is a condition number of 1e9, which float32
-            # cannot reconstruct as PSD — the eigendecomposition returns small NEGATIVE
-            # eigenvalues and the next log_prob is NaN. Capping the condition number at
-            # 1e6 keeps every component representable.
+            # A component whose responsibility mass collapses divides its scatter by a
+            # near-zero n_k, giving a huge or non-PSD covariance and a NaN log_prob next
+            # iteration (~1% of cube transitions). Symmetrize and floor the spectrum.
+            # The floor is relative to the largest eigenvalue, not absolute: this EM grows
+            # the covariance scale ~4x per iteration (max eigenvalue 1 -> 6e3 over 8 steps),
+            # so an absolute 1e-6 floor means a condition number of 1e9, which float32
+            # cannot hold as PSD. Capping the condition number at 1e6 keeps it representable.
             def _condition(c):
                 c = 0.5 * (c + jnp.swapaxes(c, -1, -2))          # kill asymmetry drift
                 w, v = jnp.linalg.eigh(c)
@@ -279,14 +265,9 @@ class FQLAgent(flax.struct.PyTreeNode):
                 )
                 for k in range(n_components)
             ])
-            # ESS must not report success when the step failed outright. If `ok` is all-False
-            # the fallback at the `logits` line above makes every weight exactly
-            # 1/num_samples, so 1/sum(w^2) == num_samples -- the BEST value the metric can
-            # take -- for a row where every single sample was rejected. Measured on the cube
-            # Stage-A ckpt: all 13 of the 1M rows whose stored mixture is NaN reported
-            # ESS=100/100, deterministically across rng seeds. D3 gates on mean ESS, so the
-            # gate was blind to precisely its worst cases. 0 is the honest floor: a row with
-            # no usable sample has no effective samples.
+            # ESS must not report success when the step failed outright. With `ok` all-False
+            # the uniform fallback above makes 1/sum(w^2) == num_samples, the metric's best
+            # value, for a row where every sample was rejected. 0 is the honest floor.
             ess = jnp.where(jnp.any(ok), 1.0 / jnp.sum(sample_weights ** 2), 0.0)
             return (new_means, new_covs, new_weights, rng), ess
 
@@ -353,10 +334,9 @@ class FQLAgent(flax.struct.PyTreeNode):
         distill_loss = jnp.mean((actor_actions - target_flow_actions) ** 2)
 
         if self.config['bc_only']:
-            # Reward-free behaviour-flow pretraining (PSMFlows): no critic, no Q term, and
-            # crucially no read of batch['rewards']/['masks'] — the pretraining dataset has
-            # neither. What survives is exactly the flow objective plus its one-step
-            # distillation, which is the G_theta that psmflow later freezes.
+            # Reward-free behaviour-flow pretraining: no critic, no Q term, and no read of
+            # batch['rewards']/['masks'], which the pretraining dataset lacks. What is left
+            # is the flow objective plus its one-step distillation: the G_theta psmflow freezes.
             actor_loss = bc_flow_loss + self.config['alpha'] * distill_loss
             return actor_loss, {
                 'actor_loss': actor_loss,
@@ -505,9 +485,8 @@ class FQLAgent(flax.struct.PyTreeNode):
         ob_dims = ex_observations.shape[1:]
         action_dim = ex_actions.shape[-1]
 
-        # skill_cond: actor networks take concat([observations, skills], -1). Skills live
-        # in observation space, so ex_observations doubles as the init-time skills example
-        # -- only its shape matters here, not its content.
+        # skill_cond: actor networks take concat([observations, skills], -1). Skills live in
+        # observation space, so ex_observations doubles as the init example (shape only).
         actor_ex_obs = ex_observations
         if config['skill_cond']:
             actor_ex_obs = jnp.concatenate([ex_observations, ex_observations], axis=-1)
@@ -589,8 +568,7 @@ def get_config():
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
             skill_cond=False,  # True => actor flow is G(s, c, u): concat the hindsight-window
             # skill target c (batch['skills']) onto observations for actor_bc_flow and
-            # actor_onestep_flow (GCBC-style, not a latent-variable skill VAE). False is a
-            # byte-identical no-op; the critic path is unaffected either way.
+            # actor_onestep_flow (GCBC-style, not a skill VAE). False is a no-op.
             skill_window=100,  # Steps ahead for the hindsight skill target, clipped at episode end.
         )
     )

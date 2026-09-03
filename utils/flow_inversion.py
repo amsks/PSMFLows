@@ -48,10 +48,9 @@ def compute_preimage_validity(dataset):
             arr = np.asarray(dataset[key])
             valid &= np.isfinite(arr).reshape(size, -1).all(axis=1)
     if 'noise_preimage_point' in dataset:
-        # Finiteness is not enough for the point arm: the implicit-Euler inverse can blow
-        # up to huge FINITE values (measured ||u*||^2 ~ 1e59 on 8/1M alpha=1 cube rows)
-        # without reaching NaN. chi^2_{d_a} mass above 100 is ~0 for any action dim here,
-        # so every such row is a diverged inverse, not an atypical-but-real latent.
+        # Finiteness is not enough for the point arm: the implicit-Euler inverse can blow up
+        # to huge finite values (||u*||^2 ~ 1e59 on 8/1M cube rows) without reaching NaN.
+        # chi^2_{d_a} mass above 100 is ~0 at these action dims, so such rows are diverged.
         sq = (np.asarray(dataset['noise_preimage_point'], np.float64) ** 2).sum(-1)
         valid &= ~(sq > 100.0)
     return valid.astype(np.float32)
@@ -136,10 +135,9 @@ def sample_preimage_noise(means, covs, weights, rng=None):
     rand = np.random if rng is None else rng
     B, K, A = means.shape
 
-    # Pick a component per row via the categorical mixture weights. A row whose weights
-    # sum to ~0 (an EM fit that collapsed for that transition) would divide by zero here
-    # and hand NaN to the comparison, which silently selects component K-1 for it; fall
-    # back to a uniform mixture instead so the row stays a legitimate draw.
+    # Pick a component per row via the categorical mixture weights. A row whose weights sum
+    # to ~0 (a collapsed EM fit) would divide by zero and pass NaN to the comparison, which
+    # silently selects component K-1. Fall back to uniform so the row stays a valid draw.
     weights = np.asarray(weights, np.float64)
     tot = weights.sum(axis=1, keepdims=True)
     weights = np.where(tot > 1e-12, weights, np.full_like(weights, 1.0 / K))
@@ -153,10 +151,9 @@ def sample_preimage_noise(means, covs, weights, rng=None):
     chosen_cov = covs[rows, comp]  # (B, A, A)
 
     # x = mu + L z, with L the Cholesky factor of the chosen covariance. The stored EM
-    # covariances are only PSD up to float error, and this sampler runs on the TRAINING
-    # path: one non-PSD row raises LinAlgError and kills a run mid-flight (the fidelity
-    # tool already jittered for exactly this reason). Symmetrize + jitter, and fall back
-    # to a clipped eigendecomposition if that is still not enough.
+    # covariances are PSD only up to float error, and this runs on the training path, where
+    # one non-PSD row raises LinAlgError and kills the run. Symmetrize + jitter, falling back
+    # to a clipped eigendecomposition.
     chosen_cov = 0.5 * (chosen_cov + np.swapaxes(chosen_cov, -1, -2))
     chosen_cov = chosen_cov + 1e-9 * np.eye(A, dtype=chosen_cov.dtype)
     try:
@@ -198,9 +195,8 @@ def augment_dataset_with_preimage_distribution(agent, dataset, config, skills=No
     n_initial_steps = config.get('n_initial_steps', 100)
     batch_size = config.get('batch_size', 256)
     seed = config.get('seed', 0)
-    # Weight on the flow's own N(0, I) latent prior in the inversion target. 1.0 = the
-    # actual posterior p(u | s, a); 0.0 = the likelihood-only target every npz written
-    # before 2026-08-14 used, which is unbounded in the decoder's flat directions.
+    # Weight on the flow's N(0, I) latent prior in the inversion target. 1.0 = the posterior
+    # p(u | s, a); 0.0 = likelihood-only, unbounded in the decoder's flat directions.
     prior_scale = config.get('prior_scale', 1.0)
 
     assert num_samples >= num_clusters, (
@@ -212,16 +208,15 @@ def augment_dataset_with_preimage_distribution(agent, dataset, config, skills=No
     dataset = get_noise_preimage_dataset(dataset, num_clusters=num_clusters)
     size = get_size(dataset)
     # Per-transition health scalar: how informative the epsilon-relaxed preimage posterior
-    # is. Persisted so a training run can tell whether its inversion was trustworthy
-    # without re-running diagnostic D3. Reference: mean ~7/100 on cube-single at every
-    # flow_steps setting, so treat a much lower value as the anomaly, not 7 itself.
+    # is. Persisted so a run can check its inversion without re-running D3. Reference is
+    # mean ~7/100 on cube-single at every flow_steps setting; much lower is the anomaly.
     dataset['preimage_ess'] = np.zeros((size,), np.float32)
 
     _kw = dict(num_samples=num_samples, n_steps=n_steps,
                n_initial_steps=n_initial_steps, alpha=alpha, n_components=num_clusters,
                prior_scale=prior_scale)
     # The agent widens conditioned inputs itself (agents/fql.py `_actor_obs`), so raw
-    # observations + per-row skills go in — pre-concatenating here would double-concat.
+    # observations + per-row skills go in; pre-concatenating here would double-concat.
     if skills is None:
         _em_batch = jax.jit(jax.vmap(
             lambda state, action, rng: agent.compute_full_proposal_distribution_em(
@@ -243,9 +238,8 @@ def augment_dataset_with_preimage_distribution(agent, dataset, config, skills=No
         dataset['noise_preimage_mean'][start:end] = np.asarray(means)
         dataset['noise_preimage_cov'][start:end] = np.asarray(covs)
         dataset['noise_preimage_weights'][start:end] = np.asarray(weights)
-        # `ess` is (B, n_steps) — the scan stacks one value per EM iteration. Keep the
-        # LAST, which is the health of the mixture actually stored above; an earlier
-        # iterate describes a proposal that was then discarded.
+        # `ess` is (B, n_steps): the scan stacks one value per EM iteration. Keep the last,
+        # which describes the mixture actually stored above.
         dataset['preimage_ess'][start:end] = np.asarray(ess[:, -1])
 
     return dataset
@@ -286,9 +280,8 @@ def augment_dataset_with_point_preimage(agent, dataset, config, skills=None):
     point = np.zeros((size, d_a), np.float32)
     roundtrip = np.zeros((size,), np.float32)
 
-    # jit(vmap), NOT bare vmap: on GPU an un-jitted vmap of this function (lax.scan over an
-    # inner fori_loop, plus jacfwd) returns all-NaN, reproducibly, while the same call
-    # jitted / python-looped / on CPU is correct.
+    # jit(vmap), not bare vmap: on GPU an un-jitted vmap of this function (lax.scan over a
+    # fori_loop, plus jacfwd) reproducibly returns all-NaN. Jitted, looped or on CPU is fine.
     _points = jax.jit(jax.vmap(lambda s, a: agent._get_preimage_and_jacobian(s, a, n_steps)[0]))
     for start in trange(0, size, batch_size, desc='Point preimages'):
         end = min(start + batch_size, size)
@@ -296,14 +289,11 @@ def augment_dataset_with_point_preimage(agent, dataset, config, skills=None):
         skills_batch = None if skills is None else skills[start:end]
         act = dataset['actions'][start:end]
         # `_get_preimage_and_jacobian` talks to the actor nets directly and has no `skills`
-        # kwarg of its own (agents/fql.py did not add one), so it needs the concat done
-        # externally to match the (possibly skill_cond-widened) net input fixed at
-        # `agent.create()` time.
+        # kwarg, so concat here to match the (possibly skill_cond-widened) net input.
         x0 = _points(_with_skills(obs, skills_batch), act)
-        # `compute_flow_actions`, unlike the inverter above, concatenates skills onto obs
-        # INTERNALLY (`agent._actor_obs`) whenever the agent was built with `skill_cond`.
-        # Feeding it the already-concatenated array from the `_points` call above would
-        # double-concat, so this call takes the RAW obs plus the `skills=` kwarg instead.
+        # `compute_flow_actions` concatenates skills internally (`agent._actor_obs`) when the
+        # agent was built with `skill_cond`, so pass raw obs plus `skills=` to avoid a
+        # double concat.
         recon = agent.compute_flow_actions(obs, noises=x0, skills=skills_batch)
         point[start:end] = np.asarray(x0)
         # Compare against the CLIPPED action: compute_flow_actions clips its output to

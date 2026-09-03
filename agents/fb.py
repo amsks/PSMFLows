@@ -1,14 +1,11 @@
 """FB (Forward-Backward) agent — JAX/Flax port of the PyTorch factored-fb reference.
 
-FB is PSM with the proto branch removed: one Forward map F(left_enc(obs), z, action),
-one Backward map B(next_obs) (the measure basis AND the z-source), a left_encoder
-trunk (with target), and a td3/flow actor. The measure M = F.Bᵀ is trained with the
-same off-diag/diag + ortho loss as PSM. Update = 2 backward passes (FB, actor) with
-targets on forward/backward/left_encoder (none on actor); soft-updated with f/b_target_tau.
+FB is PSM with the proto branch removed: one Forward map F(left_enc(obs), z, action), one
+Backward map B(next_obs) (the measure basis AND the z-source), a left_encoder trunk, and a
+td3/flow actor. M = F.B^T, trained with the same off-diag/diag + ortho loss as PSM.
 
-Cube-default path only: measure critic, perm goal-mode (z mixed 50/50 with B(next_obs)),
-onestep off, penalties 0. Reuses PSM's scaffolding (struct, injection-outside-loss,
-_step/_soft, contrastive/ortho/uncertainty helpers) so per-step numerics are testable.
+Cube-default path only: measure critic, perm goal-mode, onestep off, penalties 0. Reuses
+PSM's scaffolding so per-step numerics stay testable.
 """
 
 import copy
@@ -52,10 +49,9 @@ class FBAgent(flax.struct.PyTreeNode):
         c = self.config
         obs, action, next_obs = batch["observations"], batch["actions"], batch["next_observations"]
         goal = next_obs  # bw_encoder = Identity for state
-        # Reference forces terminated=False for every cube transition (data/ogbench.py)
-        # => always-gamma bootstrap. OGBench's packaged `terminals`=1 at each episode's
-        # final step would otherwise cut the bootstrap there; force always-gamma to match
-        # the reference (same fix as PSM's masks=always-gamma). Scalar broadcasts over M.
+        # Reference forces terminated=False for every cube transition, i.e. always-gamma
+        # bootstrap. OGBench's packaged `terminals`=1 at each episode end would otherwise cut
+        # the bootstrap there. Same fix as PSM's masks. Scalar broadcasts over M.
         disc = c["discount"]
         P = c["num_parallel"]
         z = inj["z"]
