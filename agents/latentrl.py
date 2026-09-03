@@ -17,6 +17,22 @@ What it answers: can the latent action space support a working improvement loop 
 
 Deliberately the smallest thing that answers the question: FQL's critic recipe with the
 action replaced by the latent, and psmflow's frozen decode reused verbatim.
+
+`critic_input` (2026-09-03) selects WHAT THE CRITIC SCORES, and the two settings are two
+different algorithms sharing one acting path:
+
+  action  (default, and what every earlier run did) -- Q(s, a) over the EXECUTED action.
+          The actor gradient reaches the latent THROUGH the frozen decoder, and the
+          residual head is meaningful because the critic can see it.
+  latent  -- Q(s, u). The offline variant of DSRL (Wagenmaker et al. 2025), which steers a
+          frozen generative policy through its input noise. Its offline form needs noise
+          aliasing (offline data has actions but no noise); Stage-B preimages ARE that
+          aliasing, so `u_data = clip(noise_preimage)` is the in-sample TD anchor. The
+          frozen flow is never called during training -- no decode in the critic, none in
+          the actor loss -- and reappears only in `sample_actions`. residual_eps must be 0.
+
+`action` is byte-for-byte the pre-switch computation: same rng splits, same shapes, same
+logged values (tests/test_latentrl_smoke.py pins them).
 """
 
 from typing import Any
@@ -82,21 +98,52 @@ class LatentRLAgent(flax.struct.PyTreeNode):
                                         u, params=p)
         return jnp.clip(a, -1.0, 1.0)
 
-    def critic_loss(self, batch, a_data, a_next, critic_params):
-        """Q over EXECUTED ACTIONS, not latents.
+    def critic_loss(self, batch, x_data, x_next, critic_params):
+        """One TD loss for both critic inputs; `update` decides what x is.
 
-        The residual head only receives gradient if the critic can see its effect, so the
-        critic scores actions and the dataset's own action is the in-sample anchor.
+        critic_input='action': x is the EXECUTED action, and the dataset's own action is
+        the in-sample anchor -- the residual head only receives gradient if the critic can
+        see its effect. critic_input='latent': x is the LATENT, and the anchor is the
+        Stage-B preimage u*. Reward, mask, discount and the pessimism-shrunk bootstrap are
+        identical either way; only the argument changes.
         """
         c = self.config
-        q_pred = self.critic(batch["observations"], a_data, params=critic_params)
-        nq = self.critic(batch["next_observations"], a_next, params=self.target_critic)
+        q_pred = self.critic(batch["observations"], x_data, params=critic_params)
+        nq = self.critic(batch["next_observations"], x_next, params=self.target_critic)
         qmean, qunc = targets_uncertainty(nq, c["num_parallel"])
         next_q = qmean - c["pessimism_penalty"] * qunc
         target = batch["rewards"] + c["discount"] * batch["masks"] * next_q
         loss = jnp.mean((q_pred - jax.lax.stop_gradient(target)) ** 2)
-        return loss, {"critic_loss": loss, "q_mean": jnp.mean(q_pred),
-                      "target_mean": jnp.mean(target)}
+        info = {"critic_loss": loss, "q_mean": jnp.mean(q_pred),
+                "target_mean": jnp.mean(target)}
+        if c["critic_input"] == "latent":
+            # Same number as q_mean, under the name that says what it is scoring: mean Q
+            # on the in-sample latents. Kept out of the action path so that path's logged
+            # dict is exactly what it was.
+            info["critic_q_data"] = jnp.mean(q_pred)
+        return loss, info
+
+    def latent_q_spread(self, batch, key):
+        """"Is the latent critic awake?" -- psmflow's ac_q_spread_rel, for Q(s, u).
+
+        16 clipped prior latents at the same states; if Q barely moves across them the
+        -Q gradient carries no direction and the actor is BC plus noise. D3 measured 1.1%
+        relative spread for the measure head, which is what made that arm hopeless; this
+        makes the same number visible live instead of post-hoc on a finished checkpoint.
+        """
+        c = self.config
+        n = min(64, batch["observations"].shape[0])
+        obs = batch["observations"][:n]
+        u = jnp.clip(jax.random.normal(key, (16, n, c["action_dim"])),
+                     -c["u_clip"], c["u_clip"])
+
+        def q_of(u_k):
+            qmean, _ = targets_uncertainty(self.critic(obs, u_k), c["num_parallel"])
+            return qmean                                                    # (n,)
+
+        Q = jax.vmap(q_of)(u)                                               # (16, n)
+        spread = Q.std(0).mean()
+        return {"q_spread": spread, "q_spread_rel": spread / (jnp.abs(Q).mean() + 1e-8)}
 
     def actor_loss(self, batch, u_data, noise, actor_params, residual_params):
         """-Q with a behaviour anchor to the dataset latent (FQL's recipe, in latent space).
@@ -106,6 +153,17 @@ class LatentRLAgent(flax.struct.PyTreeNode):
         """
         c = self.config
         u_a = self.actor_latent(batch["observations"], noise, params=actor_params)
+        if c["critic_input"] == "latent":
+            # DSRL: the critic scores the latent, so there is nothing to decode. The
+            # frozen flow does not appear in this graph at all -- pinned by a test that
+            # perturbs flow_onestep and requires this loss not to move.
+            qs = self.critic(batch["observations"], u_a)
+            qmean, qunc = targets_uncertainty(qs, c["num_parallel"])
+            q = qmean - c["actor_pessimism_penalty"] * qunc
+            q_loss = -q.mean() / jax.lax.stop_gradient(jnp.abs(q).mean() + 1e-8)
+            bc = jnp.mean((u_a - u_data) ** 2)
+            loss = q_loss + c["bc_alpha_latent"] * bc
+            return loss, {"actor_loss": loss, "actor_q": q.mean(), "bc_loss": bc}
         a_exec = self.execute(batch["observations"], u_a, residual_params=residual_params)
         qs = self.critic(batch["observations"], a_exec)
         qmean, qunc = targets_uncertainty(qs, c["num_parallel"])
@@ -128,10 +186,16 @@ class LatentRLAgent(flax.struct.PyTreeNode):
         u_data = jnp.clip(jnp.asarray(batch["noise_preimage"]), -c["u_clip"], c["u_clip"])
         u_next = self.actor_latent(batch["next_observations"],
                                    jax.random.normal(r_next, (B, d_a)))
-        a_next = self.execute(batch["next_observations"], u_next)
+        # The critic's two arguments, per critic_input. The latent branch never calls
+        # `execute`, so the frozen decoder is absent from the whole training graph; the
+        # action branch is exactly the pre-2026-09-03 pair.
+        if c["critic_input"] == "latent":
+            x_data, x_next = u_data, u_next
+        else:
+            x_data, x_next = batch["actions"], self.execute(batch["next_observations"], u_next)
 
         (_, cinfo), gc = jax.value_and_grad(self.critic_loss, argnums=3, has_aux=True)(
-            batch, batch["actions"], jax.lax.stop_gradient(a_next), self.critic.params)
+            batch, x_data, jax.lax.stop_gradient(x_next), self.critic.params)
         critic = self.critic.apply_gradients(grads=gc)
         target_critic = polyak_update(critic.params, self.target_critic, c["tau"])
 
@@ -140,9 +204,16 @@ class LatentRLAgent(flax.struct.PyTreeNode):
             batch, u_data, jax.random.normal(r_act, (B, d_a)),
             self.actor.params, self.residual.params)
         actor = self.actor.apply_gradients(grads=ga)
+        # Under critic_input=latent the residual is not in the loss, so `gr` is all zeros
+        # and adam's update is exactly zero -- the head stays at init, inert, as asserted.
         residual = self.residual.apply_gradients(grads=gr)
+        info = {**cinfo, **ainfo}
+        if c["critic_input"] == "latent":
+            # Key FOLDED out of self.rng rather than split from it, so adding the
+            # diagnostic leaves the actor/critic draws above untouched.
+            info.update(self.latent_q_spread(batch, jax.random.fold_in(self.rng, 137)))
         return (self.replace(rng=rng, critic=critic, target_critic=target_critic,
-                             actor=actor, residual=residual), {**cinfo, **ainfo})
+                             actor=actor, residual=residual), info)
 
     @jax.jit
     def sample_actions(self, observations, seed=None, temperature=1.0):
@@ -161,11 +232,28 @@ class LatentRLAgent(flax.struct.PyTreeNode):
         ex_u = jnp.zeros((ex_observations.shape[0], action_dim))
         ex_z = jnp.zeros((ex_observations.shape[0], config["z_dim"]))
 
+        critic_input = config.get("critic_input", "action")
+        assert critic_input in ("action", "latent"), critic_input
+        if critic_input == "latent":
+            assert float(config["residual_eps"]) == 0.0, (
+                "critic_input=latent requires residual_eps=0.0: the critic scores latents, "
+                f"so it cannot see a residual, and residual_eps={config['residual_eps']} "
+                "would put an unscored correction into the executed action")
+        if "critic_input" not in config or "bc_alpha_latent" not in config:
+            # A config restored from a flags.json written before 2026-09-03 has neither
+            # key; fill them with the values that reproduce that run.
+            with config.unlocked():
+                config["critic_input"] = critic_input
+                config["bc_alpha_latent"] = config.get("bc_alpha_latent", config["alpha"])
+
         critic_def = Value(hidden_dims=tuple(config["value_hidden_dims"]),
                            layer_norm=config["layer_norm"],
                            num_ensembles=config["num_parallel"])
+        # Both inputs have width action_dim, so the ensemble is the same shape either way;
+        # initialising on the argument the critic will actually receive keeps that explicit.
+        critic_ex = ex_u if critic_input == "latent" else ex_actions
         critic = TrainState.create(
-            critic_def, critic_def.init(rc, ex_observations, ex_actions)["params"],
+            critic_def, critic_def.init(rc, ex_observations, critic_ex)["params"],
             tx=optax.adam(config["lr"]))
 
         actor_def = NoiseConditionedActor(

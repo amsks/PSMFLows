@@ -13,9 +13,22 @@ discount: 0.99          # FB's value; 0.98 gives a ~50-step horizon, myopic for 
 tau: 0.005
 pessimism_penalty: 0.5
 actor_pessimism_penalty: 0.5
-alpha: 10.0             # BC weight toward the dataset latent u*
+alpha: 10.0             # BC weight toward the dataset latent u* (critic_input=action)
 z_dim: 8                # width of the constant vector fed to the actor's z-slot (unused)
 u_clip: 3.0
+
+# WHAT THE CRITIC SCORES.
+#   action (default, and what every run before 2026-09-03 did): Q(s, a) over EXECUTED
+#     actions, so the gradient reaches the actor through the frozen decoder. Capped at
+#     0.142 at residual_eps=0; the epsilon=0.05 residual arm reached 0.905.
+#   latent: Q(s, u) -- the offline DSRL variant (Wagenmaker et al. 2025) made runnable by
+#     the Stage-B preimages, which supply the noise offline data does not carry. The frozen
+#     flow is NEVER called during training; it reappears only at acting time. Requires
+#     residual_eps=0 (asserted): a residual the critic cannot see is uninterpretable.
+critic_input: action
+# BC weight on the latent anchor under critic_input=latent. Defaults to `alpha` so the two
+# paths share one number unless overridden; 0.0 is legal and is the pure-DSRL setting.
+bc_alpha_latent: 10.0
 
 # W4 bounded residual head: executed action = clip(decode(u) + residual_eps * delta(s,u)),
 # delta tanh-bounded. 0.0 leaves the head inert (but the critic still scores executed

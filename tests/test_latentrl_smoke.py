@@ -170,3 +170,139 @@ def test_flow_params_stay_frozen():
     after = jax.tree_util.tree_leaves((agent.flow_vf, agent.flow_onestep))
     for b, a in zip(before, after):
         np.testing.assert_array_equal(np.asarray(b), np.asarray(a))
+
+
+# ---------------------------------------------------------------------------
+# critic_input=latent -- the offline DSRL-SAC arm (docs/plans/2026-09-03-latentrl-dsrl-sac.md)
+# ---------------------------------------------------------------------------
+
+# Two update steps of the DEFAULT (action) path, recorded from the code as it stood before
+# `critic_input` existed. The switch's whole claim is that `action` reproduces byte-for-byte
+# -- same rng splits, same shapes, same numbers -- so these are pinned, not recomputed.
+GOLDEN_ACTION_PATH = {
+    "actor_bc": 0.8154887557029724,
+    "actor_loss": 9.05768871307373,
+    "actor_q": -0.8462899923324585,
+    "critic_loss": 4.652002334594727,
+    "q_mean": -0.227675199508667,
+    "residual_spend": 0.0,
+    "target_mean": -1.4628702402114868,
+}
+
+
+def test_action_path_is_bit_for_bit_what_it_was_before_the_switch():
+    """critic_input defaults to `action` and that path is the pre-existing computation."""
+    agent = _agent()
+    assert agent.config["critic_input"] == "action"
+    agent, _ = agent.update(_batch(0))
+    _, info = agent.update(_batch(1))
+    for k, want in GOLDEN_ACTION_PATH.items():
+        np.testing.assert_allclose(float(info[k]), want, rtol=1e-6, atol=1e-6,
+                                   err_msg=f"{k} moved: the action path is not the old one")
+    # ...and asking for it explicitly is the same thing.
+    a2 = _agent(critic_input="action")
+    a2, _ = a2.update(_batch(0))
+    _, info2 = a2.update(_batch(1))
+    for k in GOLDEN_ACTION_PATH:
+        np.testing.assert_array_equal(np.asarray(info[k]), np.asarray(info2[k]))
+
+
+def test_latent_critic_takes_a_finite_step():
+    agent = _agent(critic_input="latent")
+    new, info = agent.update(_batch())
+    for k in ("critic_loss", "actor_loss", "actor_q", "bc_loss", "critic_q_data",
+              "q_spread", "q_spread_rel"):
+        assert k in info, k
+        assert math.isfinite(float(info[k])), (k, info[k])
+    assert not _tree_equal(agent.critic.params, new.critic.params)
+    assert not _tree_equal(agent.actor.params, new.actor.params)
+
+
+def test_latent_critic_never_touches_the_flow():
+    """The point of the arm: no decode anywhere in the training graph.
+
+    Two independent checks -- the frozen params are unchanged after a step (which the
+    action path also satisfies), and perturbing the decoder cannot move the actor loss
+    (which the action path does NOT satisfy, since its critic scores decoded actions).
+    """
+    agent = _agent(critic_input="latent")
+    before = jax.tree_util.tree_leaves((agent.flow_vf, agent.flow_onestep))
+    stepped, _ = agent.update(_batch())
+    for b, a in zip(before, jax.tree_util.tree_leaves(
+            (stepped.flow_vf, stepped.flow_onestep))):
+        np.testing.assert_array_equal(np.asarray(b), np.asarray(a))
+
+    batch = _batch()
+    u_data = jnp.clip(jnp.asarray(batch["noise_preimage"]), -3.0, 3.0)
+    noise = jnp.asarray(np.random.default_rng(7).standard_normal((B, ACT)), jnp.float32)
+
+    def actor_loss_of(a):
+        val, _ = a.actor_loss(batch, u_data, noise, a.actor.params, a.residual.params)
+        return float(val)
+
+    bumped = agent.replace(flow_onestep=jax.tree_util.tree_map(
+        lambda p: p + 1.0, agent.flow_onestep))
+    assert math.isclose(actor_loss_of(agent), actor_loss_of(bumped), rel_tol=1e-6), (
+        "the latent actor loss moved when the frozen decoder was perturbed -- there is a "
+        "decode in the training graph")
+    # The action path is the contrast: there the decoder IS in the actor loss.
+    act_agent = _agent(critic_input="action")
+    act_bumped = act_agent.replace(flow_onestep=jax.tree_util.tree_map(
+        lambda p: p + 1.0, act_agent.flow_onestep))
+    assert not math.isclose(actor_loss_of(act_agent), actor_loss_of(act_bumped),
+                            rel_tol=1e-6)
+
+
+def test_latent_critic_scores_latents_not_actions():
+    """Q must respond to u and be blind to batch['actions']."""
+    agent = _agent(critic_input="latent")
+    batch = _batch()
+    _, info = agent.update(batch)
+    other = dict(batch, actions=-np.asarray(batch["actions"]))
+    _, info2 = agent.update(other)
+    np.testing.assert_allclose(float(info["critic_loss"]), float(info2["critic_loss"]),
+                               rtol=1e-6, atol=1e-7)
+    perturbed = dict(batch, noise_preimage=batch["noise_preimage"] + 0.5)
+    _, info3 = agent.update(perturbed)
+    assert not math.isclose(float(info["critic_loss"]), float(info3["critic_loss"]),
+                            rel_tol=1e-6)
+
+
+def test_latent_actor_bc_weight_is_its_own_knob_and_zero_is_legal():
+    """bc_alpha_latent=0 is the pure-DSRL setting: the actor loss stops seeing u_data."""
+    batch, moved = _batch(), _batch()
+    moved = dict(moved, noise_preimage=moved["noise_preimage"] + 1.0)
+
+    def actor_loss_of(a, b):
+        u_data = jnp.clip(jnp.asarray(b["noise_preimage"]), -3.0, 3.0)
+        noise = jnp.asarray(np.random.default_rng(7).standard_normal((B, ACT)), jnp.float32)
+        val, _ = a.actor_loss(b, u_data, noise, a.actor.params, a.residual.params)
+        return float(val)
+
+    a0 = _agent(critic_input="latent", bc_alpha_latent=0.0)
+    assert math.isclose(actor_loss_of(a0, batch), actor_loss_of(a0, moved), rel_tol=1e-6), (
+        "bc_alpha_latent=0 still anchors to u_data")
+    a1 = _agent(critic_input="latent", bc_alpha_latent=10.0)
+    assert not math.isclose(actor_loss_of(a1, batch), actor_loss_of(a1, moved),
+                            rel_tol=1e-6)
+    # ...and the default is the shared number, so the two paths use one alpha unless told.
+    assert float(_agent().config["bc_alpha_latent"]) == float(_agent().config["alpha"])
+    _, info = a0.update(batch)
+    assert math.isfinite(float(info["actor_loss"]))
+
+
+def test_latent_critic_refuses_a_live_residual():
+    with pytest.raises(AssertionError, match="residual_eps"):
+        _agent(critic_input="latent", residual_eps=0.05)
+
+
+def test_q_spread_diagnostic_does_not_disturb_the_training_stream():
+    """The spread key is folded out of rng, so the actor/critic draws are unaffected."""
+    agent = _agent(critic_input="latent")
+    batch = _batch()
+    new, info = agent.update(batch)
+    # 16 clipped prior draws at up to 64 states: a relative spread, so scale-free.
+    assert float(info["q_spread"]) >= 0.0
+    # The successor rng must be the plain 3-way split, exactly as the action path's is.
+    expected_rng = jax.random.split(agent.rng, 3)[0]
+    np.testing.assert_array_equal(np.asarray(new.rng), np.asarray(expected_rng))
