@@ -36,6 +36,13 @@ HEADLINE = [
     ("FQL (per-task reference, raw actions)", "per-task", ["eval500_fql_cube_sd?.json"]),
     ("Latent RL, per-task, eps=0.05 @peak", "per-task", ["eval500_l1stab_res0.05_*_peak*.json"]),
     ("Latent RL, per-task, eps=0 (pure decode)", "per-task", ["eval500_w4_res0.0_sd?_final.json"]),
+    # 09-03 DSRL-SAC: scalar critic over LATENTS (critic_input=latent), flow never called in
+    # training. Two u_clip arms, 2 seeds each. Both must be evaluated with the training
+    # u_clip repeated (agent.u_clip, agent.critic_input=latent) -- the JSONs record both.
+    ("Latent RL, DSRL-SAC (latent critic), u_clip=3", "per-task",
+     ["eval500_latsac_uclip3_sd?.json"]),
+    ("Latent RL, DSRL-SAC (latent critic), u_clip=1", "per-task",
+     ["eval500_latsac_uclip1_sd?.json"]),
     ("FB (zero-shot, raw actions)", "zero-shot", ["eval500_fb_cube_sd?.json"]),
     ("PSMFlow (zero-shot, latent -> frozen decode)", "zero-shot", ["eval500_latentpsm_cube_sd?.json"]),
     ("PSMFlow, HP-matched to FB", "zero-shot", ["eval500_hpmatch_sd00?.json"]),
@@ -60,6 +67,29 @@ HEADLINE = [
     ("Paper-faithful Arm A (u'~p0 bootstrap)", "zero-shot", ["eval500_paperfaith_armA_sd?.json"]),
     ("Paper-faithful Arm B (psi(s,u,u'), no actor, gpi)", "zero-shot",
      ["eval500_paperfaith_armB_sd?.json"]),
+    # 09-03 point-vs-mixture ablation (audit discrepancy #3: the write-up's q_alpha is the
+    # MIXTURE, every reported number was the point preimage). Shipped defaults otherwise
+    # (acting=actor, policy_index=task_vector, train_actor=true, u_clip=3.0), 2 seeds each.
+    # The mixture arm CANNOT use the canonical npz -- its sidecar records no prior_scale, so
+    # main.py refuses use_point_preimage=false against the legacy likelihood-only target --
+    # so it runs on the HPO-corrected npz (cube a20.6/ps0.69/ns12, antmaze a26.5/ps0.60/ns5).
+    # `pointps` is the confound control: POINT preimages read from that SAME corrected npz,
+    # which separates "mixture vs point" from "one npz vs the other". Antmaze rows are the
+    # first 500-episode psmflow numbers on that env; they do not pool with the cube rows.
+    ("PSMFlow point preimage, cube (canonical npz)", "zero-shot",
+     ["eval500_psmflow_cube_point_sd?.json"]),
+    ("PSMFlow mixture q_alpha, cube (corrected npz)", "zero-shot",
+     ["eval500_psmflow_cube_mix_sd?.json"]),
+    ("PSMFlow point preimage, cube (corrected npz control)", "zero-shot",
+     ["eval500_psmflow_cube_pointps_sd?.json"]),
+    ("PSMFlow point preimage, antmaze (canonical npz)", "zero-shot",
+     ["eval500_psmflow_antmaze_point_sd?.json"]),
+    ("PSMFlow mixture q_alpha, antmaze (corrected npz)", "zero-shot",
+     ["eval500_psmflow_antmaze_mix_sd?.json"]),
+    ("PSMFlow point preimage, antmaze (corrected npz control)", "zero-shot",
+     ["eval500_psmflow_antmaze_pointps_sd?.json"]),
+    ("Behavior-cloning control, antmaze (per-step prior)", "control",
+     ["bc_control_antmaze.json"]),
 ]
 
 # Static provenance notes appended to the markdown table.

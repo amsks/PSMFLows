@@ -13,6 +13,15 @@ Two agents matter here and both work unchanged:
     decodes it, i.e. running the frozen Stage-A flow IS the per-step-prior BC control.
     No z inference, no preimages.
 
+The agent config is taken from the RUN'S OWN flags.json (under restore_path) wherever
+one exists, with anything typed on the command line layered on top. Before 2026-09-03 it
+came from the hydra `agent` group plus CLI overrides only, so a run trained off-default
+(`agent.policy_index=latent`, `agent.train_actor=false`, a non-default `agent.u_clip` or
+`agent.acting`, latentrl's `agent.critic_input`) silently evaluated a DIFFERENT policy
+unless every flag was re-typed on the eval line. `restore_agent` replaces the parameter
+tree wholesale without a shape check, so that failure is loud for a width change and
+silent for `u_clip` (the actor is tanh * u_clip: a 3x action scale, no error).
+
 Reports mean success with a Wilson 95% interval (the normal approximation misbehaves
 near 0 and 1, and the BC control could land anywhere), plus the per-episode successes
 so several runs can be pooled later.
@@ -22,6 +31,7 @@ Run: MUJOCO_GL=egl .venv/bin/python tools/eval_checkpoint.py \
     agent.preimage_path=<npz> env_name=cube-single-play-singletask-v0 \
     restore_path=<run_dir> restore_epoch=500000 eval_episodes=500
 """
+import json
 import math
 import os
 import sys
@@ -33,6 +43,7 @@ import utils.xla_guard  # noqa: F401  -- MUST precede jax (see module docstring)
 import hydra
 import ml_collections
 import numpy as np
+from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf
 
 from agents import agents
@@ -55,6 +66,104 @@ def wilson(k, n, z=1.96):
     return (round(centre - half, 4), round(centre + half, 4))
 
 
+def _cli_agent_keys():
+    """The `agent.*` keys the caller actually typed, so they can be re-applied last.
+
+    Hydra records the raw override strings; `agent=psmflow` selects the group and is not
+    a value, so only dotted `agent.<...>` entries count. An explicit override must beat
+    the run's flags.json -- that is what makes a deliberate off-config eval still possible.
+    """
+    try:
+        task = HydraConfig.get().overrides.task
+    except ValueError:  # not inside a hydra job (unit tests call the helpers directly)
+        return set()
+    keys = set()
+    for raw in task:
+        item = str(raw).lstrip("+~")
+        if "=" not in item:
+            continue
+        key = item.split("=", 1)[0].strip()
+        if key.startswith("agent."):
+            keys.add(key[len("agent."):])
+    return keys
+
+
+def _get_path(d, path):
+    for part in path.split("."):
+        if not isinstance(d, dict) or part not in d:
+            raise KeyError(path)
+        d = d[part]
+    return d
+
+
+def _set_path(d, path, value):
+    parts = path.split(".")
+    for part in parts[:-1]:
+        d = d[part]
+    d[parts[-1]] = value
+
+
+def merge_run_config(cli_agent, restore_path, cli_keys):
+    """Run's flags.json as the DEFAULTS, the typed CLI overrides on top.
+
+    Only keys present in BOTH dicts are inherited: the schema stays exactly the one this
+    checkout builds agents from, so a flags.json from an older or newer config cannot add
+    or remove a field -- it can only change a value this code already reads. Returns
+    (merged dict, provenance dict) and is a pure function so it is unit-testable without
+    hydra, an env or a GPU.
+    """
+    prov = {"flags_json": None, "inherited": {}, "cli_overrides": sorted(cli_keys),
+            "ignored_run_only_keys": []}
+    if not restore_path:
+        return cli_agent, prov
+    path = os.path.join(str(restore_path), "flags.json")
+    if not os.path.exists(path):
+        return cli_agent, prov
+    try:
+        with open(path) as fh:
+            run_flags = json.load(fh)
+    except (OSError, ValueError) as e:
+        print(f"WARNING: could not read {path} ({e}); using the hydra agent config only")
+        return cli_agent, prov
+    run_agent = run_flags.get("agent")
+    if not isinstance(run_agent, dict):
+        return cli_agent, prov
+    prov["flags_json"] = path
+    # A checkpoint from a different agent cannot be restored into this one anyway; fail
+    # here with the reason rather than inside restore_agent's tree replacement.
+    assert run_agent.get("agent_name") == cli_agent.get("agent_name"), (
+        f"{path} was written by agent={run_agent.get('agent_name')!r} but this eval builds "
+        f"agent={cli_agent.get('agent_name')!r}")
+
+    merged = json.loads(json.dumps(cli_agent))  # deep copy, plain containers
+
+    def walk(run_d, out_d, prefix=""):
+        for k, v in run_d.items():
+            if k not in out_d:
+                prov["ignored_run_only_keys"].append(prefix + k)
+                continue
+            if isinstance(v, dict) and isinstance(out_d[k], dict):
+                walk(v, out_d[k], prefix + k + ".")
+                continue
+            if out_d[k] != v:
+                prov["inherited"][prefix + k] = {"config": out_d[k], "run": v}
+                out_d[k] = v
+
+    walk(run_agent, merged)
+    # The typed overrides win, re-applied after the inherit pass.
+    for key in cli_keys:
+        try:
+            value = _get_path(cli_agent, key)
+        except KeyError:
+            continue
+        try:
+            _set_path(merged, key, value)
+        except (KeyError, TypeError):
+            continue
+        prov["inherited"].pop(key, None)
+    return merged, prov
+
+
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg):
     # Dataset.sample() draws from the GLOBAL numpy stream, so the task-vector relabel
@@ -64,7 +173,20 @@ def main(cfg):
 
     env, eval_env, train_dataset, _ = make_env_and_datasets(cfg.env_name, frame_stack=cfg.frame_stack)
     ds = Dataset.create(**train_dataset)
-    config = ml_collections.ConfigDict(_lists_to_tuples(OmegaConf.to_container(cfg.agent, resolve=True)))
+    cli_agent = OmegaConf.to_container(cfg.agent, resolve=True)
+    merged, prov = merge_run_config(cli_agent, cfg.restore_path, _cli_agent_keys())
+    if prov["flags_json"]:
+        print(f"agent config defaults from {prov['flags_json']}")
+        for k, d in sorted(prov["inherited"].items()):
+            print(f"  {k}: config {d['config']!r} -> run {d['run']!r}")
+        if prov["cli_overrides"]:
+            print(f"  CLI overrides kept: {', '.join(prov['cli_overrides'])}")
+        if not prov["inherited"]:
+            print("  (run config already matches this checkout's defaults)")
+    else:
+        print(f"NOTE: no flags.json under restore_path={cfg.restore_path!r}; "
+              "agent config is the hydra group plus CLI overrides only")
+    config = ml_collections.ConfigDict(_lists_to_tuples(merged))
     name = config["agent_name"]
 
     ex = ds.sample(1)
@@ -129,8 +251,18 @@ def main(cfg):
                           "fb_graft": bool(ac.get("fb_graft", False))},
         "dataset_fraction": float(cfg.get("dataset_fraction", 1.0)),
         "dataset_fraction_seed": int(cfg.get("dataset_fraction_seed", 0)),
+        # latentrl's two must-repeat flags (see scripts/eval500.sh's header): the actor is
+        # tanh * u_clip and the critic's input space is a config switch, so a JSON that does
+        # not record them cannot be checked against the run's flags.json after the fact.
+        "u_clip": config.get("u_clip"),
+        "critic_input": config.get("critic_input"),
         "flow_ckpt_path": str(config.get("flow_ckpt_path")),
         "preimage_path": str(config.get("preimage_path")),
+        # Where each agent-config value came from, so a JSON can be checked against the
+        # run's flags.json after the fact instead of trusted.
+        "agent_config_source": prov,
+        "policy_index": config.get("policy_index"),
+        "train_actor": config.get("train_actor"),
         "restore_path": str(cfg.restore_path),
         "restore_epoch": int(cfg.restore_epoch),
         "seed": int(cfg.seed),
