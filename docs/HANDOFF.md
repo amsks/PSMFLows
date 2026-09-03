@@ -17,8 +17,471 @@ x-/(s,a)-branch) are still the open leads if we return to it. The older bilinear
 hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RESEARCH_NOTE.md`
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
-Branch: `feat/inversion-integration` · Machine: `midi-01` (UT CS)
-Date: **2026-09-01** (latest) · prior: 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+Branch: `feat/inversion-integration` · Machine: `kisski` (GWDG, SLURM/H100) · prior: `midi-01` (UT CS)
+Date: **2026-09-03** (latest) · prior: 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+
+---
+
+<!-- _class: lead -->
+
+## 2026-09-03 — DSRL-SAC launched: a scalar critic over LATENTS, flow never called in training
+
+New switch `agent.critic_input: action | latent` in `agents/latentrl.py`. `action` is the
+default and is byte-for-byte the pre-existing computation (same rng splits, same shapes,
+same logged values — pinned by golden numbers in `tests/test_latentrl_smoke.py`). `latent`
+is the offline DSRL arm: `Q(s, u)`, TD anchored on `u_data = clip(noise_preimage, ±u_clip)`,
+actor `−Q(s, u_a)/stopgrad(|Q|) + bc_alpha_latent·‖u_a − u_data‖²`, **no decode anywhere in
+the training graph** (a test perturbs `flow_onestep` and requires the actor loss not to
+move). Residual head must be inert (`residual_eps=0`, asserted at `create()`). Acting is
+unchanged: actor latent → frozen one-step decode. Plan: `docs/plans/2026-09-03-latentrl-dsrl-sac.md`.
+
+### Why this cell of the grid was empty
+
+DSRL (Wagenmaker et al. 2025) steers a frozen generative policy through its input noise; the
+offline variant needs noise aliasing, and Stage-B preimages ARE that aliasing. What we had
+run instead: psmflow's actor steers latents against `ψᵀw` (flat — D3, 1.1% relative spread),
+and `latentrl`'s critic scored **decoded actions** with the gradient through the decoder
+(0.142 ± 0.025 at ε=0, 0.905 ± 0.020 at ε=0.05). Nobody had run *scalar latent critic +
+latent actor + no decode in training*.
+
+### Arms (SLURM, one H100 per seed — no tmux on this machine, job name is the handle)
+
+| SLURM job (id) | group | `u_clip` | seed | run dir under `$PSM_DATA/exp/PSMFLows/` |
+|---|---|---|---|---|
+| `latsac_cube_uclip3_sd0` (2491460) | `latsac_cube_uclip3` | 3.0 | 0 | `latsac_cube_uclip3/sd000_s_2491460.0.20260903_021732` |
+| `latsac_cube_uclip3_sd1` (2491461) | `latsac_cube_uclip3` | 3.0 | 1 | `latsac_cube_uclip3/sd001_s_2491461.0.20260903_021732` |
+| `latsac_cube_uclip1_sd0` (2491462) | `latsac_cube_uclip1` | 1.0 | 0 | `latsac_cube_uclip1/sd000_s_2491462.0.20260903_021732` |
+| `latsac_cube_uclip1_sd1` (2491463) | `latsac_cube_uclip1` | 1.0 | 1 | `latsac_cube_uclip1/sd001_s_2491463.0.20260903_021731` |
+
+All four on `gpu002.kisski`, `--gres=gpu:1` each, so one seed per H100 and no sharing.
+Logs `$PSM_DATA/logs/<job name>-<id>.out`. Submitted through
+`scripts/slurm/train_psmflow.sbatch` with `AGENT=latentrl`.
+
+All: `agent=latentrl agent.critic_input=latent agent.use_point_preimage=true`,
+`bc_alpha_latent=10.0`, `residual_eps=0.0`, `alpha=10.0`, `lr=3e-4`, `batch_size=256`,
+critic `[512]×4` + layer_norm, `num_parallel=2`, `discount=0.99`, `tau=0.005`,
+`pessimism_penalty=0.5`, `actor_pessimism_penalty=0.5`, actor/residual `512×2` with 2
+embedding layers, `offline_steps=500000 eval_interval=50000 eval_episodes=50`.
+Frozen Stage-A flow `/mnt/home/amohan/psm-data/flow/cube-single-play` @ 500000 (run group
+`bcflow_cube_single_20260726_135032` — the checkpoint every cube number decodes through);
+preimages `/mnt/home/amohan/psm-data/preimages/cube-single-play.npz` (canonical, alpha=20,
+`num_samples=200`, 13/1M invalid), pulled from HF with `--with-flow`.
+
+### Expected outcomes, pre-registered
+
+- **near FQL (0.949) / the residual result (0.905):** offline latent TD works with a scalar
+  critic; the zero-shot loss is in the representation (D2: best linear readout of φ explains
+  ~13% of reward variance).
+- **near 0.14:** offline latent TD does not survive without an action-space critic; next
+  step is DSRL-NA (`Q_A` over dataset actions, latent Q distilled over prior draws).
+
+**Prediction on the new live diagnostic:** psmflow's measure head sits at ~1% relative Q
+spread; if this scalar critic is also ~1%, the actor gradient will again be BC-dominated.
+`q_spread` / `q_spread_rel` (16 clipped prior draws at ≤64 states, key folded out of `rng`
+so the training stream is untouched) is now logged every `log_interval`.
+
+**Early reading (in flight, NOT a result).** 400-step smoke `latsac_smoke2`: `q_spread_rel`
+0.034 → 0.026 → 0.020 → 0.019 over steps 100–400. All four real arms at 25k steps:
+`q_spread_rel` **0.0017–0.0037** (uclip3 sd0/sd1 0.0034/0.0017, uclip1 sd0/sd1
+0.0037/0.0020), i.e. already **below** psmflow's 1.1%, with `critic_q_data` running away
+downward (−75 to −81) exactly as the 08-13 calibration forensics describe. On the
+pre-registered reading that is the 0.14 branch, and `u_clip=1.0` did **not** raise the
+relative spread — so the "everything decodes to nearly the same action" explanation for
+flatness is not what the tighter box tests it to be. By 165k–175k steps `q_spread_rel` has
+risen to **0.006–0.012**, i.e. settling right on psmflow's ~1% band, and the 50-episode
+in-loop evals are wandering 0.06–0.32 (±0.115 CI each — do not quote them). Wait for the
+500-episode evals before concluding; the prediction is on record either way.
+
+### RESULT — all four runs finished 500k, 500-episode evals in
+
+All four SLURM jobs `COMPLETED 0:0` (22–24 min wall clock each on one H100);
+`params_500000.pkl` present in every run dir. Evaluated one job per GPU through
+`scripts/slurm/eval500.sbatch` → `scripts/eval500.sh latentrl cube`, with
+`agent.critic_input=latent` and the training `u_clip` repeated; each was cross-checked
+against the run's own `flags.json` before submitting and both flags are now recorded **in
+the eval JSON itself** (`u_clip`, `critic_input` added to `tools/eval_checkpoint.py`'s
+report), so the numbers below are verifiable, not asserted. Eval seed left at the config
+default 0 for all four — the protocol every recorded eval500 number used
+(`scripts/reeval_ode_e2.sh` never passes a seed), so the 500 episode inits are paired.
+
+| arm | seed | success (500 ep) | Wilson 95% |
+|---|---|---|---|
+| `latsac_cube_uclip3` | 0 | **0.186** (93/500) | [0.154, 0.223] |
+| `latsac_cube_uclip3` | 1 | **0.180** (90/500) | [0.149, 0.216] |
+| `latsac_cube_uclip1` | 0 | **0.096** (48/500) | [0.073, 0.125] |
+| `latsac_cube_uclip1` | 1 | **0.158** (79/500) | [0.129, 0.193] |
+
+Per arm, mean ± 95% CI across the 2 seeds (t interval, the project convention; with n=2 the
+t multiplier is 12.7, so the u_clip=1 interval is uninformative on its own):
+
+| arm | mean ± 95% CI |
+|---|---|
+| `latsac_cube_uclip3` (u_clip=3) | **0.183 ± 0.038** |
+| `latsac_cube_uclip1` (u_clip=1) | **0.127 ± 0.394** |
+
+**BC control measured on this cluster** (`agent=fql agent.bc_only=true`, same frozen flow the arms decode through, 500 episodes, `$PSM_DATA/evals/bc_cube.json`): **0.072** (36/500) [0.052, 0.098] — reproducing midi-01's 0.068 [0.049, 0.093], so both arms genuinely clear the control on this machine's own measurement.
+
+Comparators, from `docs/tables/results.md` (same env, same 500-episode protocol):
+FQL per-task **0.949 ± 0.063**; latent RL per-task ε=0.05 **0.905 ± 0.020**; latent RL
+per-task ε=0 pure decode **0.142 ± 0.025**; BC control (per-step prior through the same
+frozen flow) **0.068 [0.049, 0.093]**.
+
+**Verdict: the 0.14 branch, not the 0.9 branch.** Both arms land in the pure-decode band —
+u_clip=3 at 0.183 ± 0.038 is a hair above the ε=0 latent-critic result (0.142 ± 0.025) and
+squarely inside the PSMFlow zero-shot band (0.236 ± 0.071 / re-eval 0.220 ± 0.037); u_clip=1
+at 0.127 ± 0.394 is indistinguishable from it. Nothing is within reach of 0.905 or 0.949.
+Both beat the BC control (0.068) — the loop is not inert, it just does not improve past what
+a decode-only policy already gets. So a *scalar critic over latents with no decode in the
+training graph* does not recover the per-task ceiling: everything that ever worked here
+worked by letting the critic see and move a raw action. Per the plan, the next step is
+DSRL-NA (`Q_A` over dataset actions, latent Q distilled over prior draws).
+
+**The Q-spread prediction was right.** Final in-loop diagnostics at step 500000 (`train.csv`,
+not an eval number):
+
+| arm | `q_spread_rel` | `critic_q_data` | `actor_q` | `bc_loss` |
+|---|---|---|---|---|
+| uclip3 sd0 | 0.0125 | −165.50 | −166.76 | 0.961 |
+| uclip3 sd1 | 0.0150 | −177.05 | −177.73 | 0.892 |
+| uclip1 sd0 | 0.0110 | −166.20 | −167.22 | 0.415 |
+| uclip1 sd1 | 0.0153 | −191.72 | −192.92 | 0.426 |
+
+`q_spread_rel` 1.1–1.5% is exactly psmflow's measure-head band (1.1%), i.e. the critic
+separates clipped prior draws about as poorly as ψᵀw does, and `actor_q` sits within ~1 of
+`critic_q_data` — the actor is not finding anything the data anchor does not already have.
+`critic_q_data` at −165 to −192 (from −75 to −81 at 25k) is the same monotone downward drift
+the 08-13 calibration forensics describe, so the scale the actor normalises by is set by
+runaway pessimism rather than by real value differences. `u_clip=1.0` did not raise the
+relative spread at 500k any more than it did at 25k, so the tighter typical-set box does not
+rescue separability — the "everything decodes to nearly the same action" story is not what
+is limiting this.
+
+`tools/make_tables.py` gained the two rows (`eval500_latsac_uclip{3,1}_sd?.json`, patterned
+on the existing latent-RL rows) and they resolve against `$PSM_DATA/logs` here, but the tool
+was **not run**: this cluster holds none of the historical `eval500_*.json`, so
+`make_tables.py --logs $PSM_DATA/logs` would rewrite `docs/tables/results.md` with `--` in
+every other cell. Run it on midi-01, or after the four JSONs are copied to that logs dir.
+
+### Also this session
+
+- `scripts/eval500.sh` gained a `latentrl` mode and now **rejects unknown modes**: it
+  previously fell through to `agent=psmflow` for any first argument other than `bc`, so
+  `eval500.sh latentrl ...` would silently have evaluated the wrong agent.
+- **`u_clip` must be repeated at eval.** Nothing outside the agent config hard-codes 3.0
+  where it matters (`utils/flow_inversion.py` never clips; `tools/analyze_preimages.py`'s
+  `U_CLIP_DEFAULT = 3.0` is a `--u_clip`-overridable diagnostic default; `psmflow.py:776` is
+  a fallback `get_config`), but `tools/eval_checkpoint.py` rebuilds the agent from the hydra
+  config, and the actor is `tanh * u_clip`. Evaluating the `u_clip=1.0` arm without
+  `agent.u_clip=1.0` scales every action by 3x. Noted in `eval500.sh`'s header.
+- `scripts/slurm/train_psmflow.sbatch` takes `AGENT`, `EVAL_EPS`, `LOG_INT` (defaults
+  reproduce every earlier submit line).
+- `scripts/eval500.sh`'s midi-01 paths are now env-overridable (`PSM_REPO`, `EVAL_LOGS`,
+  `EXP_ROOT`, `FLOW_DIR`, `PRE_NPZ`, `OGBENCH_DATASET_DIR`); the defaults are unchanged, so
+  every midi-01 invocation still works. It also fails fast if the flow dir or preimage npz
+  is absent, and validates `MODE` before touching paths. New `scripts/slurm/eval500.sbatch`
+  wraps it for the scheduler, the way `train_psmflow.sbatch` wraps `main.py`.
+- `tools/eval_checkpoint.py` now records `u_clip` and `critic_input` in the report JSON, so
+  a latentrl eval can be checked against the run's `flags.json` after the fact rather than
+  trusted.
+- Full suite module-per-process on this cluster: **37/37 modules, 223 passed, 3 skipped,
+  zero failures** (`test_latentrl_smoke.py` 13 passed).
+- On this machine `.venv` had neither pytest nor ruff; installed. `ruff check .` reports 354
+  pre-existing findings repo-wide under ruff 0.16.5 (no `lint.select` in `pyproject.toml`,
+  so the default rule set moved) — `agents/latentrl.py` is clean and the one finding in
+  `tests/test_latentrl_smoke.py` (C408) is pre-existing at HEAD.
+- `tests/test_decode_recovery.py` fails on this cluster with a pre-existing float32/float64
+  carry mismatch in `agents/fql.py:51` (`implicit_euler_step`); unrelated to this change.
+
+### Addendum (2026-09-03) — does the behaviour flow MEMORIZE cube? No: train ≈ val, everywhere
+
+First run of `tools/diag_flow_fit.py` (untracked, written but never executed). SLURM
+`flowfit` (2491473), one H100, 7 min: 2048 anchors x 512 unclipped N(0,I) latents, exact
+ODE at `flow_steps=100` and the distilled one-step head, k_max=512, 250k-row standardized
+k-NN index, eps swept in multiples of the median anchor-1NN state distance (1.029). Report:
+`$PSM_DATA/logs/diag_flow_fit_cube.json`. Added a `min_mse` block to the tool (per-anchor
+`min_j |G(s,u_j) - a|^2` and its min-over-the-whole-ball twin, with the data-to-data value
+in the same ball as the scale); everything else is as written.
+
+Lowest MSE per anchor, in units of `(mean|a|)^2 = 0.311^2` (ODE):
+
+| split | own mean | median | p90 | ball@1x mean | data-self@1x mean | own / data-self |
+|---|---|---|---|---|---|---|
+| train (in Stage-A training set) | **0.0708** | 0.0437 | 0.1486 | 0.0782 | 0.699 | 0.101 |
+| val (OGBench held-out split, 100k rows) | **0.0718** | 0.0452 | 0.1504 | 0.0615 | 0.619 | 0.116 |
+
+val/train ratio **1.014** (ODE) and **1.003** (one-step) — the memorization line is flat.
+The val split is genuinely held out: `main.py` only ever calls `train_dataset.sample()` for
+gradients, `val_dataset` is logging-only, and OGBench ships it as a separate file.
+
+- The flow reproduces a recorded action ~10x better than the nearest *other* dataset action
+  in the same ball does (0.071 vs 0.70), so it is well inside the aleatoric noise floor of
+  the behaviour conditional, and identically so on states it never saw.
+- One-step decode is ~1.5x worse than ODE-100 on the same latents (own mean 0.105 vs 0.071)
+  and splits the same way (1.003), so the deployed head loses fidelity but not generality.
+- `null` (same ball population, wrong location) sits at 2.6-2.8 against `recall_ball`
+  0.24-0.82: conditioning on s carries real information at every radius.
+- Ceiling from the stored point preimage: **3.9e-4** — the exact inverse decodes ~180x
+  tighter than the best of 512 prior draws, i.e. the residual is coverage of the prior, not
+  capacity.
+- `min_vs_n` at 1x: recall_ball falls 1.120 (N=1) -> 0.322 (N=512), still not flat, so any
+  single min-over-N number is N-bound and must be quoted with N.
+
+**Reading: the flow fits the conditional, it does not memorize.** Whatever is wrong
+downstream (the 0.14/0.18 band above) is not a Stage-A overfitting problem.
+
+### Addendum (2026-09-03, later) — the same diagnostic on antmaze: fits worse, memorizes a little
+
+SLURM `flowfit-antmaze` (2491474), one H100, 7 min, through the new
+`scripts/slurm/diag_flow_fit.sbatch`. Identical protocol to cube (2048 anchors x 512
+unclipped `N(0,I)` latents, ODE-100 + one-step head, k_max=512, 250k-row standardized k-NN
+index, the same 0.25x-3x eps sweep). Flow `$PSM_DATA/flow/antmaze-medium-navigate` @ 500000,
+`d_a = 8`, `mean|a| = 0.6395`, median 1-NN state distance 1.789. Report:
+`$PSM_DATA/logs/diag_flow_fit_antmaze.json`. **The diagnostic needs no preimages** — every
+statistic samples `u ~ N(0, I)`; the npz is read only for the `point_preimage_ceiling` line,
+so the 881/1M invalid antmaze rows are irrelevant here (the ceiling subsamples 256 rows).
+
+Lowest MSE per anchor, in units of `(mean|a|)^2 = 0.6395^2` (ODE-100):
+
+| split | own mean | median | p90 | ball@1x mean | data-self@1x mean | own / data-self |
+|---|---|---|---|---|---|---|
+| train | **0.2392** [0.229, 0.252] | 0.1809 | 0.4447 | 0.2602 | 1.125 | 0.213 |
+| val (100k held-out rows) | **0.3047** [0.284, 0.330] | 0.2112 | 0.5300 | 0.2994 | 1.200 | 0.254 |
+
+val/train ratio **1.274** (ODE), **1.131** (one-step) — non-trivially above 1, against
+cube's 1.014/1.003. `recall_ball` (train, ODE) 0.461 / 0.675 / 1.091 / 1.168 at
+0.5x / 1x / 2x / 3x with `null` 2.83 at 1x; one-step is within 0.005 of ODE at every radius
+(0.463 / 0.676 / 1.080 / 1.156, null 2.82). Ceiling from the point preimage **3.8e-4**,
+essentially cube's. `min_vs_n` at 1x falls 1.683 (N=1) -> 0.675 (N=512), still not flat.
+Caveat: antmaze balls saturate the k_max=512 neighbour cap (62% of anchors at 2x, 99% at
+3x; cube 55% at 3x), so the 2-3x radii are truncated balls, not full ones.
+
+**Reading vs cube.** Antmaze fits the conditional *worse in absolute terms* — own min-MSE
+0.239 vs 0.071, and 0.21 of the data's own local spread vs cube's 0.10 — and it is the one
+env with a real, if small, train/val split (1.27x). Not memorization in the damaging sense:
+a memorizing flow reproduces train anchors and fails held-out ones outright, and 1.27x on a
+statistic whose own bootstrap CI is ±5% is a mild generalization gap on top of a fit that is
+still ~4x tighter than the nearest other dataset action. The one-step head is the surprise
+in the other direction: on cube it costs 1.49x on own min-MSE, on antmaze only 1.16x, and
+its recall curves are indistinguishable from ODE-100 — the distillation gap is a cube
+phenomenon, not a general one. pointmaze was **not** run: its Stage-A checkpoint pulled fine
+from HF, but the OGBench `pointmaze-medium-navigate-v0` dataset is not on this cluster and
+`rail.eecs.berkeley.edu` is unreachable through the proxy.
+
+Figures (`tools/fig_diag_flow_fit.py`, reads every `$PSM_DATA/logs/diag_flow_fit_<env>.json`;
+`.pdf` beside each `.png`), plus the generated table `docs/tables/flow_fit.md`:
+`PAPER/ICLR/figures/fig_flow_fit_recall.png`,
+`PAPER/ICLR/figures/fig_flow_fit_memorization.png`,
+`PAPER/ICLR/figures/fig_flow_fit_min_vs_n.png`.
+
+---
+
+<!-- _class: lead -->
+
+### Addendum (2026-09-03, later still) — three audit bugs fixed; point-vs-mixture measured at 500 episodes on cube AND antmaze
+
+Acting on `docs/design/2026-09-03-latent-actor-audit.md` (bugs 1, 2, 4) and
+`docs/design/2026-09-03-paper-code-audit.md` (discrepancy #3, the mixture `q_alpha`).
+Nothing on the shipped code path changed — verified byte-identical, see below — so the
+point arms are a straight reproduction check.
+
+#### Fixes
+
+| # | file:line | what | severity |
+|---|---|---|---|
+| 1 | `agents/psmflow.py:253` | `flow_actor_loss` read psi at the hardcoded task vector `w`; now `self._index(sampled)`. Under `policy_index=latent` that slot is `d_a` wide, so the old call both mis-typed the head and raised `ScopeParamShapeError` on the first update. | real, unreachable from any shipped config |
+| 2 | `agents/psmflow.py:183` | `r_expl, r_emask` were split from `r_next` **after** `normal(r_next, ...)` had consumed it. Now `split(fold_in(rng, 107))`, the same convention as the `104`/`106` branches. | cosmetic (`backup_explore_frac=0.0` by default) |
+| 3 | `tools/eval_checkpoint.py:69,106,177,263` | new `_cli_agent_keys()` + `merge_run_config()`: the **run's own `flags.json` supplies the agent config**, typed CLI overrides layered on top; provenance recorded in the report JSON as `agent_config_source`, and `policy_index`/`train_actor` added to the report. | operational — the one path that produced a wrong number **silently** |
+
+Semantics of fix 1, decided rather than asserted: the actor stays **w-conditioned** (it is
+the policy the deployed action comes from), the index slot carries **u'** exactly as
+`measure_loss` and `gpi_select` read it, and the readout stays `Q = psi(s, u', u_a)^T w`.
+That is coherent, so `create()` gained no assert — `policy_index=latent` × `train_actor=true`
+now simply works. Fix 3 inherits **only keys the current config already has**, so a stale or
+newer `flags.json` can change a value this checkout reads but cannot add or drop a field;
+`u_clip`, `acting`, `train_actor`, `policy_index` and `critic_input` can no longer mismatch
+in silence. Verified live: the eval of the 09-02 antmaze run printed
+`agent config defaults from .../flags.json`, `CLI overrides kept: flow_ckpt_epoch,
+flow_ckpt_path, preimage_path, use_point_preimage`, `(run config already matches this
+checkout's defaults)`.
+
+#### Tests
+
+New: `tests/test_psmflow_policy_index.py:105,126` (Arm B with a trained actor takes a
+finite step and the actor moves; psi is read at the policy index, and the old
+hardcoded-`w` call is pinned as the shape error it was),
+`tests/test_psmflow_backup_explore.py:74` (the explore keys are folded out of `rng`, not
+split from the consumed `r_next`), and `tests/test_eval_checkpoint_flags.py` (11 cases:
+flags.json supplies defaults, a typed override — flat or nested — still wins, the schema
+stays this checkout's, a different `agent_name` is refused, and no/unreadable/agent-less
+flags.json plus no `restore_path` are all no-ops, which is what keeps every recorded
+eval500 number reproducible; plus an explicit pin that the `bc` control's semantics do not
+move).
+
+Both psmflow tests were confirmed to **fail** against the unpatched file before the fix.
+The **default path is byte-identical**: a fixed-seed fingerprint of `sample_step_inputs`
+(all seven draws, hex bits) and of a full `update`'s losses and post-step
+phi/psi/actor/actor_vf parameters is unchanged before vs after — which is why the point
+arms below are a reproduction and not a new measurement.
+
+#### What the mixture arm can and cannot show
+
+Audit row `paper-code-audit.md:75`: the write-up's loss draws `u_i ~ q_alpha(.|s_i,a_i)`,
+the epsilon-relaxed posterior; **every shipped result instead used
+`use_point_preimage=true`, i.e. `q_alpha = delta_{u*}`.** This is the first time the
+mixture arm has been run to 500 episodes. Caveat that limits the ceiling of the result
+(audit row `:74`): `configs/inversion/default.yaml` ships `num_clusters: 1`, so the
+"mixture" is a **single** Gaussian — the multi-modal refinement the paper describes has
+never been run at K>1. What this measures is "point estimate vs a Gaussian around it",
+not "point vs a multi-modal posterior".
+
+#### The mixture arm cannot use the published npz — finding, not a choice
+
+`use_point_preimage=false` on `$PSM_DATA/preimages/{cube-single-play,antmaze-medium-navigate}.npz`
+is **refused by `main.py:143-148`**: neither sidecar records `inversion.prior_scale`, and
+absent means the pre-08-14 likelihood-only target, whose fits sit outside the prior the
+latent actor samples from. The canonical npz files therefore support the point arm only.
+The mixture arm runs instead on the HPO-corrected npz pulled from the HF dataset repo —
+`cube-single-play-a20p6-ps0p69-ns12-N200` (alpha 20.57, prior_scale 0.691, n_steps 12) and
+`antmaze-medium-navigate-a26p5-ps0p60-ns5-N200` (alpha 26.51, prior_scale 0.597, n_steps 5),
+the 09-01 sweep winners. Both carry `noise_preimage_{mean,cov,weights}` at K=1, both
+sidecars were repaired to this machine's flow dir by `hf_preimages.py pull --with-flow`.
+
+That makes point-vs-mixture confounded with npz-vs-npz, so a **third arm** was added at seed
+0: `pointps` = POINT preimages read from the SAME corrected npz. `mix` vs `pointps` is the
+clean mixture ablation; `point` vs `pointps` isolates the inversion settings.
+
+#### Arms — psmflow stage C, shipped defaults throughout
+
+`batch_size=1024 z_dim=128 num_parallel=2 discount=0.98 tau=0.01 ortho_coef=1000
+pessimism_penalty=actor_pessimism_penalty=0.5 mix_ratio=0.5 backup_explore_frac=0.0
+acting=actor policy_index=task_vector train_actor=true u_clip=3.0 gpi_decode=onestep
+action_critic.enabled=false actor.bc_coeff=1.0 lr_phi=1e-5 lr_sf=1e-4 lr_actor=1e-4
+lr_actor_vf=3e-4`; `offline_steps=500000 online_steps=0 eval_interval=50000
+eval_episodes=50 save_interval=250000`; flow `$PSM_DATA/flow/<env>` @ 500000.
+Every run's own `flags.json` was re-read after launch and all seven fields confirmed.
+
+#### Pre-registered expectations (written before any eval landed)
+
+1. **cube point reproduces 0.220 ± 0.037.** No shipped-path code changed and the golden
+   fingerprint is byte-identical, so anything outside that band is a machine/artifact
+   difference, not the fixes.
+2. **cube mix within noise of cube point.** E4b already measured the mixture-trained
+   checkpoint's ranking Spearman and Q spread in the same band as the point arm — the
+   mixture does not create ranking signal, so it should not move success.
+3. **antmaze (both arms) lands near its BC control.** D2/D3 say `Q_W = psi^T w` carries
+   almost no ranking signal, the 09-03 actor audit measured the deployed action as 0.85%
+   sensitive to `w` and a 0.961-correlated pass-through of its own noise, and the 09-01
+   HPO recorded antmaze coverage 0.036 at its own optimum. **Expected failure**: no
+   separation from BC.
+4. **`pointps` ≈ `point`.** The corrected inversion changes the BC anchor's target, not the
+   critic; if it moves success materially, the standing "the actor is BC with an 8%
+   perturbation" reading needs revisiting.
+
+#### RESULT — all ten runs finished 500k; 500-episode evals
+
+| env | arm | seed 0 (500 ep) | seed 1 (500 ep) | mean ± 95% CI (t, across seeds) | pooled |
+|---|---|---|---|---|---|
+| cube | point preimage, canonical npz | 117/500 = **0.234** [0.199, 0.273] | 113/500 = **0.226** [0.192, 0.265] | **0.230 ± 0.051** | 230/1000 = 0.230 [0.205, 0.257] |
+| cube | mixture `q_alpha`, corrected npz | 94/500 = **0.188** [0.156, 0.225] | 100/500 = **0.200** [0.167, 0.237] | **0.194 ± 0.076** | 194/1000 = 0.194 [0.171, 0.220] |
+| cube | point preimage, corrected npz *(control)* | 143/500 = **0.286** [0.248, 0.327] | 109/500 = **0.218** [0.184, 0.256] | **0.239 ± 0.102** (3 seeds) | 358/1500 = 0.239 [0.218, 0.261] |
+| antmaze | point preimage, canonical npz | 112/500 = **0.224** [0.190, 0.263] | 101/500 = **0.202** [0.169, 0.239] | **0.213 ± 0.140** | 213/1000 = 0.213 [0.189, 0.239] |
+| antmaze | mixture `q_alpha`, corrected npz | 101/500 = **0.202** [0.169, 0.239] | 105/500 = **0.210** [0.177, 0.248] | **0.206 ± 0.051** | 206/1000 = 0.206 [0.182, 0.232] |
+| antmaze | point preimage, corrected npz *(control)* | 131/500 = **0.262** [0.225, 0.302] | 94/500 = **0.188** [0.156, 0.225] | **0.247 ± 0.131** (3 seeds) | 370/1500 = 0.247 [0.226, 0.269] |
+
+**Seeds 1 and 2 of both `pointps` arms** (added 2026-09-03 later; SLURM `2491503`–`2491506`
+for training, `2491507`–`2491510` for the evals; each run's `flags.json` is byte-identical to
+its seed-0 sibling except for `seed`, verified after launch). Seed 2 has no column in the
+table above, so all three seeds together:
+
+| env | arm | seed 0 | seed 1 | seed 2 | mean ± 95% CI (t, n=3) | pooled |
+|---|---|---|---|---|---|---|
+| cube | point preimage, corrected npz | **0.286** (143/500) | **0.218** (109/500) | **0.212** (106/500) | **0.239 ± 0.102** | 358/1500 = 0.239 [0.218, 0.261] |
+| antmaze | point preimage, corrected npz | **0.262** (131/500) | **0.188** (94/500) | **0.290** (145/500) | **0.247 ± 0.131** | 370/1500 = 0.247 [0.226, 0.269] |
+
+Across-seed SD is 0.041 (cube) and 0.053 (antmaze) — this arm is the **noisiest** of the
+three, and seed 0 was its best seed on both envs. Wall clock 50 min (cube) / 56 min
+(antmaze) per 500k run, 4–9 min per 500-episode eval.
+
+Comparators. **cube**: PSMFlow re-eval **0.220 ± 0.037**, FB **0.721 ± 0.020** (3 seeds,
+`docs/tables/results.md:12`), BC control **0.072** [0.052, 0.098]. **antmaze**: PSMFlow
+mixture 09-02, 3 seeds, **0.215 ± 0.041** (`$PSM_DATA/evals/psmflow_antmaze_sd00{0,1,2}.json`);
+midi-01 doc-recorded 1-seed PSMFlow **0.222** [0.188, 0.261] and BC **0.090** [0.068, 0.118]
+(`docs/HANDOFF.md:1137`); BC control re-measured on this cluster **0.072** [0.052, 0.098]
+(`$PSM_DATA/logs/bc_control_antmaze.json`, 36/500). **There is no FB number on antmaze at
+any episode count** — FB has only ever been run on cube, so the antmaze rows have no
+zero-shot baseline to sit beside.
+
+Two exact-count collisions were checked and are not artefacts: antmaze point sd1 and the
+09-02 mixture sd0 are both 101/500 but their per-episode vectors differ in 162 places, and
+the cube and antmaze BC controls are both 36/500 with different vectors. Wall clock:
+cube 50 min, antmaze 56-59 min per 500k run on one H100 (10 concurrent).
+
+#### Verdicts against the pre-registered expectations
+
+1. **CONFIRMED.** cube point = 0.230 ± 0.051, pooled [0.205, 0.257] — inside the recorded
+   0.220 ± 0.037 band. Stronger than that: the antmaze mixture arm reproduced the 09-02
+   runs **bit-exactly** — 101/500 and 105/500 with **Hamming distance 0** on the
+   per-episode vectors, from independently trained checkpoints on different nodes a day
+   apart. Fixes 1 and 2 provably did not touch the shipped path.
+2. **REFUTED.** The mixture is **worse**, not equal. Against the point arm on the SAME
+   corrected npz, cube drops 0.286 [0.248, 0.327] → 0.194 [0.171, 0.220] — the Wilson
+   intervals do not overlap, a real ~0.09 loss. Antmaze drops 0.262 [0.225, 0.302] →
+   0.206 [0.182, 0.232], also non-overlapping. E4b showed the mixture does not create
+   *ranking* signal; this shows it actively degrades the BC anchor. Read with the K=1
+   caveat above: sampling a Gaussian around `u*` instead of `u*` injects noise into the
+   CFM target and the TD anchor without adding modes.
+3. **REFUTED.** Antmaze does **not** collapse to its BC control: 0.213 and 0.206 against
+   0.072 [0.052, 0.098], ~3x and far outside the interval, the same separation cube shows
+   (0.230 vs 0.072). Whatever the actor audit's "BC with an 8% perturbation" reading
+   explains, it is not that the agent is indistinguishable from BC on success. It remains
+   true that neither env comes near cube's FB 0.721.
+4. **CONFIRMED at 3 seeds — and the 1-seed reading below it is WITHDRAWN.** With seeds 1
+   and 2 in, `pointps` ≈ `point` on both envs, exactly as pre-registered: cube
+   **0.239 ± 0.102** vs point **0.230 ± 0.051** (diff +0.009, Welch t=0.36); antmaze
+   **0.247 ± 0.131** vs point **0.213 ± 0.140** (diff +0.034, Welch t=1.04). Every t-interval
+   overlaps, and so do the pooled Wilson intervals (cube [0.218, 0.261] vs [0.205, 0.257];
+   antmaze [0.226, 0.269] vs [0.189, 0.239]). **The provisional 1-seed claim that the
+   HPO-corrected inversion buys ~0.05 does not survive replication**: seed 0 was the best
+   seed of three on *both* envs (cube 0.286 vs 0.218/0.212, antmaze 0.262 vs 0.188/0.290),
+   and the across-seed SD of this arm (0.041 / 0.053) is about the size of the effect that
+   was read off it. Stage-B inversion quality is **not** shown to move Stage-C success, and
+   the standing "the actor is BC with an 8% perturbation" reading does not need revisiting
+   on this evidence. Do not quote the +0.05 anywhere — it was a one-seed artefact, and this
+   is the second time this session a single seed pointed the wrong way.
+
+   *Consequence for verdict 2:* the mixture is still the worst arm, but with the correct
+   3-seed `pointps` comparator the cube gap narrows from 0.286 → 0.194 to
+   0.239 ± 0.102 → 0.194 ± 0.076 (Welch t=1.82) and the antmaze gap from 0.262 → 0.206 to
+   0.247 ± 0.131 → 0.206 ± 0.051 (t=1.33) — **neither is significant across seeds** now,
+   though the pooled Wilson intervals still separate on cube ([0.218, 0.261] vs
+   [0.171, 0.220]) and now touch on antmaze ([0.226, 0.269] vs [0.182, 0.232]). Verdict 2's
+   direction survives; its "the intervals do not overlap" phrasing was resting on the
+   single lucky `pointps` seed and should be read as *point ≥ mixture, cube significant
+   pooled, antmaze not*.
+
+Net ordering at 3 seeds: **point/corrected ≈ point/canonical > mixture**, consistent
+across both environments — the two point arms are indistinguishable and the paper's
+`q_alpha` is the worst of the three (significantly so only on cube, pooled).
+
+#### Artifacts
+
+Run dirs under `$PSM_DATA/exp/PSMFLows/`: `psmflow_{cube,antmaze}_{point,mix}/sd00{0,1}_s_<jobid>.*`
+(jobs 2491480-2491487) and `psmflow_{cube,antmaze}_pointps/sd00{0,1,2}_s_<jobid>.*`
+(seed 0: 2491488-2491489; seeds 1-2: 2491503-2491506, evals 2491507-2491510).
+Eval JSONs in `$PSM_DATA/logs/`: `eval500_psmflow_{cube,antmaze}_{point,mix,pointps}_sd<k>.json`,
+`eval500_psmflow_antmaze_mix_20260902_sd0.json` (the fix-3 validation re-eval),
+`bc_control_antmaze.json`. All registered in `tools/make_tables.py` (not run — its `LOGS`
+default is still the dead midi-01 path, so it needs `--logs $PSM_DATA/logs`, and
+`docs/tables/results.md` is cube-only until someone decides how to split the envs).
+
+Tests: `.venv/bin/python -m pytest <module> -q` per module over all 38 test files, on a
+compute node (the login node thrashes at load 95 and one module ran >15 min there):
+**38/38 exit 0, 237 passed, 3 skipped, 0 failed** — the skips are the
+`PSMFLOWS_STAGE_A_CKPT`-gated ones. `ruff check` on every touched file reports exactly the same findings as
+the unmodified versions — 14 across `agents/psmflow.py` + `tools/eval_checkpoint.py`, 7 in
+`tools/make_tables.py`, 2 across the two edited test modules, all pre-existing, and
+`tests/test_eval_checkpoint_flags.py` clean: **zero new**.
+
 
 ---
 

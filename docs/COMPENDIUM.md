@@ -570,6 +570,7 @@ read** — a Rung-1 leftover that doubled per-step mixture sampling on the train
 | Pessimism is a lever | **no** | hpmatch measured pessimism=0.0 as a non-lever |
 | More training (1M steps) helps | **no** | 0.134/0.162; extending sd1 500k→1M moved 0.302→0.284 |
 | HP-matching to FB helps | **no** | 0.276/0.192 vs 0.236 ± 0.071 |
+| Offline DSRL-SAC per task (scalar latent critic Q(s,u), latent actor, no decode in training) | **no** | 0.183 ± 0.038 (u_clip 3) / 0.127 (u_clip 1) vs pure-decode 0.142; Q spread 1.1–1.5% (HANDOFF 2026-09-03) |
 
 ### Live
 1. **Actor-based improvement in latent space.** No argmax over a large candidate set; the
