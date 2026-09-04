@@ -18,7 +18,145 @@ hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RES
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
 Branch: `feat/inversion-integration` · Machine: `kisski` (GWDG, SLURM/H100) · prior: `midi-01` (UT CS)
-Date: **2026-09-03** (latest) · prior: 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+Date: **2026-09-04** (latest) · prior: 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+
+---
+
+<!-- _class: lead -->
+
+## 2026-09-04 — S1: the latent value landscape IS navigable; S2 built, and its first run was invalid
+
+Executes `docs/plans/2026-09-03-latent-coherence-and-infom.md` (added here; it was written
+but never committed). S1 is the plan's gate and it **passed navigable**, which per the
+plan's own decision rule authorises S2. S2 is implemented and re-running; its first launch
+measured a bug and is withdrawn — see below.
+
+### S1 — `tools/diag_latent_smoothness.py`, four panels, all navigable
+
+Forward passes only: the frozen Stage-A flow for `decode` and a frozen FQL expert for the
+oracle score. No Stage-C checkpoint, no `psi`, so the answer holds for every Stage-C arm at
+once. 64 on-path states x 512 unclipped `N(0,I)` latents, `v = -||a - a*||`.
+
+| env | decoder | `knn_r2_a` (control) | `knn_r2_u` | basin | disp_u | corr da/du | best-of-512 |
+|---|---|---|---|---|---|---|---|
+| cube | onestep | 0.850 | **0.769** | 0.848 | 0.627 | 0.850 | 0.049 |
+| cube | ODE-100 | 0.796 | **0.726** | 0.880 | 0.579 | 0.880 | 0.060 |
+| antmaze | onestep | 0.746 | **0.587** | 0.714 | 0.728 | 0.774 | 0.256 |
+| antmaze | ODE-100 | 0.744 | **0.595** | 0.727 | 0.741 | 0.793 | 0.313 |
+
+Pre-registered: navigable needs `knn_r2_u` > 0.5, basin > 0.4, dispersion < 0.8, corr > 0.7;
+scrambled is `knn_r2_u` < 0.05. **All four statistics clear on all four panels**, at 12-15x
+the scrambled threshold.
+
+**Reading. The geometry is benign.** The ~1% flatness that D1 (0.9%), D3 (1.1%), Arm B
+(0.9%), E4b (0.86%) and DSRL-SAC (1.1-1.5%) all report is NOT a property of the latent
+space; it is a property of the learned critics. Live hypothesis #1 ("the landscape is
+rough") dies by measurement rather than by another 3x500k run.
+
+**Validity.** The harness reproduces E1 cold: mean best-of-512 oracle distance **0.060**
+(ODE-100) against E1's recorded **0.062**, from a freshly trained expert on another machine.
+
+**Caveat, stated because it missed its bar.** The calibration control `knn_r2_a` was
+pre-registered > 0.9 and came in 0.74-0.85 on every panel. That is a finite-sample ceiling
+(512 points in d_a 5 / 8), not a broken estimator -- the failure mode it exists to catch
+(reading ~0 where it must read ~1) did not occur. A depressed ceiling drags every R^2 down,
+so it makes the navigable verdict **conservative**. Ratio form: `knn_r2_u / knn_r2_a` =
+**0.91** cube, **0.79** antmaze.
+
+**Third independent sighting of the cube/antmaze split.** Antmaze is navigable but less so
+(ratio 0.79 vs 0.91), and its best-of-512 sits at 0.313 against mean ||a|| 1.99 (15.7%)
+where cube sits at 0.060 against 0.87 (6.9%) -- on a probe with no inversion, no preimage
+and no alpha in it.
+
+Reports: `$PSM_DATA/logs/d5_latent_smoothness_{cube,antmaze}_{onestep,ode}.json` (+ `_raw.npz`
+with the `(u, a, v)` arrays so the statistics recompute without re-rolling).
+
+### The oracle did not exist on this cluster, and had to be built
+
+S1 needs a frozen FQL expert to roll the states AND to score. HF ships only the three
+Stage-A BC flows; every local run dir is Stage-C. Trained here, 500k, 28 min each:
+
+| env | recipe | 500-ep success | Wilson 95% |
+|---|---|---|---|
+| cube | `agent.alpha=300` (the recorded 0.949 recipe) | **0.966** (483/500) | [0.946, 0.979] |
+| antmaze-medium | `agent.q_agg=min agent.alpha=10` | **0.980** (490/500) | [0.964, 0.989] |
+
+Cube overlaps the recorded FQL 0.949 [0.936, 0.960], which is E1's readability condition.
+The antmaze recipe is **adapted** from the FQL reference's antmaze-*large* line -- the
+reference gives no antmaze-medium value. Incidentally this is the repo's **first per-task
+topline on antmaze**: PSMFlow's 0.213-0.247 there is ~4x below its own ceiling, the same
+shape as cube's 0.230 against 0.949.
+
+### S2 — implicit GPI by expectile distillation (`index_agg=expectile`)
+
+New in `agents/psmflow.py`: a scalar head `q_dist` fitted by upper-expectile regression onto
+`psi(s, u', u)^T w` over `index_panel` prior draws `u'`, replacing the argmax at two call
+sites (`gpi_select` drops the KxK pair scan; `flow_actor_loss` climbs the distilled head).
+`measure_loss` untouched in v1 so any regression is attributable. Keys `index_agg`,
+`expectile_mu`, `index_panel`, `q_dist` in `get_config()` and `configs/agent/psmflow.yaml`;
+`create()` asserts `expectile` requires `policy_index=latent`. Static switch, keys folded
+out of `rng` (108/109/110), so `index_agg=max` keeps a byte-identical stream -- pinned by
+29 passed / 2 skipped across the three psmflow test modules including the golden fingerprints.
+
+**Read the InFOM source before trusting the spec.** `agents/infom.py` at
+github.com/chongyi-zheng/infom: the intention encoder conditions on
+`(next_observations, next_actions)` -- S3's `p_e(z|s',a')` is **confirmed as written**. But
+S2's stated premise is **wrong**: InFOM has **no z-conditioned -> z-free distillation**. Its
+latents are prior draws, its target is a Monte-Carlo average
+`target_q = 1/(1-gamma) * future_rewards.mean(axis=0)` over `num_flow_goals`, and the
+expectile is IQL-shaped asymmetric L2 on the regression residual
+(`weight = where(adv >= 0, expectile, 1 - expectile)`, default 0.9, task values 0.9-0.99).
+So: **mu = 0.9 and ONE latent per update, not a panel.** `index_panel=16` is this repo's
+lower-variance choice, `index_panel=1` is InFOM's analogue, and S2 should be described as
+InFOM-inspired rather than a port. Also `latent_dim` defaults to 512, not the README's 128.
+
+### The first S2 launch was invalid — `q_dist` could not see the task
+
+**Withdrawn:** an earlier reading of `q_dist_spread_rel` = 0.7-1.2% at 115k steps as the
+plan's pre-registered kill signal ("not above 5% by 50k => the argmax is not the
+bottleneck, S2 is dead"). That measured a bug.
+
+The plan specifies `q_dist(s, u)`. Its regression target `psi(s, u', u)^T w` is a function
+of the task vector, and `sample_mixed_z` redraws `w` **per batch element every step**, so a
+head without `w` can only fit the task-MARGINAL expectile -- and `gpi_select` then ranked
+candidate latents at eval while blind to the `task_z` it was acting for. A task-blind head
+also trivially shows little spread, so the kill statistic was contaminated too. InFOM can
+omit the task because it adapts per-task with reward labels; a zero-shot method cannot.
+
+Fixed to `q_dist(s, w, u)` at all five sites (init, actor loss, distillation loss, spread
+diagnostic, `gpi_select` broadcasting `task_z`). Evidence it matters: on the identical
+200-step smoke, `q_dist_loss` 23.3 -> 9.0 and `q_dist_pred` **+0.94 -> -1.77** against a
+target of -6.83 -- the old head could not even get the sign right. Jobs 2491543/2491545
+cancelled at 39 min rather than carried to 500k.
+
+### Control arm result, and why it is not quotable yet
+
+`index_agg=max` (= Arm B: `policy_index=latent train_actor=false acting=gpi`) never touches
+`q_dist`, so these two runs are unaffected by the bug.
+
+| seed | 500-ep success | Wilson 95% |
+|---|---|---|
+| 0 | **0.374** (187/500) | [0.333, 0.417] |
+| 1 | **0.090** (45/500) | [0.068, 0.118] |
+
+Seed 0 is the highest zero-shot cube number on file other than FB's 0.721 -- above the actor
+arm (0.220 +/- 0.037) and cube point (0.230 +/- 0.051). **Do not quote it.** Two seeds
+spanning 0.090-0.374 give a t-interval of +/-1.80, wider than the measurement, and Arm B's
+own record (0.006 / 0.160 / 0.084, 0.083 +/- 0.191) is an arm whose seed spread already
+dwarfs its mean. A third control seed is running.
+
+Both seeds also **climb late** -- sd0 0.06 at 350k -> 0.26 -> 0.52 -> 0.40; sd1 0.06 -> 0.20
+-> 0.20 -> 0.12. An in-loop reading taken at 300k called this arm flat at BC level and was
+simply premature; do not judge this arm before ~400k.
+
+### In flight
+
+`s2_cube_bexp09` seeds 0/1/2 and `s2_cube_bmax` seed 2 (jobs 2491549-2491552), 500k each on
+one H100. Expectile arms run ~2.6x slower than the control (the 16-draw panel per step).
+Launched at 3 seeds, not the plan's 2: the control's measured spread makes n=2 unable to
+separate the arms. Pre-registered: success = beating the BC control (0.072 on this cluster)
+at 500 episodes with non-overlapping CIs; the `q_dist_spread_rel` > ~5% necessary condition
+is now re-testable on a head that can actually see the task.
 
 ---
 

@@ -23,7 +23,7 @@ from agents.psm import (
     project_z, targets_uncertainty,
 )
 from utils.flax_utils import TrainState, nonpytree_field
-from utils.networks import ActorVectorField
+from utils.networks import ActorVectorField, Value
 from utils.psm_networks import FlowVectorField, NoiseConditionedActor, PhiMap, PsiMap
 
 
@@ -59,6 +59,19 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
     target_psi: Any
     actor: TrainState       # amortized LATENT actor (s, w, noise) -> u (flowBC recipe)
     actor_vf: TrainState    # CFM velocity field over preimage latents (the actor's BC anchor)
+    # S2 (index_agg='expectile', off by default): a scalar head q_dist(s, u) fitted by
+    # UPPER-EXPECTILE regression onto psi(s, u', u)^T w over prior draws u'. A soft max
+    # over the index that never takes an argmax over samples -- E4a measured argmax-over-K
+    # as what destroys ranking even for a critic proven to rank (0.032, below the 0.086
+    # random floor). InFOM-INSPIRED, not a port: InFOM has no z-conditioned -> z-free
+    # distillation, marginalizes by averaging over `num_flow_goals`, and draws ONE latent
+    # per update; `index_panel` is this repo's choice, and index_panel=1 is its analogue.
+    # Conditioned on (s, w, u), NOT (s, u): the distillation target psi(s, u', u)^T w is a
+    # function of the task vector, and sample_mixed_z redraws w per batch element, so a head
+    # without w can only fit the task-MARGINAL expectile and would rank latents at eval
+    # without knowing the task. The plan's spec wrote q_dist(s, u); InFOM can omit the task
+    # because it adapts per-task with reward labels, and this method cannot.
+    q_dist: TrainState
     # Action branch (action_critic.enabled, default false): a second successor-feature
     # head over executed actions, psi_a(s, w, a), sharing phi and the w-machinery, plus a
     # bounded residual delta(s, w, u). Q_a = psi_a^T w gives a value-directed gradient a
@@ -223,14 +236,83 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         # the head (the actor would maximize a head indexed by the wrong object) and raised
         # a ScopeParamShapeError on the first update, since the slot is d_a wide, not z_dim.
         # The actor stays w-conditioned and the READOUT stays `* w`; only the index moves.
-        Qs = (self.psi(obs, self._index(sampled), u_a) * w).sum(-1)  # (P, B)
-        qmean, qunc = targets_uncertainty(Qs, c["num_parallel"])
-        Q = qmean - c["actor_pessimism_penalty"] * qunc
+        if c["index_agg"] == "expectile":
+            # S2: climb the distilled soft-max over the whole index distribution instead of
+            # the single random u' this batch happened to draw. Static switch, so the "max"
+            # path traces to exactly the pre-existing computation.
+            Q = Qs = self.q_dist(obs, jnp.concatenate([w, u_a], -1))  # (B,)
+        else:
+            Qs = (self.psi(obs, self._index(sampled), u_a) * w).sum(-1)  # (P, B)
+            qmean, qunc = targets_uncertainty(Qs, c["num_parallel"])
+            Q = qmean - c["actor_pessimism_penalty"] * qunc
         q_loss = -Q.mean() / jax.lax.stop_gradient(jnp.abs(Qs).mean() + 1e-8)
         distill = jnp.mean((u_a - jax.lax.stop_gradient(rollout(vf_params, obs, noise))) ** 2)
         loss = q_loss + c["actor"]["bc_coeff"] * distill + bc_flow_loss
         return loss, {"actor_loss": loss, "actor_q": Q.mean(),
                       "actor_bc_flow_loss": bc_flow_loss, "actor_bc_error": distill}
+
+    def q_dist_loss(self, batch, sampled, q_params):
+        """S2: upper-expectile regression of q_dist(s, u) onto the index-conditioned readout.
+
+            L = E_{(s,u), u'~p0} [ |mu - 1{d < 0}| * d^2 ],  d = stopgrad(Q(s, u', u)) - q_dist(s, u)
+
+        The panel of `index_panel` draws u' is NOT aggregated before the regression: each
+        (u', s, u) target is its own residual against the same prediction, which is what
+        makes the fit an expectile OF THE INDEX DISTRIBUTION rather than of its mean. mu >
+        0.5 leans on the upper tail, so mu -> 1 approaches max_{u'} without ever evaluating
+        an argmax over samples.
+
+        The target is the SAME pessimism-adjusted readout the actor used to climb before
+        this head existed (mean_P - actor_pessimism * unc), not the raw ensemble mean --
+        distilling a different object would change two things at once and make a regression
+        unattributable. psi is read at stored params under stop_gradient: this head is a
+        distillation target and must not push gradient back into the measure.
+        """
+        c = self.config
+        obs, u = batch["observations"], sampled.u_data
+        w = sampled.task_w
+        B, d_a = u.shape[0], c["action_dim"]
+        panel = c["index_panel"]
+        # Key folded out of the stored rng, not split from it, so index_agg="max" keeps a
+        # byte-identical random stream (the 104/106/107 convention).
+        key = jax.random.fold_in(self.rng, 110)
+        u_idx = jnp.clip(jax.random.normal(key, (panel, B, d_a)), -c["u_clip"], c["u_clip"])
+
+        obs_r = jnp.broadcast_to(obs[None], (panel, *obs.shape)).reshape(panel * B, -1)
+        u_r = jnp.broadcast_to(u[None], (panel, *u.shape)).reshape(panel * B, d_a)
+        w_r = jnp.broadcast_to(w[None], (panel, *w.shape)).reshape(panel * B, -1)
+        Qs = (self.psi(obs_r, u_idx.reshape(panel * B, d_a), u_r) * w_r).sum(-1)
+        qmean, qunc = targets_uncertainty(Qs, c["num_parallel"])
+        target = jax.lax.stop_gradient(
+            (qmean - c["actor_pessimism_penalty"] * qunc).reshape(panel, B))
+
+        pred = self.q_dist(obs, jnp.concatenate([w, u], -1), params=q_params)   # (B,)
+        diff = target - pred[None]                                        # (panel, B)
+        mu = c["expectile_mu"]
+        loss = (jnp.where(diff >= 0, mu, 1.0 - mu) * diff ** 2).mean()
+        return loss, {"q_dist_loss": loss, "q_dist_pred": pred.mean(),
+                      "q_dist_target": target.mean(),
+                      "q_dist_target_spread": target.std(axis=0).mean()}
+
+    def q_dist_spread(self, batch, sampled, key):
+        """Live "is the distilled head awake?" signal -- the S2 necessary condition.
+
+        Computed exactly like `action_critic_spread` so it is comparable to the
+        `ac_q_spread_rel` and latentrl `q_spread_rel` numbers already on record (both sit
+        at ~1%). The plan pre-registers >~5% within 50k steps; at the same ~1% band the
+        flatness is not caused by the argmax and S2 should be killed early.
+        """
+        c = self.config
+        n = min(64, batch["observations"].shape[0])
+        obs = batch["observations"][:n]
+        cand = c["action_critic"]["spread_candidates"]
+        u = jnp.clip(jax.random.normal(key, (cand, n, c["action_dim"])),
+                     -c["u_clip"], c["u_clip"])
+        w = sampled.task_w[:n]
+        Q = jax.vmap(lambda u_k: self.q_dist(obs, jnp.concatenate([w, u_k], -1)))(u)
+        scale = jnp.abs(Q).mean() + 1e-8
+        return {"q_dist_spread": Q.std(axis=0).mean(),
+                "q_dist_spread_rel": Q.std(axis=0).mean() / scale}
 
     # ---- Idea-1 action branch ----
     def execute(self, observations, w, u, residual_params=None):
@@ -384,6 +466,14 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
                 batch, sampled, self.actor.params, self.actor_vf.params)
             new = new.replace(actor=new.actor.apply_gradients(grads=g_a),
                               actor_vf=new.actor_vf.apply_gradients(grads=g_vf))
+        # S2 distillation head. Static config switch: at index_agg="max" nothing here runs
+        # and the update traces to the pre-existing computation.
+        if self.config["index_agg"] == "expectile":
+            (_, qd_info), g_qd = jax.value_and_grad(
+                self.q_dist_loss, argnums=2, has_aux=True)(batch, sampled, new.q_dist.params)
+            new = new.replace(q_dist=new.q_dist.apply_gradients(grads=g_qd))
+            a_info = {**a_info, **qd_info,
+                      **new.q_dist_spread(batch, sampled, jax.random.fold_in(self.rng, 109))}
         # Idea-1 action branch: static config switch, so the disabled path traces to
         # exactly the pre-existing computation (no extra rng, no shared-branch gradients).
         if self.config["action_critic"]["enabled"]:
@@ -477,6 +567,14 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         assert observations.ndim == 1, "gpi_select acts on a single observation"
         K, d_a = c["gpi_num_u"], c["action_dim"]
         seed = self.rng if seed is None else seed
+        if c["policy_index"] == "latent" and c["index_agg"] == "expectile":
+            # S2: the K x K pair scan collapses -- q_dist has already marginalized u', so
+            # one argmax over K candidates replaces an argmax over K^2 pairs. K x cheaper,
+            # and the pair scan was the exact structure E4a indicted.
+            u_cand = jnp.clip(jax.random.normal(seed, (K, d_a)), -c["u_clip"], c["u_clip"])
+            obs = jnp.broadcast_to(observations, (K, *observations.shape))
+            wq = jnp.broadcast_to(self.task_z, (K, *self.task_z.shape))
+            return u_cand[jnp.argmax(self.q_dist(obs, jnp.concatenate([wq, u_cand], -1)))]
         if c["policy_index"] == "latent":
             # Alg. "Rung 1": draw K action latents and K policy indices, score every
             # (u_i, u'_j) pair, return G(s, u_ihat). The max over Lambda_K is the GPI the
@@ -553,6 +651,11 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         rng = jax.random.PRNGKey(seed)
         rng, rphi, rpsi, rvf, ronestep = jax.random.split(rng, 5)
         assert config.get("encoder", None) is None, "psmflow does not support visual encoders yet."
+        assert config.get("index_agg", "max") in ("max", "expectile"), "index_agg: max | expectile"
+        assert not (config.get("index_agg", "max") == "expectile"
+                    and config["policy_index"] != "latent"), (
+            "index_agg=expectile requires policy_index=latent: under task_vector the index "
+            "slot carries w, so there is no index distribution to take an expectile over.")
         action_dim = ex_actions.shape[-1]
         z_dim = config["z_dim"]
         ex_u = jnp.zeros((ex_observations.shape[0], action_dim))
@@ -588,6 +691,18 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         actor_vf = TrainState.create(
             actor_vf_def, actor_vf_def.init(ravf, ex_observations, ex_u, ex_u[..., :1])["params"],
             tx=optax.adam(config["lr_actor_vf"]))
+
+        # S2 head. num_ensembles=1 -- the plan's "single head"; the pessimism it would
+        # otherwise need is already inside its regression target. Always created so the
+        # pytree stays static across index_agg, exactly as the action branch is.
+        qd_cfg = config["q_dist"]
+        q_dist_def = Value(hidden_dims=(qd_cfg["hidden_dim"],) * (qd_cfg["hidden_layers"] + 1),
+                           layer_norm=True, num_ensembles=1)
+        q_dist = TrainState.create(
+            q_dist_def,
+            q_dist_def.init(jax.random.fold_in(rng, 108), ex_observations,
+                            jnp.concatenate([ex_w, ex_u], -1))["params"],
+            tx=optax.adam(qd_cfg["lr"]))
 
         # FROZEN behavior flow (FQL Stage-A checkpoint). Defs are rebuilt from config;
         # shapes must match the checkpointed run.
@@ -644,7 +759,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         config["action_dim"] = action_dim
         return cls(rng=rng, phi=phi, psi=psi,
                    target_phi=copy.deepcopy(phi.params), target_psi=copy.deepcopy(psi.params),
-                   actor=actor, actor_vf=actor_vf,
+                   actor=actor, actor_vf=actor_vf, q_dist=q_dist,
                    psi_a=psi_a, target_psi_a=copy.deepcopy(psi_a.params), residual=residual,
                    phi_a=phi_a, target_phi_a=copy.deepcopy(phi_a.params),
                    flow_vf=flow_vf, flow_onestep=flow_onestep,
@@ -725,6 +840,17 @@ def get_config():
             # policy, the backup continues that same u' at s', and w reaches psi only through
             # the readout Q = psi^T w.
             policy_index="task_vector",   # task_vector | latent
+            # How psi's index slot is aggregated when acting/improving. "max" is the
+            # shipped argmax over the index panel; "expectile" distills an upper expectile
+            # of psi(s, u', u)^T w over u' ~ p0 into q_dist(s, u) and uses THAT, so no
+            # argmax over samples of a learned function is ever taken. Requires
+            # policy_index="latent" -- under "task_vector" there is no index to aggregate.
+            index_agg="max",              # max | expectile
+            expectile_mu=0.9,             # upper expectile; -> 1 approaches max_{u'}
+            index_panel=16,               # u' draws per state forming the target spread
+            # q_dist head. `embedding_layers` is carried for config symmetry with the other
+            # heads and is unused by Value, which is a plain MLP.
+            q_dist=dict(hidden_dim=512, hidden_layers=1, embedding_layers=2, lr=3.0e-4),
             # Train the amortized latent actor. False drops the actor/CFM branch (the
             # write-up has none); needs acting=gpi, and only makes sense with
             # policy_index="latent", where the backup does not read it.

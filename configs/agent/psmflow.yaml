@@ -53,6 +53,23 @@ policy_index: task_vector  # task_vector | latent
 # write-up's Sec. PSMFlows has no actor. Only valid with acting=gpi.
 train_actor: true
 
+# S2 (InFOM-inspired implicit GPI). `max` is the shipped argmax over the index panel.
+# `expectile` distills an upper expectile of psi(s, u', u)^T w over u' ~ p0 into a scalar
+# head q_dist(s, u) and uses that for both acting and the actor gradient, so no argmax over
+# samples of a learned function is ever taken -- E4a measured that argmax as the thing that
+# kills ranking even for a critic proven to rank. Requires policy_index: latent.
+# NOT a port of InFOM: InFOM has no z-conditioned -> z-free distillation, marginalizes by
+# averaging over num_flow_goals, and draws ONE latent per update. index_panel: 1 is the
+# setting closest to it; the plan's default of 16 is this repo's lower-variance choice.
+index_agg: max             # max | expectile
+expectile_mu: 0.9          # upper expectile; -> 1 approaches max over the index
+index_panel: 16            # u' draws per state forming the target distribution
+q_dist:
+  hidden_dim: 512
+  hidden_layers: 1
+  embedding_layers: 2      # carried for symmetry; unused by the plain-MLP Value head
+  lr: 3.0e-4
+
 # Idea-1 action branch (2026-08-13): w-conditioned successor features over EXECUTED
 # actions (psi_a shares phi and the w machinery) + an eps-bounded residual head.
 # pessimism 0.0 on this branch by design: the collapse forensics showed exact-min
