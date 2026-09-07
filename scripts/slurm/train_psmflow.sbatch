@@ -20,8 +20,11 @@
 #   PREIMAGES   the npz from tools/precompute_preimages.py, computed from THAT flow ckpt
 #
 #SBATCH --job-name=psm-stagec
-#SBATCH --output=%x-%j.out
-#SBATCH --error=%x-%j.out
+# SLURM does NOT expand environment variables in #SBATCH directives, so this is the
+# literal $PSM_DATA/logs/slurm on KISSKI rather than the variable. A relative path here
+# lands the log in the submit CWD -- i.e. the repo root. Launchers override both flags.
+#SBATCH --output=/mnt/home/amohan/psm-data/logs/slurm/%x-%j.out
+#SBATCH --error=/mnt/home/amohan/psm-data/logs/slurm/%x-%j.err
 #SBATCH --time=12:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
@@ -31,7 +34,7 @@ set -euo pipefail
 
 : "${PSM_REPO:?PSM_REPO=<path to the PSMFLows checkout> required}"
 : "${PSM_DATA:?PSM_DATA=<scratch dir with flow/ and the npz> required}"
-: "${ENVKEY:?ENVKEY=cube|antmaze|pointmaze required}"
+: "${ENVKEY:?ENVKEY=cube|antmaze|pointmaze|scene required}"
 : "${PREIMAGES:?PREIMAGES=<preimage npz> required}"
 SEED="${SEED:-0}"
 STEPS="${STEPS:-500000}"
@@ -41,17 +44,43 @@ EVAL_EPS="${EVAL_EPS:-50}"
 LOG_INT="${LOG_INT:-5000}"
 SAVE_INT="${SAVE_INT:-250000}"
 EXTRA="${EXTRA:-}"
-# Which agent to train. psmflow is the zero-shot method; latentrl is the per-task probe
-# (and, at agent.critic_input=latent, the offline DSRL-SAC arm). Both read the same
-# preimage-augmented dataset through the same flow, so only the hydra group changes.
+# Which agent to train. `psmflow` is the method (defaults = the paper-strict affine
+# LatentFlowPSM: psi_form=affine policy_index=latent train_actor=false acting=gpi, so a
+# plain submit runs the primary algorithm and EXTRA is only for ablations). `fql` with
+# agent.bc_only=true is Stage A / the BC control. Everything else moved to archive/.
 AGENT="${AGENT:-psmflow}"
 
+# Remember whether DISCOUNT came in from the caller's environment (even "") before the
+# per-env case block below fills in a default -- ${VAR+set} is unset-safe under `set -u`.
+DISCOUNT_USER_SET="${DISCOUNT+set}"
+
 case "$ENVKEY" in
-  cube)      ENV_NAME=cube-single-play-singletask-v0;               FLOW=cube-single-play ;;
-  antmaze)   ENV_NAME=antmaze-medium-navigate-singletask-v0;        FLOW=antmaze-medium-navigate ;;
-  pointmaze) ENV_NAME=pointmaze-medium-navigate-singletask-task1-v0; FLOW=pointmaze-medium-navigate ;;
+  cube)      ENV_NAME=cube-single-play-singletask-v0;               FLOW=cube-single-play;        DISCOUNT_DEFAULT=0.98 ;;
+  # docs/design/2026-09-06-antmaze-failure-tests.md H2: gamma=0.98's 50-step horizon is
+  # shorter than antmaze-medium's 200-400 step goal distance and the arm sits at the BC
+  # floor; the 51-cell, 3-seed ladder found gamma=0.99 (0.294 +/- 0.070) clearly beats
+  # 0.98 (0.076) and beats 0.995, which collapses to ~0.01 past 300k. configs/agent/
+  # psmflow.yaml keeps discount=0.98 so existing checkpoints still restore -- this is a
+  # launcher-level default, not a config-wide one.
+  antmaze)   ENV_NAME=antmaze-medium-navigate-singletask-v0;        FLOW=antmaze-medium-navigate; DISCOUNT_DEFAULT=0.99 ;;
+  pointmaze) ENV_NAME=pointmaze-medium-navigate-singletask-task1-v0; FLOW=pointmaze-medium-navigate; DISCOUNT_DEFAULT=0.98 ;;
+  scene)     ENV_NAME=scene-play-singletask-v0;                     FLOW=scene-play;              DISCOUNT_DEFAULT=0.98 ;;
   *) echo "unknown ENVKEY: $ENVKEY" >&2; exit 1 ;;
 esac
+
+# DISCOUNT (if the caller set it) wins over the per-env default above.
+DISCOUNT="${DISCOUNT:-$DISCOUNT_DEFAULT}"
+# Only append a hydra override when it would actually change the yaml default (0.98) or
+# was explicitly requested -- keeps the printed/launched command a no-op diff from the
+# config for cube/pointmaze/scene at their current defaults. Skip it if EXTRA is already
+# setting agent.discount itself, to avoid a duplicate-key hydra error.
+DISCOUNT_OVERRIDE=""
+if [ -n "$DISCOUNT_USER_SET" ] || [ "$DISCOUNT" != "0.98" ]; then
+  case "$EXTRA" in
+    *agent.discount=*) : ;;  # caller already overrides it via EXTRA; don't double-set
+    *) DISCOUNT_OVERRIDE="agent.discount=$DISCOUNT" ;;
+  esac
+fi
 
 FLOW_DIR="$PSM_DATA/flow/$FLOW"
 GROUP="${GROUP:-psmflow_${ENVKEY}_$(date +%Y%m%d_%H%M%S)}"
@@ -73,12 +102,13 @@ mkdir -p "$PSM_DATA/exp" "$PSM_DATA/wandb"
 echo "=== stage C: agent=$AGENT $ENV_NAME seed=$SEED group=$GROUP ==="
 echo "    flow=$FLOW_DIR@$EPOCH"
 echo "    preimages=$PREIMAGES"
+echo "    discount=$DISCOUNT (envkey=$ENVKEY default=$DISCOUNT_DEFAULT override='${DISCOUNT_OVERRIDE:-none}')"
 echo "    steps=$STEPS extra='$EXTRA'"
 
 srun "$PY" main.py \
     agent="$AGENT" \
     agent.flow_ckpt_path="$FLOW_DIR" agent.flow_ckpt_epoch="$EPOCH" \
-    agent.preimage_path="$PREIMAGES" $EXTRA \
+    agent.preimage_path="$PREIMAGES" $DISCOUNT_OVERRIDE $EXTRA \
     env_name="$ENV_NAME" \
     offline_steps="$STEPS" online_steps=0 \
     log_interval="$LOG_INT" eval_interval="$EVAL_INT" eval_episodes="$EVAL_EPS" \

@@ -1,21 +1,28 @@
-"""Bespoke PSM networks, transcribed from the PyTorch reference psm_nets.py.
+"""Network definitions for the measure agents. Modules only — losses live in agents/.
 
-Code <-> paper (arXiv 2411.19418):
-  PhiMap   -> phi_s(s+)      basis over future states (the learned proto basis)
-  PsiMap   -> psi^pi(s,a)    successor-feature coefficients (task or codebook head)
-  PSMActor -> pi(a|s,z)      TD3 mean actor conditioned on the task vector w
-  NoiseConditionedActor / FlowVectorField -> flow-BC one-step actor + velocity field
+Code <-> symbols (agents/psmflow.py's module docstring holds the full map; PSM is
+arXiv 2411.19418):
 
-These intentionally do NOT reuse utils/networks.MLP: the reference uses a specific
+  PhiMap                 phi(x), the basis over future states
+  PsiMap                 psi(s, index, u), free successor-feature head
+  AffinePsiMap           psi(s, u, u') = A(s,u)^T w(u') + beta(s,u)
+  NoiseConditionedActor  pi_eta(s, w, eps) -> u, the flow-BC one-step latent actor
+  FlowVectorField        v_xi(s, u_t, t), the actor's conditional-flow-matching field
+  TanhGaussianLatentActor / LogAlpha   the DSRL-style latent actor and SAC's log alpha
+
+These intentionally do NOT reuse utils/networks.MLP: the PSM reference uses a specific
 activation/norm sequence — `ntanh` (LayerNorm then tanh), `relu`, and a final
 `Norm` = sqrt(d) * x / ||x|| — that must be reproduced exactly for numerical
 equivalence. flax LayerNorm uses epsilon=1e-5 to match torch's default.
+
+Everything from `AffineMeasureNet` down serves the agents under archive/ and is kept so
+they still import; the live agent uses only the heads listed above.
 """
 
 import math
 
-import jax
 import flax.linen as nn
+import jax
 import jax.numpy as jnp
 
 from utils.networks import ensemblize
@@ -50,9 +57,7 @@ def psm_norm(x):
 
 
 class PhiMap(nn.Module):
-    """phi(goal) -> R^z_dim. Sequence: Dense, ntanh, [Dense, relu]*(L-1), Dense, [norm].
-
-    Lemma 6.2 state feature phi(s+)."""
+    """Basis phi(x) -> R^z_dim: Dense, ntanh, [Dense, relu]*(L-1), Dense, [norm]."""
 
     z_dim: int
     hidden_dim: int
@@ -74,11 +79,10 @@ class PhiMap(nn.Module):
 
 
 class _PsiTower(nn.Module):
-    """One (non-ensembled) PSM successor-feature tower, transcribed from PsiMap.
+    """One (non-ensembled) successor-feature tower.
 
-    Supports embedding_layers=2 and hidden_layers=1 (the reference defaults / the
-    configs we use). Submodules are explicitly named so the torch->flax weight
-    mapping is unambiguous.
+    Supports embedding_layers=2, hidden_layers=1 (the reference defaults). Submodules are
+    named explicitly so the torch -> flax weight mapping is unambiguous.
     """
 
     hidden_dim: int
@@ -109,10 +113,7 @@ class _PsiTower(nn.Module):
 
 
 class PSMActor(nn.Module):
-    """TD3 actor (reference psm_nets.Actor). Returns the mean mu = tanh(policy(emb)).
-
-    embeds are non-parallel; embedding_layers=2, hidden_layers=1 supported.
-    """
+    """TD3 mean actor pi(a | s, w) = tanh(policy(emb)). Used by the archived PSM agent."""
 
     action_dim: int
     hidden_dim: int
@@ -139,9 +140,11 @@ class PSMActor(nn.Module):
 
 
 class PsiMap(nn.Module):
-    """Ensembled successor-feature net -> [num_parallel, B, output_dim].
+    """Free psi(s, index, u) -> [num_parallel, B, output_dim].
 
-    Thm 6.3: psi^pi(s,a) = phi_psi(s,a) w^pi, with w folded into the z-conditioning."""
+    The policy coordinate w(u') is absorbed into the network (Rem. `tradeoff`'s "free
+    psi"): the index slot is one more conditioning input, not a factor of the head.
+    """
 
     output_dim: int
     hidden_dim: int
@@ -175,7 +178,7 @@ class NoiseConditionedActor(nn.Module):
     a = tanh(policy(concat[ embed_s([obs,noise]), embed_z([obs,z,noise]) ])).
     Each embedding is Linear->LayerNorm->Tanh->...->Linear(h//2)->ReLU; the policy is
     `hidden_layers` x [Linear->ReLU] then Linear(action_dim). All-orthogonal init, tanh
-    output. This REPLACES the previous flat GELU ActorVectorField reuse.
+    output.
     """
 
     action_dim: int
@@ -195,10 +198,78 @@ class NoiseConditionedActor(nn.Module):
         return jnp.tanh(nn.Dense(self.action_dim, kernel_init=_ORTH1)(h))
 
 
+class TanhGaussianLatentActor(nn.Module):
+    """DSRL-SAC's noise policy over flow latents.
+
+    pi(u | s, w) = u_clip * tanh(mu(s, w) + exp(log_std(s, w)) * eps),  eps ~ N(0, I):
+    a diagonal Gaussian in a pre-squash space, tanh-squashed, then rescaled into the
+    latent box. `log_std` is clamped to SB3's [-20, 2] so a collapsing or exploding scale
+    cannot NaN the log-prob.
+
+    The trunk is `NoiseConditionedActor`'s minus the noise input -- the randomness is the
+    reparameterisation now -- so the two heads are comparable at the same widths.
+
+    Returns the PRE-SQUASH (mu, log_std); `tanh_gaussian_sample` does the squash, the
+    scaling and the log-prob correction, so a caller that only wants the mode can take
+    `u_clip * tanh(mu)` without paying for a draw.
+    """
+
+    action_dim: int
+    hidden_dim: int = 512
+    hidden_layers: int = 2
+    embedding_layers: int = 2
+    log_std_min: float = -20.0
+    log_std_max: float = 2.0
+
+    @nn.compact
+    def __call__(self, obs, z):
+        z_embedding = _simple_embedding(jnp.concatenate([obs, z], -1),
+                                        self.hidden_dim, self.embedding_layers)
+        s_embedding = _simple_embedding(obs, self.hidden_dim, self.embedding_layers)
+        h = jnp.concatenate([s_embedding, z_embedding], -1)
+        for _ in range(self.hidden_layers):
+            h = nn.relu(nn.Dense(self.hidden_dim, kernel_init=_ORTH1)(h))
+        mu = nn.Dense(self.action_dim, kernel_init=_ORTH1)(h)
+        log_std = nn.Dense(self.action_dim, kernel_init=_ORTH1)(h)
+        return mu, jnp.clip(log_std, self.log_std_min, self.log_std_max)
+
+
+def tanh_gaussian_sample(mu, log_std, noise, scale):
+    """Reparameterised draw from the tanh-Gaussian, plus its log-density.
+
+        log pi = sum_i [ log N(pre_i; mu_i, sigma_i) - log(1 - tanh(pre_i)^2 + 1e-6) ]
+
+    taken in the SQUASHED-but-UNSCALED space [-1, 1], where SB3 computes it. The
+    `d_a * log(scale)` Jacobian of the box rescale is deliberately omitted: it is a
+    constant shift, but the entropy target alpha is tuned against is stated in that same
+    unscaled space, so adding it would move the target by d_a * log(u_clip).
+    """
+    pre = mu + jnp.exp(log_std) * noise
+    tanh_pre = jnp.tanh(pre)
+    logp = (-0.5 * noise ** 2 - log_std - 0.5 * jnp.log(2.0 * jnp.pi)).sum(-1)
+    logp = logp - jnp.log(1.0 - tanh_pre ** 2 + 1e-6).sum(-1)
+    return scale * tanh_pre, logp
+
+
+class LogAlpha(nn.Module):
+    """SAC's entropy coefficient as one scalar parameter, so it can live in a TrainState.
+
+    Held as log alpha, so the Adam step is multiplicative in alpha and the coefficient
+    cannot go negative.
+    """
+
+    init_value: float = 0.0
+
+    @nn.compact
+    def __call__(self):
+        return self.param("log_alpha",
+                          lambda _: jnp.asarray(self.init_value, jnp.float32))
+
+
 class FlowVectorField(nn.Module):
-    """Faithful port of nn_models.VectorField (SimpleVectorField): unconditional flow
-    velocity v(obs, x_t, t). Linear->GELU, (hidden_layers-1)x[Linear->GELU], Linear(adim).
-    GELU activations (matches reference), orthogonal init, no LayerNorm.
+    """Flow velocity v(obs, u_t, t): Linear->GELU, (L-1)x[Linear->GELU], Linear(action_dim).
+
+    GELU activations, orthogonal init, no LayerNorm.
     """
 
     action_dim: int
@@ -216,19 +287,18 @@ class FlowVectorField(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Affine (full) PSM networks: M = Phi(s,a,x)·w + b.
-# Distinct from the bilinear PhiMap/PsiMap above; see agents/affine_psm.py.
+# Affine (full) PSM networks in RAW action space: M = Phi(s,a,x)·w + b. Distinct from
+# the bilinear PhiMap/PsiMap above, and used only by archive/agents/affine_psm.py.
 # ---------------------------------------------------------------------------
 
 class AffineMeasureNet(nn.Module):
-    """Affine successor-measure net (Cor. 4.2; RLU psm.py PSM). Shared trunk on concat[obs,action,x]
-    with two heads: phi (basis, R^d) and b (offset, R^1). M(s,a,x) = phi(s,a,x)·w + b.
+    """Affine successor measure M(s,a,x) = phi(s,a,x)·w + b, two heads over one input.
 
-    `norm=True` L2-normalizes phi to ||phi||=sqrt(d) (like PhiMap / Factored-FB). RLU's
-    affine PSM leaves phi RAW, which lets the measure/TD-target diverge and then collapse
-    (basis->0, M->b) on long runs; normalization bounds the measure and makes a high ortho
-    coef behave as a pure decorrelator (the proven bilinear-cube recipe). Normalization
-    keeps M linear in w, so the constrained-LP inference is unaffected.
+    `norm=True` L2-normalizes phi to ||phi|| = sqrt(d). The reference leaves phi raw,
+    which lets the measure and its TD target diverge and then collapse (basis -> 0,
+    M -> b) on long runs; normalization bounds the measure and makes a high ortho
+    coefficient behave as a pure decorrelator. It keeps M linear in w, so the
+    constrained-LP inference is unaffected.
     """
 
     d_dim: int
@@ -263,23 +333,20 @@ class AffineMeasureNet(nn.Module):
 
 
 class FactoredAffineMeasureNet(nn.Module):
-    """Affine measure with a FACTORIZED basis: Phi(s,a,x) = A(s,a) phi_x(x).
+    """Affine measure with a FACTORIZED basis, Phi(s,a,x) = A(s,a) phi_x(x).
 
-    Write-up Prop. 4.3 (assumption A5): factorizing keeps the measure LINEAR in w, so the
-    constrained-LP `full` inference is unaffected, while the B^2 contrastive mesh costs B
-    evaluations per tower plus two matmuls instead of B^2 network evaluations. That is
-    what makes batch_size=1024 affordable (measured: 274 ms/step at B=512 unfactored).
+        M(s,a,x) = phi_x(x)·(A(s,a)^T w) + b_scale*tanh(beta(s,a)·phi_x(x))
 
-        M(s,a,x) = Phi(s,a,x)·w + b(s,a,x)
-                 = phi_x(x)·(A(s,a)^T w)  +  b_scale*tanh(beta(s,a)·phi_x(x))
+    Factorizing keeps the measure linear in w, so the constrained-LP inference is
+    unaffected, while the B^2 contrastive mesh costs B evaluations per tower plus two
+    matmuls instead of B^2 network evaluations.
 
     `mesh_terms` returns the per-side factors so the agent can build the (B,B) mesh with
-    two matmuls; `__call__` gives the elementwise value for the actor / inference paths.
-    Both compute the SAME function — the mesh form is an algebraic regrouping.
+    two matmuls; `__call__` gives the elementwise value for the actor and inference paths.
+    Both compute the same function -- the mesh form is an algebraic regrouping.
 
-    psm_norm is applied to phi_x, NOT to the product Phi: that follows the reference
-    (which normalizes phi(g) and leaves psi free), keeps the mesh cheap, and leaves the
-    ortho regularizer's diagonal term inert so ortho_coef=1000 stays a pure decorrelator.
+    psm_norm is applied to phi_x, not to the product Phi: that keeps the mesh cheap and
+    leaves the ortho regularizer's diagonal term inert.
     """
 
     d_dim: int
@@ -297,12 +364,11 @@ class FactoredAffineMeasureNet(nn.Module):
         return self.k_dim if self.k_dim > 0 else self.d_dim
 
     def _tower(self, name):
-        """RLU's shape: `hidden_layers` trunk layers, then a head of (hidden, out).
+        """`hidden_layers` trunk layers, then a head of (hidden, out).
 
-        RLU builds mlp_phi and mlp_b as two COMPLETELY SEPARATE trunks over the same input
-        (psm.py:174-187) — it does not share features between the measure and the offset.
-        Each path is 5 Linear layers deep (3 trunk + 2 head), so the head carries one
-        hidden layer of its own. We mirror both properties.
+        The measure and the offset get two completely separate trunks over the same input,
+        as the reference does; each path is 5 Linear layers deep (3 trunk + 2 head), so
+        the head carries one hidden layer of its own.
         """
         return ([nn.Dense(self.hidden_dim, kernel_init=_ORTH_RELU, name=f"{name}_trunk_{i}")
                  for i in range(self.hidden_layers)],
@@ -336,10 +402,10 @@ class FactoredAffineMeasureNet(nn.Module):
         return A, beta
 
     def x(self, x):
-        """Measure-argument bases: phi_x(x) (sqrt(k)-normalized, cf. PhiMap) and phi_b(x).
+        """Measure-argument bases: phi_x(x) (sqrt(k)-normalized) and phi_b(x).
 
-        phi_b is a SEPARATE basis for the offset, mirroring RLU's independent b path; it is
-        left unnormalized because b is tanh-bounded downstream instead.
+        phi_b is a separate basis for the offset and is left unnormalized, because b is
+        tanh-bounded downstream instead.
         """
         px = self._run(self.xphi_trunk, self.xphi_head_h, self.xphi_out, x)
         if self.norm:
@@ -379,10 +445,12 @@ class LagrangeNet(nn.Module):
 
 
 class WNet(nn.Module):
-    """Task-coordinate net (Sec. 5.2): binary codebook code z (max_log_seed bits) -> w in R^d
-    (RLU psm.py `self.w`). During reward-free training every codebook policy pi_z gets a
-    learnable task coordinate w(z), and the affine measure M = Phi·w(z) + b is fit for it.
-    (Default Dense init kept deliberately — matches the trained affine_psm checkpoints.)"""
+    """Task-coordinate net: a binary codebook code z -> w in R^d.
+
+    During reward-free training every codebook policy pi_z gets a learnable task
+    coordinate w(z), and the affine measure M = Phi·w(z) + b is fit for it. The Dense
+    default init is deliberate: it is what the trained affine_psm checkpoints carry.
+    """
 
     d_dim: int
     hidden_dim: int
@@ -394,3 +462,104 @@ class WNet(nn.Module):
         for _ in range(self.hidden_layers):               # hidden_layers x [Dense -> ReLU]
             h = nn.relu(nn.Dense(self.hidden_dim)(h))
         return nn.Dense(self.d_dim)(h)                     # linear head -> d-dim task coordinate
+
+
+# ---------------------------------------------------------------------------
+# Affine psi (Prop. `bilinear`): psi(s,u,u') = A(s,u)^T w(u') + beta(s,u).
+# ---------------------------------------------------------------------------
+
+class _AffinePsiTower(nn.Module):
+    """One (non-ensembled) (s,u)-side tower emitting A(s,u) and beta(s,u).
+
+    The trunk is `_PsiTower`'s (s,a) branch -- Dense(h) -> LayerNorm -> tanh ->
+    Dense(h//2) -> relu -> Dense(h) -> relu -- with two heads instead of one and no
+    z-branch: under Assumption `affine` the basis and the bias are exactly the objects
+    that do not depend on the policy index, so nothing about u' may reach them.
+    """
+
+    hidden_dim: int
+    output_dim: int
+    w_dim: int
+    embedding_layers: int = 2
+    hidden_layers: int = 1
+
+    def setup(self):
+        assert self.embedding_layers == 2 and self.hidden_layers == 1, \
+            "only embedding_layers=2, hidden_layers=1 supported (reference default)"
+        h = self.hidden_dim
+        self.embed_sa_0 = nn.Dense(h, kernel_init=_ORTH_RELU)
+        self.embed_sa_ln = nn.LayerNorm(epsilon=1e-5)
+        self.embed_sa_3 = nn.Dense(h // 2, kernel_init=_ORTH_RELU)
+        self.fs_0 = nn.Dense(h, kernel_init=_ORTH_RELU)
+        # A is the only wide object: (hidden_dim -> z_dim * w_dim). Orthogonal gain 1, as
+        # the reference uses for every output head.
+        self.a_out = nn.Dense(self.output_dim * self.w_dim, kernel_init=_ORTH1)
+        self.beta_out = nn.Dense(self.output_dim, kernel_init=_ORTH1)
+
+    def __call__(self, obs, action):
+        se = nn.relu(self.embed_sa_3(jnp.tanh(self.embed_sa_ln(
+            self.embed_sa_0(jnp.concatenate([obs, action], -1))))))
+        x = nn.relu(self.fs_0(se))
+        A = self.a_out(x).reshape(*x.shape[:-1], self.output_dim, self.w_dim)
+        return A, self.beta_out(x)
+
+
+class AffinePsiMap(nn.Module):
+    """psi(s, u, u') = A(s,u)^T w(u') + beta(s,u), Prop. `bilinear` made explicit.
+
+    A drop-in for `PsiMap`: the same `(obs, index, u)` signature and the same
+    [num_parallel, B, output_dim] return. The `index` slot must carry the policy latent u'
+    (`policy_index=latent`); the point of the head is that the policy enters psi only
+    through the finite coordinate w^{u'}, which a z_dim task vector there would contradict.
+
+    Assumption `affine` asserts that w^{u'} exists but gives no formula, so the encoder
+    u' -> w(u') is a design choice: an MLP with PhiMap's shape, shared across the ensemble
+    because w^{u'} is a property of the POLICY rather than of a critic member. The
+    ensemble then disagrees only through (A, beta), which is what the pessimism term
+    measures.
+
+    `norm_w` puts w(u') on the unit sphere. (A, w) is identified only up to (cA, w/c), and
+    fixing ||w|| = 1 pins it while keeping psi's scale independent of w_dim, so the head
+    is comparable to the free PsiMap at the same hidden_dim and a collapsed encoder shows
+    up as small pairwise distance at fixed radius rather than as a shrinking norm.
+    """
+
+    output_dim: int
+    hidden_dim: int
+    num_parallel: int = 2
+    embedding_layers: int = 2
+    hidden_layers: int = 1
+    w_dim: int = 128
+    encoder_hidden: int = 256
+    encoder_layers: int = 2
+    norm_w: bool = True
+
+    def setup(self):
+        self.w_enc = PhiMap(z_dim=self.w_dim, hidden_dim=self.encoder_hidden,
+                            hidden_layers=self.encoder_layers, norm=False)
+        self.tower = ensemblize(_AffinePsiTower, self.num_parallel, in_axes=None)(
+            hidden_dim=self.hidden_dim, output_dim=self.output_dim, w_dim=self.w_dim,
+            embedding_layers=self.embedding_layers, hidden_layers=self.hidden_layers,
+            name="tower",
+        )
+
+    def encode_index(self, index):
+        """w(u') in R^{w_dim}. Exposed so the agent can log encoder collapse directly."""
+        w = self.w_enc(index)
+        if self.norm_w:
+            w = w / jnp.maximum(jnp.linalg.norm(w, axis=-1, keepdims=True), 1e-12)
+        return w
+
+    def sa_terms(self, obs, u):
+        """A(s,u) in R^{P x B x z x d_w} and beta(s,u) in R^{P x B x z}.
+
+        Takes no policy index: that is Assumption `affine`, and it is what the affineness
+        test checks against.
+        """
+        return self.tower(obs, u)
+
+    def __call__(self, obs, index, u):
+        w = self.encode_index(index)
+        A, beta = self.sa_terms(obs, u)              # (P, B, z, w_dim), (P, B, z)
+        w = jnp.broadcast_to(w, (*A.shape[:-2], self.w_dim))
+        return jnp.einsum("...zw,...w->...z", A, w) + beta

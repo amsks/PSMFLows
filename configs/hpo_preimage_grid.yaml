@@ -1,0 +1,50 @@
+# The inversion-width sweep WITHOUT SMAC: hydra's stock basic sweeper over an explicit grid.
+#
+# Identical in every respect that affects a number to `configs/hpo_preimage.yaml` -- same
+# target (tools/hpo_preimage_inversion.py), same cost
+#     cost = -coverage@k + hpo_penalty * max(0, decode - budget)
+#                        + hpo_penalty * max(0, E||u||^2/d_a - hpo_typicality_ratio),
+# same budget, same fixed batch and draw seed, same per-trial `hpo_trial.json`. The ONLY
+# difference is how the points are chosen: a grid you pass on the CLI instead of SMAC's
+# Bayesian optimisation.
+#
+# WHY THIS EXISTS (2026-09-07). `hpo_preimage.yaml` needs the `HyperSMAC` sweeper plugin,
+# i.e. `hypersweeper` + `smac` + `ConfigSpace`. None of the three is installed in this
+# cluster's `.venv` and none is in requirements.txt -- the HPO harness was built on midi-01.
+# Installing them here is NOT a safe fix: `uv pip install hypersweeper` resolves to a
+# DOWNGRADE of wandb 0.29.0 -> 0.16.6 and scipy 1.17.1 -> 1.15.3, and this `.venv` is read
+# at launch by every queued job on the cluster (wandb 0.29 is specifically the version
+# utils/log_utils.py was fixed for -- see HANDOFF 2026-08-29). A shared interpreter is not
+# the place to satisfy one tool's dependency.
+#
+# The search space is 3-D, smooth, and dominated by one knob (alpha), so a grid is an
+# adequate substitute here; what mattered on cube was the TYPICALITY FILTER, not the
+# optimizer. Prefer `hpo_preimage.yaml` wherever hypersweeper is actually installed.
+#
+# Run (45 trials, ~1 h at d_a=5):
+#   .venv/bin/python tools/hpo_preimage_inversion.py -m --config-name=hpo_preimage_grid \
+#       agent=fql env_name=<env> restore_path=<ckpt> restore_epoch=500000 \
+#       agent.flow_steps=100 inversion.n_initial_steps=100 \
+#       +n_rows=1280 +sample_k=128 +cov_k=64 \
+#       inversion.alpha=5,10,20,40,80 inversion.prior_scale=0.5,0.7,1.0 \
+#       inversion.n_steps=8,12,16
+defaults:
+  - config
+  - _self_
+
+# Decode-error budget in action units, ~0.10/dim (docs/TUNING_INVERSION.md): L2 budget
+# 0.1*sqrt(d_a) -> 0.22 for every manipspace env (d_a=5: cube, scene, puzzle, ...),
+# 0.28 for antmaze (d_a=8). Override per env.
+hpo_decode_budget: 0.22
+hpo_penalty: 10.0
+# Typicality hinge: penalize E||u||^2 / d_a beyond this ratio, so coverage can't be bought
+# with mixtures whose draws leave the prior's typical set (assumption A2). Without it the
+# first cube sweep's incumbents cheated -- prior_scale 0.30 bought coverage 0.999 at
+# E||u||^2 ~ 8 against an expected 5.
+hpo_typicality_ratio: 1.1
+
+inversion:
+  # Pinned at 128 for the width search, exactly as in hpo_preimage.yaml: num_samples
+  # dominates coverage monotonically and its cost is linear, so letting it vary would buy
+  # coverage with compute instead of finding the width frontier. Stage B then runs at 200.
+  num_samples: 128

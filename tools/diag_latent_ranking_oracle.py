@@ -38,7 +38,7 @@ import numpy as np
 from omegaconf import OmegaConf
 
 from agents import agents
-from agents.psm import targets_uncertainty
+from utils.psm_common import targets_uncertainty
 from envs.env_utils import make_env_and_datasets
 from main import _lists_to_tuples
 from utils.datasets import Dataset

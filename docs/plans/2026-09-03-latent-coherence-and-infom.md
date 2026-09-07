@@ -266,7 +266,7 @@ expectile parameter μ together with the number of `z` samples per update**.
 
 # Rules for whoever runs this
 
-From `CLAUDE.md`, all of which exist because they were violated:
+Standing discipline for this repo:
 
 - `import utils.xla_guard` **before jax** in every new entry point. XLA:GPU miscompiles the
   unrolled flow ODE past ~30 steps and silently returns actions pinned at the clip.

@@ -3,23 +3,133 @@
 \toprule
 Method & Setting & Success (500 ep) \\
 \midrule
-FQL (per-task reference, raw actions) & per-task & 0.949 $\pm$ 0.063 \\
-Latent RL, per-task, eps=0.05 @peak & per-task & 0.905 $\pm$ 0.020 \\
-Latent RL, per-task, eps=0 (pure decode) & per-task & 0.142 $\pm$ 0.025 \\
-FB (zero-shot, raw actions) & zero-shot & 0.721 $\pm$ 0.020 \\
-PSMFlow (zero-shot, latent -> frozen decode) & zero-shot & 0.236 $\pm$ 0.071 \\
-PSMFlow, HP-matched to FB & zero-shot & 0.234 $\pm$ 0.534 \\
-Hybrid (action critic + residual), deployed & zero-shot & 0.162 $\pm$ 0.168 \\
-Hybrid, decode-only control & zero-shot & 0.226 $\pm$ 0.068 \\
-Hybrid, lambda-rank (K=32, no residual) & zero-shot & 0.083 $\pm$ 1.004 \\
-Hybrid + FB graft, deployed & zero-shot & 0.095 $\pm$ 0.394 \\
-Hybrid + FB graft, decode-only control & zero-shot & 0.225 $\pm$ 0.648 \\
-Behavior-cloning control (per-step prior) & control & 0.068 [0.049, 0.093] \\
-PSMFlow re-eval, actor, one-step decode & zero-shot & 0.220 $\pm$ 0.037 \\
-PSMFlow re-eval, actor, exact ODE-100 decode & zero-shot & 0.182 $\pm$ 0.019 \\
-PSMFlow re-eval, gpi, one-step decode & zero-shot & 0.054 $\pm$ 0.032 \\
-PSMFlow re-eval, gpi, exact ODE-100 decode & zero-shot & 0.044 $\pm$ 0.043 \\
-Paper-faithful Arm A (u'~p0 bootstrap) & zero-shot & 0.171 $\pm$ 0.113 \\
-Paper-faithful Arm B (psi(s,u,u'), no actor, gpi) & zero-shot & 0.083 $\pm$ 0.191 \\
+FQL (per-task reference, raw actions) & per-task & -- \\
+Latent RL, per-task, eps=0.05 @peak & per-task & -- \\
+Latent RL, per-task, eps=0 (pure decode) & per-task & -- \\
+Latent RL, DSRL-SAC (latent critic), u_clip=3 & per-task & 0.183 $\pm$ 0.038 \\
+Latent RL, DSRL-SAC (latent critic), u_clip=1 & per-task & 0.127 $\pm$ 0.394 \\
+FB (zero-shot, raw actions) & zero-shot & -- \\
+PSMFlow (zero-shot, latent -> frozen decode) & zero-shot & -- \\
+PSMFlow, HP-matched to FB & zero-shot & -- \\
+Hybrid (action critic + residual), deployed & zero-shot & -- \\
+Hybrid, decode-only control & zero-shot & -- \\
+Hybrid, lambda-rank (K=32, no residual) & zero-shot & -- \\
+Hybrid + FB graft, deployed & zero-shot & -- \\
+Hybrid + FB graft, decode-only control & zero-shot & -- \\
+Behavior-cloning control (per-step prior) & control & 0.072 [0.052, 0.098] \\
+PSMFlow re-eval, actor, one-step decode & zero-shot & -- \\
+PSMFlow re-eval, actor, exact ODE-100 decode & zero-shot & -- \\
+PSMFlow re-eval, gpi, one-step decode & zero-shot & -- \\
+PSMFlow re-eval, gpi, exact ODE-100 decode & zero-shot & -- \\
+Paper-faithful Arm A (u'~p0 bootstrap) & zero-shot & -- \\
+Paper-faithful Arm B (psi(s,u,u'), no actor, gpi) & zero-shot & -- \\
+PSMFlow point preimage, cube (canonical npz) & zero-shot & 0.230 $\pm$ 0.051 \\
+PSMFlow mixture q_alpha, cube (corrected npz) & zero-shot & 0.194 $\pm$ 0.076 \\
+PSMFlow point preimage, cube (corrected npz control) & zero-shot & 0.239 $\pm$ 0.102 \\
+PSMFlow point preimage, antmaze (canonical npz) & zero-shot & 0.213 $\pm$ 0.140 \\
+PSMFlow mixture q_alpha, antmaze (corrected npz) & zero-shot & 0.206 $\pm$ 0.051 \\
+PSMFlow point preimage, antmaze (corrected npz control) & zero-shot & 0.247 $\pm$ 0.131 \\
+Behavior-cloning control, antmaze (per-step prior) & control & 0.072 [0.052, 0.098] \\
+Affine psi, strict (no actor, gpi), cube @50k & zero-shot & 0.276 $\pm$ 0.295 \\
+Affine psi, strict (no actor, gpi), cube @100k & zero-shot & 0.195 $\pm$ 0.315 \\
+Affine psi, strict, cube @150k & zero-shot & 0.317 $\pm$ 0.640 \\
+Affine psi, strict, cube @200k & zero-shot & 0.343 $\pm$ 0.269 \\
+Affine psi, strict, cube @250k & zero-shot & 0.466 $\pm$ 0.486 \\
+Affine psi, strict, cube @300k & zero-shot & 0.393 $\pm$ 0.314 \\
+Affine psi, strict, cube @350k & zero-shot & 0.516 $\pm$ 0.442 \\
+Affine psi, strict, cube @400k & zero-shot & 0.391 $\pm$ 0.342 \\
+Affine psi, strict, cube @450k & zero-shot & 0.468 $\pm$ 0.422 \\
+Affine psi, strict, cube @500k & zero-shot & 0.309 $\pm$ 0.575 \\
+Affine psi, strict, cube -- late-ckpt mean (250k-500k x seeds) & zero-shot & 0.424 $\pm$ 0.076 \\
+Affine psi, strict, cube -- late-ckpt mean (300k-500k x seeds) & zero-shot & 0.415 $\pm$ 0.083 \\
+Affine psi, latent actor, cube @100k & zero-shot & 0.108 $\pm$ 0.025 \\
+Affine psi, latent actor, cube @250k & zero-shot & 0.113 $\pm$ 0.216 \\
+Affine psi, latent actor, cube @500k & zero-shot & 0.146 $\pm$ 0.203 \\
+Affine psi, strict (no actor, gpi), antmaze @50k & zero-shot & 0.056 $\pm$ 0.712 \\
+Affine psi, strict, antmaze @250k & zero-shot & 0.178 [0.147, 0.214] \\
+Affine psi, strict, antmaze @300k & zero-shot & 0.088 [0.066, 0.116] \\
+Affine psi, strict, antmaze @350k & zero-shot & 0.082 [0.061, 0.109] \\
+Affine psi, strict, antmaze @400k & zero-shot & 0.095 $\pm$ 0.496 \\
+Affine psi, strict, antmaze @500k & zero-shot & 0.035 $\pm$ 0.131 \\
+Affine psi, strict, antmaze -- late-ckpt mean (250k-500k x seeds) & zero-shot & 0.081 $\pm$ 0.050 \\
+Affine psi, latent actor, antmaze @50k & zero-shot & 0.221 $\pm$ 0.038 \\
+Affine psi, latent actor, antmaze @100k & zero-shot & 0.196 $\pm$ 0.254 \\
+Affine psi, latent actor, antmaze @500k & zero-shot & 0.215 $\pm$ 0.114 \\
+Affine psi, strict (no actor, gpi), pointmaze @50k & zero-shot & 0.000 $\pm$ 0.000 \\
+Affine psi, strict, pointmaze @100k & zero-shot & 0.000 $\pm$ 0.000 \\
+Affine psi, strict, pointmaze @150k & zero-shot & 0.000 $\pm$ 0.000 \\
+Affine psi, strict, pointmaze @200k & zero-shot & 0.000 $\pm$ 0.000 \\
+Affine psi, strict, pointmaze @250k & zero-shot & 0.000 $\pm$ 0.000 \\
+Affine psi, strict, pointmaze @300k & zero-shot & 0.000 $\pm$ 0.000 \\
+Affine psi, strict, pointmaze @350k & zero-shot & 0.000 $\pm$ 0.000 \\
+Affine psi, strict, pointmaze @400k & zero-shot & 0.000 $\pm$ 0.000 \\
+Affine psi, strict, pointmaze @450k & zero-shot & 0.000 $\pm$ 0.000 \\
+Affine psi, strict, pointmaze @500k & zero-shot & 0.000 $\pm$ 0.000 \\
+Affine psi, strict, pointmaze -- late-ckpt mean (300k-500k x seeds) & zero-shot & 0.000 $\pm$ 0.000 \\
+Behavior-cloning control, pointmaze (per-step prior) & control & 0.002 [0.000, 0.011] \\
+Affine psi, strict, cube g=0.99 @50k & zero-shot & -- \\
+Affine psi, strict, cube g=0.99 @100k & zero-shot & -- \\
+Affine psi, strict, cube g=0.99 @150k & zero-shot & -- \\
+Affine psi, strict, cube g=0.99 @200k & zero-shot & -- \\
+Affine psi, strict, cube g=0.99 @250k & zero-shot & -- \\
+Affine psi, strict, cube g=0.99 @300k & zero-shot & -- \\
+Affine psi, strict, cube g=0.99 @350k & zero-shot & -- \\
+Affine psi, strict, cube g=0.99 @400k & zero-shot & -- \\
+Affine psi, strict, cube g=0.99 @450k & zero-shot & -- \\
+Affine psi, strict, cube g=0.99 @500k & zero-shot & -- \\
+Affine psi, strict, cube g=0.99 -- late-ckpt mean (300k-500k x seeds) & zero-shot & -- \\
+Affine psi, strict, pointmaze g=0.99 @50k & zero-shot & -- \\
+Affine psi, strict, pointmaze g=0.99 @100k & zero-shot & -- \\
+Affine psi, strict, pointmaze g=0.99 @150k & zero-shot & -- \\
+Affine psi, strict, pointmaze g=0.99 @200k & zero-shot & -- \\
+Affine psi, strict, pointmaze g=0.99 @250k & zero-shot & -- \\
+Affine psi, strict, pointmaze g=0.99 @300k & zero-shot & -- \\
+Affine psi, strict, pointmaze g=0.99 @350k & zero-shot & -- \\
+Affine psi, strict, pointmaze g=0.99 @400k & zero-shot & -- \\
+Affine psi, strict, pointmaze g=0.99 @450k & zero-shot & -- \\
+Affine psi, strict, pointmaze g=0.99 @500k & zero-shot & -- \\
+Affine psi, strict, pointmaze g=0.99 -- late-ckpt mean (300k-500k x seeds) & zero-shot & -- \\
+GPI abl @350k: argmax (the shipped rule, reference) & ablation & 0.704 [0.663, 0.742] \\
+GPI abl @350k: ensemble mean instead of min & ablation & 0.734 [0.694, 0.771] \\
+GPI abl @350k: small_ball & ablation & 0.670 [0.628, 0.710] \\
+GPI abl @500k: small_ball & ablation & 0.046 [0.031, 0.068] \\
+GPI abl @350k: soft_topm & ablation & 0.612 [0.569, 0.654] \\
+GPI abl @500k: soft_topm & ablation & 0.062 [0.044, 0.087] \\
+GPI abl @350k: top_quartile & ablation & 0.078 [0.058, 0.105] \\
+GPI abl @350k: max_norm (critic-free, large-norm select) & ablation & 0.078 [0.058, 0.105] \\
+GPI abl @350k: random_draw (one prior u', no selection) & ablation & 0.090 [0.068, 0.118] \\
+GPI abl @350k: fixed_index s0 (one u' held all episode) & ablation & 0.000 [0.000, 0.008] \\
+GPI abl @350k: fixed_index s1 (one u' held all episode) & ablation & 0.180 [0.149, 0.216] \\
+H1 antmaze fixed_index: sd1 @250k, index seed 0 (argmax ref 0.178) & ablation & 0.002 [0.000, 0.011] \\
+H1 antmaze fixed_index: sd1 @250k, index seed 1 (argmax ref 0.178) & ablation & 0.142 [0.114, 0.175] \\
+H1 antmaze fixed_index: sd1 @250k, index seed 2 (argmax ref 0.178) & ablation & 0.000 [0.000, 0.008] \\
+H1 antmaze fixed_index: sd1 @250k, index seed 3 (argmax ref 0.178) & ablation & 0.000 [0.000, 0.008] \\
+H1 antmaze fixed_index: sd2 @300k, index seed 0 (argmax ref 0.088) & ablation & 0.020 [0.011, 0.036] \\
+H1 antmaze fixed_index: sd2 @300k, index seed 1 (argmax ref 0.088) & ablation & 0.026 [0.015, 0.044] \\
+H1 antmaze fixed_index: sd2 @300k, index seed 2 (argmax ref 0.088) & ablation & 0.004 [0.001, 0.015] \\
+H1 antmaze fixed_index: sd2 @300k, index seed 3 (argmax ref 0.088) & ablation & 0.000 [0.000, 0.008] \\
+H1 antmaze fixed_index: sd0 @350k, index seed 0 (argmax ref 0.082) & ablation & 0.000 [0.000, 0.008] \\
+H1 antmaze fixed_index: sd0 @350k, index seed 1 (argmax ref 0.082) & ablation & 0.000 [0.000, 0.008] \\
+H1 antmaze fixed_index: sd0 @350k, index seed 2 (argmax ref 0.082) & ablation & 0.000 [0.000, 0.008] \\
+H1 antmaze fixed_index: sd0 @350k, index seed 3 (argmax ref 0.082) & ablation & 0.000 [0.000, 0.008] \\
+Affine psi, strict, antmaze gamma=0.99 @50k & zero-shot & 0.377 $\pm$ 0.343 \\
+Affine psi, strict, antmaze gamma=0.99 @100k & zero-shot & 0.305 $\pm$ 0.604 \\
+Affine psi, strict, antmaze gamma=0.99 @150k & zero-shot & 0.367 $\pm$ 0.504 \\
+Affine psi, strict, antmaze gamma=0.99 @200k & zero-shot & 0.310 $\pm$ 0.597 \\
+Affine psi, strict, antmaze gamma=0.99 @250k & zero-shot & 0.322 $\pm$ 0.666 \\
+Affine psi, strict, antmaze gamma=0.99 @300k & zero-shot & 0.332 $\pm$ 0.509 \\
+Affine psi, strict, antmaze gamma=0.99 @350k & zero-shot & 0.285 $\pm$ 0.692 \\
+Affine psi, strict, antmaze gamma=0.99 @400k & zero-shot & 0.299 $\pm$ 0.384 \\
+Affine psi, strict, antmaze gamma=0.99 @450k & zero-shot & 0.175 $\pm$ 0.528 \\
+Affine psi, strict, antmaze gamma=0.99 @500k & zero-shot & 0.170 $\pm$ 0.563 \\
+Affine psi, strict, antmaze gamma=0.995 @50k & zero-shot & 0.492 $\pm$ 0.310 \\
+Affine psi, strict, antmaze gamma=0.995 @100k & zero-shot & 0.519 $\pm$ 0.434 \\
+Affine psi, strict, antmaze gamma=0.995 @150k & zero-shot & 0.201 $\pm$ 0.239 \\
+Affine psi, strict, antmaze gamma=0.995 @200k & zero-shot & 0.142 $\pm$ 0.148 \\
+Affine psi, strict, antmaze gamma=0.995 @250k & zero-shot & 0.125 $\pm$ 0.129 \\
+Affine psi, strict, antmaze gamma=0.995 @300k & zero-shot & 0.015 $\pm$ 0.016 \\
+Affine psi, strict, antmaze gamma=0.995 @500k & zero-shot & 0.004 $\pm$ 0.005 \\
+Affine psi, strict, antmaze gamma=0.99 -- early-ckpt mean (50k-250k x seeds) & zero-shot & 0.336 $\pm$ 0.097 \\
+Affine psi, strict, antmaze gamma=0.995 -- early-ckpt mean (50k-250k x seeds) & zero-shot & 0.296 $\pm$ 0.102 \\
 \bottomrule
 \end{tabular}

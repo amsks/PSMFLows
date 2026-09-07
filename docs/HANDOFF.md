@@ -1,13 +1,13 @@
 ---
 marp: true
-title: PSMFlows — Session Handoff
+title: PSMFlows — Lab Record
 theme: default
 paginate: true
 ---
 
 <!-- _class: lead -->
 
-# PSMFlows — Session Handoff
+# PSMFlows — Lab Record
 
 Current work: **PSMFlow v1** (`docs/plans/2026-07-20-psmflow-v1.md`) — **Tasks 1–8 code
 complete**; the pipeline is now operator-driven (GPU runs + gates), with one open method
@@ -18,7 +18,1538 @@ hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RES
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
 Branch: `feat/inversion-integration` · Machine: `kisski` (GWDG, SLURM/H100) · prior: `midi-01` (UT CS)
-Date: **2026-09-04** (latest) · prior: 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+Date: **2026-09-07** (latest) · prior: 2026-09-06, 2026-09-05, 2026-09-04, 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+
+---
+
+<!-- _class: lead -->
+
+## 2026-09-07 — actor ablation: DSRL-NA gets 74 % of the actor-free ceiling, and it is not the support
+
+---
+
+### The table (`docs/tables/actor_ablation.md`, generated)
+
+500-episode evals, `EVAL_WORKERS=1`, pooled over 300k–500k × 3 seeds, mean ± 95 % CI.
+Substrate identical across arms (`psi_form=affine policy_index=latent index_agg=max
+u_clip=3.0`, same frozen flow and preimages); only the actor and acting rule differ.
+
+| env | arm | late mean | n | BC |
+|---|---|---|---|---|
+| cube | actor-free (GPI) | **0.415 ± 0.083** | 15 | 0.072 |
+| cube | **`dsrl_na`** | **0.307 ± 0.091** | 15 | 0.072 |
+| cube | ddpg latent actor (prior arm) | 0.146 | 2 | 0.072 |
+| cube | `dsrl_sac` | 0.108 ± 0.053 | 15 | 0.072 |
+| cube | **`prior_shrunk` control** | **0.059 [0.048, 0.072]** | 1500 ep | 0.072 |
+| antmaze γ=0.98 | actor-free | 0.067 ± 0.036 | 7 | 0.072 |
+| antmaze γ=0.98 | `dsrl_sac` | **0.000** | 3 | 0.072 |
+| antmaze γ=0.99 | actor-free | 0.252 ± 0.100 | 15 | 0.072 |
+| pointmaze | actor-free | 0.000 | 15 | 0.002 |
+| pointmaze | `dsrl_sac` | **0.000** | 3 | 0.002 |
+
+---
+
+### What was wrong with the old latent actor
+
+Audit: `docs/design/2026-09-06-dsrl-actor-audit.md`. The shipped actor climbed
+`psi(s,u,u')^T w` at **one** random policy index per batch element, while acting takes
+`max_{u'}` over 64. Measured on `affine_actor_cube` @500k with the new
+`tools/diag_actor_grad_terms.py`: **cos(∇q_single, ∇q_panel_max) = −0.49 / −0.20** — the
+actor's gradient was *anti-correlated* with the objective GPI maximises. BC domination on
+the affine critic is 2.8–3.6 : 1 (milder than the free-psi 5 : 1 of 09-03).
+
+The critic is untouched by the actor under `policy_index=latent` (`u_next = u_index`), so
+`affine_actor` is the actor-free critic with a different acting rule bolted on — 0.415 vs
+0.146 is a clean measurement of the acting rule alone.
+
+Fix: `actor.index_panel=K` makes the actor climb the same panel max, nearly free under the
+affine head (A(s,u) does not see u'). New `actor_mode: ddpg | dsrl_sac | dsrl_na`.
+
+---
+
+### The two decisive controls
+
+**`prior_shrunk`** (new `gpi_select` mode): one prior draw scaled to the NA actor's own
+operating radius (`u_norm` 1.72 vs prior median 2.13), reading neither `psi` nor `task_z`.
+Its checkpoint-invariance cell returned **28/500 at both 300k and 500k, byte-identical**,
+validating it as critic-free. It scores **0.059, at BC** → `dsrl_na`'s 0.307 is genuine
+state-dependent behaviour, **not** "shrink your latents". Pre-registered prediction held.
+
+**Ranking probe** (`tools/diag_actor_vs_gpi.py`, 256 states × 64-candidate roster):
+`dsrl_na` sits at roster percentile **0.614** (top-quartile fraction 0.369 vs 0.250 chance);
+the ddpg actor at **0.533** (0.248 — chance). The ordering matches success (0.307 > 0.146),
+so the distillation is real but **weak**. Both actors are *farther* from the roster argmax
+than from a typical candidate (ratio 1.22 / 1.25) — neither approaches it in latent space.
+The specified Spearman metric is **confounded and uninformative**: ≈0.97 vs the roster max
+*and* ≈0.99 vs the roster mean, for both arms, i.e. it measures per-state Q scale.
+
+---
+
+### Two negatives, both pre-registered
+
+**`dsrl_na`'s regression plateaus.** Distance explained vs the independence floor
+`(‖u_a‖²+‖u*‖²)/d_a`: cube **6.6–7.2 %**, antmaze 7.5–10.4 %, pointmaze 13.9–18.3 % — nine
+seeds, three envs, flat from 25k to 500k. The 25 % gate is missed everywhere. So the arm
+scores 0.307 **without** distilling the argmax and **without** riding the support.
+What it tracks is unidentified and is the most interesting object here.
+
+**`dsrl_sac` is 0.000 on both mazes** (0/1500 each) and 0.108 on cube. Cause: `actor_u_norm`
+is **~2.0× the prior radius on all three envs** (d_a = 2, 5, 8) and `actor_q` diverges
+(pointmaze sd1: **2.9e7**). `target_entropy=0` is DSRL's value for a box of **b=1.5**; ours
+is `u_clip=3.0`. **These rows measure the port, not DSRL-SAC.** A corrected arm
+(`affine_dsrl_sac_te_cube`, `target_entropy=−d_a·log(u_clip/1.5)`, `u_clip` unchanged so the
+critic's training distribution is identical) is running — SLURM 2492091–2492093.
+
+---
+
+### Pre-registration scorecard
+
+| hypothesis | outcome |
+|---|---|
+| H-A level (`dsrl_na` cube ≥ 0.25) | **met** (0.307) |
+| H-A stability (std < 0.12) | **refuted** (0.180; per-seed 0.205/0.237/0.479) |
+| H-B (`dsrl_sac` at/near BC) | **met**, and worse than registered |
+| `prior_shrunk` at BC (0.05–0.12) | **met** (0.059) |
+| `dsrl_na` NA-gate ≥ 25 % explained | **failed** (6.6–7.2 %) |
+
+**Discipline note.** Two over-readings were made *while these numbers landed* and are
+recorded in the design doc: "striking" after 2 of 15 cells (the next three were 0.09–0.12),
+and "every seed peaks at 300k and collapses" after 2 of 3 seeds (seed 2 rises monotonically
+to its best value at 500k). Both were generalisations from n = 2. Only the pooled row is
+quotable.
+
+---
+
+### Incident: 12 evals killed by a py/yaml skew
+
+The `actor.entropy` guard landed in `agents/psmflow.py` a few minutes **before** the key
+landed in `configs/agent/psmflow.yaml`. Twelve queued evals of *older* checkpoints died at
+`create()` with `KeyError: 'entropy'` (SLURM 2491907, 2491909–2491916, 2491919–2491921);
+they need resubmitting, nothing else was lost. Separately, 2491881–2491889 (exit 126) and
+2491924 (exit 2) failed on `scripts/eval500.sh` shell bugs *after* writing their reports —
+different owner, results usable.
+
+Root cause generalised: **a restored checkpoint's `flags.json` is older than the code
+restoring it, so every `actor` key added from now on must be optional at read time.** Fix:
+`fill_actor_defaults()` is now the first statement of `create()`. Regression test
+`tests/test_psmflow_config_compat.py` (9 cases) drives three *verbatim archived*
+`flags.json` fixtures through the eval tool's own `merge_run_config` + `create`, and asserts
+**yaml ↔ `get_config()` leaf-key parity** — the one assertion that would have caught it
+(negative control run: deleting `entropy` from the yaml fails it).
+
+---
+
+### Artifacts
+
+- `docs/design/2026-09-06-dsrl-actor-audit.md` — audit, pre-registrations, all findings.
+- `docs/tables/actor_ablation.md` — generated; `ACTOR_ABLATION` appended to `make_tables.py`.
+- New: `tools/diag_actor_grad_terms.py`, `tools/diag_actor_vs_gpi.py`,
+  `utils/psm_networks.py::{TanhGaussianLatentActor, tanh_gaussian_sample, LogAlpha}`,
+  `gpi_select=prior_shrunk`, `tests/test_psmflow_{dsrl_actor,config_compat}.py`.
+- Runs: `affine_dsrl_{na,sac}_{cube,antmaze,pointmaze}` 2491932–2491949 (six plain-NA maze
+  runs cancelled at 30–40k, data salvaged); g99 arms 2492040–2492045; corrected SAC
+  2492091–2492093; probe 2492090.
+- Tests: 138 passed / 2 skipped over 14 modules, module-per-process.
+
+---
+
+<!-- _class: lead -->
+
+## 2026-09-06 — three-seed affine ladder + baselines
+
+---
+
+## Affine strict, cube: **a third seed does not settle it** — the ladder is
+## 0.086 … 0.704 over 30 measurements and the swing is within-run, on every seed
+
+Seed 2 of `agent=psmflow` (repo default = paper-strict affine: `psi_form=affine
+policy_index=latent train_actor=false acting=gpi`) was trained to 500k on both envs with a
+config verified byte-equal to sd000's `flags.json` (only `seed`, `run_group` and the three
+eval-only `gpi_select` keys added 09-05 differ), and the cube ladder was completed for all
+three seeds: **every 50k checkpoint from 50k to 500k, 500 episodes each, 30 cells, no gaps.**
+
+Table: `docs/tables/affine_cube_ladder.md` (generated).
+Figure + series: `docs/figures/2026-09-06-affine-cube-ladder.{png,json}`
+(generator `tools/fig_affine_cube_ladder.py`; the 09-05 two-seed figure is left in place).
+
+---
+
+## The full cube ladder (500 episodes per cell, Wilson 95%)
+
+| epoch | sd0 | sd1 | sd2 | mean ± std |
+|---|---|---|---|---|
+| 50k | 0.192 [0.160, 0.229] | 0.412 [0.370, 0.456] | 0.224 [0.190, 0.263] | 0.276 ± 0.119 |
+| 100k | 0.078 [0.058, 0.105] | 0.330 [0.290, 0.372] | 0.178 [0.147, 0.214] | 0.195 ± 0.127 |
+| 150k | 0.088 [0.066, 0.116] | 0.268 [0.231, 0.308] | **0.596** [0.552, 0.638] | 0.317 ± 0.258 |
+| 200k | 0.264 [0.227, 0.304] | 0.298 [0.260, 0.340] | 0.466 [0.423, 0.510] | 0.343 ± 0.108 |
+| 250k | 0.532 [0.488, 0.575] | **0.620** [0.577, 0.661] | 0.246 [0.210, 0.286] | 0.466 ± 0.196 |
+| 300k | 0.286 [0.248, 0.327] | 0.532 [0.488, 0.575] | 0.360 [0.319, 0.403] | 0.393 ± 0.126 |
+| 350k | **0.704** [0.663, 0.742] | 0.494 [0.450, 0.538] | 0.350 [0.309, 0.393] | 0.516 ± 0.178 |
+| 400k | 0.282 [0.244, 0.323] | 0.346 [0.306, 0.389] | 0.546 [0.502, 0.589] | 0.391 ± 0.138 |
+| 450k | 0.272 [0.235, 0.313] | 0.568 [0.524, 0.611] | 0.564 [0.520, 0.607] | 0.468 ± 0.170 |
+| 500k | 0.086 [0.065, 0.114] | 0.548 [0.504, 0.591] | 0.292 [0.254, 0.333] | 0.309 ± 0.232 |
+
+| pooled window | n (ckpt × seed) | mean | std | 95% CI | min | max |
+|---|---|---|---|---|---|---|
+| **300k–500k** | 15 | **0.415** | 0.164 | ± 0.083 | 0.086 | 0.704 |
+| **250k–500k** | 18 | **0.424** | 0.164 | ± 0.076 | 0.086 | 0.704 |
+| BC control | — | 0.072 | — | — | — | — |
+
+---
+
+## What the third seed changed, and what it did not
+
+**Did not change the headline.** The 250k–500k pooled mean moved 0.424 → 0.424 (the interval
+tightened, ± 0.141 → ± 0.076, purely from n 10 → 18). The 09-05 claim stands verbatim: this
+arm is ~0.42 as a *mean over late checkpoints*, ~6× BC, and **no single checkpoint of it is
+reproducible to ± 0.1**.
+
+**Settled the "is sd0 the broken one?" question: no.** Seed 2 oscillates like seed 0, not
+like seed 1. Per-seed spread over the ten checkpoints (min → max, largest jump between
+*adjacent* 50k checkpoints):
+
+| seed | min | max | range | sd | largest adjacent jump | mean ≥300k |
+|---|---|---|---|---|---|---|
+| 0 | 0.078 | 0.704 | 0.626 | 0.202 | **0.422** (350k→400k) | 0.326 |
+| 1 | 0.268 | 0.620 | 0.352 | 0.126 | 0.322 (200k→250k) | 0.498 |
+| 2 | 0.178 | 0.596 | 0.418 | 0.152 | **0.418** (100k→150k) | 0.422 |
+
+Seed 2's 0.178 → **0.596** → 0.466 → 0.246 over four consecutive checkpoints is the same
+±0.4 within-run swing sd0 shows, with Wilson intervals ±0.04 wide — disjoint by a wide
+margin, so it is training-time non-stationarity on **two of three seeds**. Seed 1 is the
+outlier for being *calm*, not seed 0 for being wild. Its own late mean (0.498) is the best
+of the three, so "pick the stable seed" and "pick the good seed" happen to coincide here —
+which is exactly the trap the pooled row exists to avoid.
+
+**No checkpoint-selection rule is available from the logs.** The in-loop 50-episode eval
+tracks the 500-episode ladder only loosely (middle panel of the figure), and
+`w_enc_spread` — the policy-encoder collapse diagnostic — decays smoothly to the same place
+on all three seeds (peak ~1.31 → 0.36 / 0.25 / 0.31 at 500k) while success swings ±0.4
+around it. The onset differs (it first crosses 0.6 at 190k / 215k / **305k** for sd0 / sd1 /
+sd2) but the ordering does not match the success ordering: sd2 collapses *latest* and is
+neither the best nor the worst arm. The encoder collapse is real and monotone; it does not
+predict which checkpoint, or which seed, is good.
+
+---
+
+## Antmaze, seed 2: still nothing
+
+| epoch | sd0 | sd1 | sd2 |
+|---|---|---|---|
+| 50k | 0.112 [0.087, 0.143] | 0.000 [0.000, 0.008] | — |
+| 250k | — | 0.178 [0.147, 0.214] | — |
+| 300k | — | — | 0.088 [0.066, 0.116] |
+| 350k | 0.082 [0.061, 0.109] | — | — |
+| 400k | 0.056 [0.039, 0.080] | 0.134 [0.107, 0.167] | — |
+| 500k | 0.002 [0.000, 0.011] | 0.096 [0.073, 0.125] | **0.008** [0.003, 0.020] |
+
+Seed 2 was evaluated at 500k and at its single best in-loop checkpoint (300k, in-loop 0.40).
+**500k = 0.008, i.e. the third seed also decays to the floor**; 2 of 3 seeds now end below
+the BC control (0.072). The late-checkpoint mean (≥250k, 8 measurements) is **0.081 ± 0.050**
+against BC 0.072 — the interval still contains BC, so antmaze remains **not a result**.
+
+The in-loop eval is worse than useless here: 300k read **0.40 over 50 episodes** and
+**0.088 over 500**. Any checkpoint picked off `eval.csv` on this env is picking noise.
+
+---
+
+## Provenance / caveats for the two entries above
+
+* Every cell is `tools/eval_checkpoint.py`, 500 episodes, agent config inherited from the
+  run's own `flags.json` (no arm flags on the CLI). SLURM 2491687-94 (sd0/sd1 gap fill),
+  2491730-2491798 (sd2 cube ladder), 2491799-2491800 (sd2 antmaze).
+* Training: cube sd2 02:41:50, antmaze sd2 04:05:51, matching sd0/sd1 to a few minutes.
+* The sd0/sd1 **100k and 250k** JSONs carry `acting_mode: "decode(actor latent)"`. That is
+  the pre-09-05 **label** bug only — `acting: gpi` in the same JSON, and the shipped
+  `gpi_select=argmax` code path is unchanged by the 09-05 ablation commit (the ablations
+  branch out before it). The numbers are comparable; the string is not.
+* `tools/make_tables.py` now carries one row per cube checkpoint 50k–500k plus a
+  300k–500k pooled row, and an antmaze @300k row; the `sd?` globs already span three seeds.
+
+
+---
+
+## Baseline — **plain FB with the actor's BC term off: 0.000 on cube, every seed,
+## every checkpoint; the same critic with BC on clears the BC control**
+
+Full write-up, hyperparameters and caveats: `docs/tables/fb_nobc_cube_ladder.md`.
+Repro: `bash scripts/baselines/fb_nobc.sh {table|train|eval}`.
+
+**Where the code came from.** `https://github.com/LUH-AI/Factored-FB.git`, branch
+`density-fb`, commit `b62dc9d5e73f282924c29d0ab64d1f889b43532e`, checked out at
+`/mnt/home/amohan/git/Austin/Factored-FB`. That branch is simply where the newest code
+sits; the agent run is the **plain Forward-Backward critic** `fb`
+(`impls/critics/fb.py`), not the density variant. Nothing from PSMFlows was used — this
+agent trains F, B, the left encoder and the actor from scratch in one 500k run, so
+`$PSM_DATA/flow/cube-single-play` never entered it.
+
+**"BC anchoring off" = `--actor ddpgbc --override actor.alpha=0.0`.** `DDPGBCActor.loss`
+is `q_loss + bc_loss` with `q_loss = -q.mean() / sg(|q|.mean() + 1e-6)` and
+`bc_loss = -(alpha * dist.log_prob(dataset_action)).mean()`. `alpha=0` zeroes the anchor
+exactly and keeps the `|q|` normaliser (it is gated by the separate `q_normalize`, default
+true), so the actor ascends `Q = <F(le(s), a, z), z>` and nothing else. `alpha` is the only
+BC-ish knob on this actor, so there is no second reading to hedge against. Picking `ddpgbc`
+over the repo's canonical `flowbc` is also what makes the arm flow-free: `flowbc` carries
+`bc_coeff: 3.0` and distils a flow-matching policy. This is the repo's own idiom —
+`scripts/launch_exorl.sh` pins exactly these two flags for its no-BC arms. The runs' logs
+show `bc_loss: 0.0` throughout and their `config.json` records `actor.alpha = 0.0`.
+
+**The ladder** (500 episodes per cell, OGBench task_id=1, i.e. what PSMFlows calls
+`cube-single-play-singletask-v0`; reports at
+`$PSM_DATA/logs/eval500_fb_nobc_cube_{epoch}k_sd{S}.json`):
+
+| epoch | 50k | 100k | 150k | 200k | 250k | 300k | 350k | 400k | 450k | 500k |
+|---|---|---|---|---|---|---|---|---|---|---|
+| seed 0 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 |
+| seed 1 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 |
+| seed 2 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 |
+
+**Late mean (300k–500k, 15 measurements): 0.000 ± 0.000.** Same on the affine ladder's
+250k–500k window (18 measurements). Wilson 95% on each 0/500 cell is [0.000, 0.008] — 15000
+evaluation episodes without a single success, not a noisy zero.
+
+Against the two numbers that matter: **BC control 0.072**, **affine psi strict, cube, late
+mean 0.424**. The baseline is below the control, not merely below the method.
+
+**Two controls, and they are the actual result.** Both seed 0, same critic, same data, same
+500-episode protocol:
+
+| arm | flags | 300k | 400k | 500k |
+|---|---|---|---|---|
+| **BC ON** — the repo's canonical cube-single pairing | `--actor flowbc` (`bc_coeff 3.0`) | **0.110** [0.086, 0.141] | **0.084** [0.063, 0.112] | **0.108** [0.084, 0.138] |
+| BC OFF + strong orthonormaliser | `--actor ddpgbc actor.alpha=0.0 ortho_coef=1000` | 0.000 | 0.000 | 0.000 |
+
+1. **The behaviour anchor is load-bearing and it is the only thing that is.** Same FB
+   critic, same budget: with the anchor the arm clears the BC control at all three
+   checkpoints (0.110 / 0.084 / 0.108 vs 0.072); without it, zero.
+2. **`ortho_coef` is not the confound.** The archived PSMFlows FB reached cube 0.721 with
+   `ortho_coef=1000` while this repo ships the reference-native 1.0, so the obvious
+   objection was that the baseline was mis-tuned rather than BC-starved. Re-run at
+   `ortho_coef=1000` with BC still off: still 0/500 at 300k, 400k and 500k.
+3. The raw-action PSM baseline in this same entry reached 0.000 by deleting the same kind of
+   anchor from a different agent in a different codebase. Two independent confirmations that
+   "successor measure + pure Q ascent in raw action space" does not stand up on cube.
+
+**Hyperparameters** (merged config, identical across seeds): `batch_size 256 · z_dim 50 ·
+L_dim 50 · num_parallel 2 · discount 0.99 · f/b_target_tau 0.005 · ortho_coef 1.0 ·
+train_goal_ratio 0.5 · fb_pessimism_penalty 0.0 · q_loss_coef 0.0 ·
+actor_pessimism_penalty 0.0 · norm_z true · lr_f/lr_b 1e-4 · lr_actor 3e-4 ·
+forward {512, 2, emb 2} · backward {512, 4, norm} · left_encoder {512, 4, norm} ·
+actor {[512,512,512], alpha 0.0, const_std true, q_normalize true}`. 500k steps, ckpt every
+50k, one H100 per seed, 41–45 min per run.
+
+**Caveats.** (a) This is the *shipped* FB arm with its BC coefficient zeroed, not a tuned
+pure-Q FB: the four Touati-parity knobs the repo exposes (`actor.q_normalize=false`,
+`boot_noise_std/clip`, `actor_pessimism_penalty=0.5`, `q_loss_coef=1/z_dim`) all default off
+and none were tried. The claim is not "no pure-Q FB can work". (b) Eval conditions FB on the
+goal-Dirac `z = project_z(B(goal))`, this repo's default for `fb` on cube — *more*
+information than PSMFlows hands `psmflow`, so the arm is not being under-sold. The
+reward-inference route is wired and smoke-tested in `scripts/baselines/fb_eval500.py`
+(`--relabel_infer`) but an arm at 0/500 under easier conditioning cannot be rescued by
+harder. (c) `actor_loss` sits at exactly −1.0 all run — what `-q.mean()/sg(|q|.mean())`
+degenerates to once `q` has a consistent sign; the gradient is live, the logged scalar is
+not informative. (d) One seed each for the two controls. (e) The repo has no recorded FB
+cube-single number to check against; `results/table.csv` carries `fb` rows for ManiSkill and
+Metaworld only.
+
+**If we port this FB back into PSMFlows** (to replace `archive/agents/fb.py`): the two
+implementations are the *same maths*. `impls/critics/fb.py::stage_loss` and
+`archive/agents/fb.py::_fb_loss_fn` share the off-diagonal squared TD residual, the
+`-mean(diag)*P` term, the `0.5*sum((cov*off)^2)/off_sum - mean(diag(cov))` orthonormaliser,
+the `train_goal_ratio=0.5` hindsight/sphere z-mix, and `infer_cond` = `(r^T B)/N` then
+`project_z` — and the two yamls agree on every shared key. What the newer one adds is (i)
+knobs, all defaulting to the old behaviour: `q_loss_coef` (the reference's auxiliary Q loss,
+eq. 42), `left_encoder.identity` (Touati parity, F reads raw obs), `boot_noise_std/clip`
+(target-policy smoothing), `q_normalize`, `motivo_archi`; (ii) a **goal-conditioned eval
+route** (`map_eval_cond`: `z = project_z(B(goal))`) that PSMFlows' version has no equivalent
+of — PSMFlows only ever infers `z` from rewards; and (iii) the critic×actor factoring, which
+buys the Gaussian `ddpgbc` policy as an alternative to PSMFlows' in-agent `actor.type:
+flow|td3` switch. A port does **not** require adopting the factoring: it is (1) re-register
+`fb` in `agents/__init__.py` + restore `configs/agent/fb.yaml`, (2) copy the five knobs
+across, (3) add `ddpgbc` as a third `actor.type`, (4) optionally add the goal-Dirac eval
+path. Roughly a day. Because every new knob defaults to the pre-existing behaviour, the
+archived equivalence fixture (`archive/tests/fixtures/fb_reference.npz`,
+`test_fb_agent_equiv.py`) should still pass unchanged — which is the cheapest available
+check that the port did not silently change the loss.
+
+
+---
+
+## Baseline — **PSM in raw action space, no BC anchoring: 0.000 on cube, on every seed,
+## at every checkpoint**
+
+Full write-up, hyperparameters and caveats: `docs/tables/psm_raw_nobc_cube_ladder.md`.
+Repro: `scripts/baselines/psm_raw_nobc.sh`.
+
+**What was run.** The two archived successor-measure agents, in RAW action space (dataset
+action in the measure's middle slot — no behaviour flow, no preimages, no decode) with the
+BC anchor deleted (`agent.actor.bc_coeff=0.0`, so the actor objective is the bare
+`-Q.mean()`):
+
+* **Arm A** `archive/agents/affine_psm.py` — the raw-action twin of the shipped agent
+  (affine measure `M = Phi(s,a,x)·w + b`, factored `Phi = A(s,a) phi_x(x)`, goal-conditioned
+  LP inference). **Preferred**, because the project's algorithm is affine.
+* **Arm B** `archive/agents/psm.py` — the bilinear PSM of arXiv 2411.19418,
+  `M = psi(s,z,a)ᵀ phi(x)`, the peer baseline of record.
+
+`actor.type=ddpgbc` on both, so no flow-matching BC loss remains anywhere in the objective.
+Pessimism kept exactly as each agent has it and reported: Arm A has **none** (only √d
+normalisation, `b_scale=10`, `ortho_coef=1000`, `tau=0.01`); Arm B keeps
+`actor_pessimism_penalty=0.5` over `num_parallel=2` heads (and `pessimism_penalty=0.0` on
+the target, its own default). Nothing was added back.
+
+3 seeds × 500k offline steps × 500-episode evals at every 50k, cube-single-play.
+
+| epoch | Arm A sd0/sd1/sd2 | Arm B sd0/sd1/sd2 |
+|---|---|---|
+| 50k | 0.000 / 0.000 / 0.000 | 0.000 / 0.000 / 0.000 |
+| 100k | 0.000 / 0.000 / 0.000 | 0.000 / 0.000 / 0.002 |
+| 150k | 0.000 / 0.000 / 0.000 | 0.000 / 0.000 / 0.000 |
+| 200k | 0.000 / 0.000 / 0.000 | 0.000 / 0.000 / 0.000 |
+| 250k | 0.000 / 0.000 / 0.000 | 0.000 / 0.000 / 0.000 |
+| 300k | 0.000 / 0.000 / 0.000 | 0.000 / 0.000 / 0.000 |
+| 350k | 0.000 / 0.000 / 0.000 | 0.000 / 0.000 / 0.000 |
+| 400k | 0.000 / 0.000 / 0.000 | 0.000 / 0.000 / 0.000 |
+| 450k | 0.000 / 0.002 / 0.000 | 0.000 / 0.000 / 0.000 |
+| 500k | 0.000 / 0.000 / 0.000 | 0.000 / 0.000 / 0.000 |
+
+**Late mean (300k–500k, n = 15 checkpoint×seed measurements each, 500 episodes each):
+Arm A 0.000, Arm B 0.000.** Pooled over the whole sweep each arm scored **1 success in
+15 000 episodes** (Wilson 95% upper bound 0.0004). Against **BC 0.072** and the affine
+LatentFlowPSM's **0.424 ± 0.141** (late-checkpoint mean, ≥250k), the baseline clears
+neither — it does not clear zero. The in-loop 50-episode eval read 0.00 at all 11 points of
+all 6 runs, so nothing was missed between checkpoints.
+
+---
+
+## Why it is zero: the actor leaves the manifold, exactly as pre-registered
+
+The representation trains fine on both arms (`psm_loss`, `orth_loss` converge normally).
+What runs away is the greedy actor's own Q:
+
+| arm | seed | Q @5k | @50k | @100k | @250k | @500k |
+|---|---|---|---|---|---|---|
+| A | 0 | 60 | 249 | 110 | 16 | 10 |
+| A | 1 | 142 | **1810** | 388 | 20 | 67 |
+| A | 2 | 60 | 15 | 23 | 22 | 28 |
+| B | 0 | 406 | 1440 | 1820 | 1900 | **1970** |
+| B | 1 | 407 | 1290 | 1970 | 1950 | **2340** |
+| B | 2 | 372 | 1440 | 1790 | 1920 | **2080** |
+
+Arm B's Q is `psi(s,z,a)ᵀz` with `norm_z=true`, so `|z| = √128 = 11.3` and Q ≈ 2000 means a
+`psi` norm of ~175 at the action the actor picked — a value the contrastive loss never sees
+on data, reached by 100k and held to the end. Two ensemble heads with
+`actor_pessimism_penalty=0.5` do not stop it: they agree about an action neither was
+trained on. Arm A's factored measure is *unnormalised* (only `phi_x` is √k-normalised, so
+`Phi = A·phi_x` is free), and its Q spikes the same way early.
+
+**This is the control the anchor exists for, and it is a clean negative.** It bounds the
+*pair* (raw actions + no anchor), not either alone: the separating cell — raw actions
+**with** `bc_coeff=3.0` — is the archived `affine_psm` cube push, PARKED 2026-07-26 with no
+500-episode ladder. Not a tuned baseline either: archived cube hyperparameters, one flag
+changed, no sweep.
+
+---
+
+## Infra: running an archived agent without un-archiving it
+
+`archive/` stays frozen — nothing moved, nothing edited, and `main.py`,
+`agents/__init__.py`, `agents/psmflow.py`, `agents/fql.py`, `utils/psm_networks.py` and
+`tools/eval_checkpoint.py` are untouched. New, all under `scripts/baselines/`:
+
+* `_archive.py` — imports `archive.agents.*` as a namespace package and registers a hydra
+  `SearchPathPlugin` so `agent=affine_psm` resolves to `archive/configs/agent/`.
+* `run_archived.py` — `main.py` for archived agents. Restores the two seams the live entry
+  point dropped: `dataset.return_index = True` (the proto sampler keys `pi_z` on the global
+  buffer row index, not batch position) and the goal-conditioned eval branch
+  (`infer_w_goal` -> `infer_eval`), both verbatim from pre-archive `main.py` (`db96e48`).
+* `eval_archived.py` — 500-episode eval; **reuses** `tools/eval_checkpoint.py`'s
+  `merge_run_config` / `_cli_agent_keys` / `wilson` unchanged, so the agent config is
+  inherited from the run's own `flags.json` (verified on every job:
+  `actor.bc_coeff: config 3.0 -> run 0.0`).
+* `train_archived.sbatch`, `eval_archived.sbatch`, `psm_raw_nobc.sh`,
+  `psm_raw_nobc_table.py` (regenerates the ladder from the JSONs).
+
+Deleting `scripts/baselines/` reverts the repo exactly. Discipline log: 200-step smokes of
+both arms (2491695/6) and of the eval path (2491712/3) before launch; `flags.json` re-read
+after launch on all 6 runs; expected failure mode stated before results; every number from
+a persisted JSON.
+
+---
+
+## Antmaze H1 — **pinning the GPI policy index does not rescue antmaze; it destroys it**
+## (11 of 12 cells significantly BELOW behaviour cloning, 6 of them exactly 0/500)
+
+Pre-registration: `docs/design/2026-09-06-antmaze-failure-tests.md` §2, written and
+committed to before any job was submitted; §5 is the results section and §2 was not edited
+after they returned.
+
+**The hypothesis.** Affine paper-strict is null on antmaze (late-ckpt mean 0.081 ± 0.050 vs
+BC 0.072, episodes timing out at 1000 steps) while the arms with a *persistent* policy — the
+affine latent-actor arm — score ~0.21 on the same env, flow and checkpoints. H1: the acting
+rule redraws `K=64` policy indices `u'` **every step** and maximises over them, so the
+executed behaviour is a different policy at every step of a 1000-step maze episode, and that
+temporal incoherence is the failure.
+
+**The test.** Eval-time only, no retraining, no code changes: `agent.gpi_select=fixed_index`
+pins `u'` to `PRNGKey(agent.gpi_index_seed)` for the whole evaluation while the inner
+`argmax_u` over 64 action latents still runs per step. Three checkpoints x four index seeds,
+500 episodes each, config inherited from each run's own `flags.json` with only
+`gpi_select`/`gpi_index_seed` typed on top (confirmed in each JSON's `agent_config_source`).
+SLURM 2491818-2491829, all COMPLETED, 11 min each — **64x cheaper than the shipped rule**,
+because `n_idx=1` collapses the `K x K = 4096` pair scan to `K = 64`.
+
+---
+
+## H1 results: 500 episodes per cell, Wilson 95%, BC control 0.072
+
+| checkpoint | argmax ref | index seed 0 | 1 | 2 | 3 |
+|---|---|---|---|---|---|
+| sd1 @250k | 0.178 | 0.002 [0.000, 0.011] | **0.142** [0.114, 0.175] | 0.000 [0.000, 0.008] | 0.000 [0.000, 0.008] |
+| sd2 @300k | 0.088 | 0.020 [0.011, 0.036] | 0.026 [0.015, 0.044] | 0.004 [0.001, 0.015] | 0.000 [0.000, 0.008] |
+| sd0 @350k | 0.082 | 0.000 [0.000, 0.008] | 0.000 [0.000, 0.008] | 0.000 [0.000, 0.008] | 0.000 [0.000, 0.008] |
+
+Pooled over the 12 cells: **97 / 6000 = 0.016**, against BC 36/500 = 0.072 —
+z = -8.47, **p = 2.4e-17**. Every cell except sd1/is1 is individually below BC at
+p <= 8.7e-05. Reference points: BC **0.072**, affine strict late-ckpt mean **0.081 ± 0.050**,
+affine **latent-actor** arm (persistent policy) **~0.21** (0.224/0.206 @500k, 0.218/0.224
+@50k, 0.176/0.216 @100k).
+
+**Verdict: H1 refuted, in the opposite direction.** The pre-registered not-H1 threshold was
+"every cell <= 0.10"; the cells are an order of magnitude below it. The single exception,
+sd1 @250k index seed 1 at 0.142, is not a lift: it sits on the one checkpoint that already
+scores **0.178** with the shipped per-step argmax (-0.036, p = 0.12, no significant change),
+and that same checkpoint's other three index draws return 0.002 / 0.000 / 0.000. §2
+pre-registered exactly this caveat — a move confined to the best-of-eight checkpoint is
+about the checkpoint, not the rule. The checkpoints the hypothesis needed (argmax at the
+floor, 0.082 / 0.088) return 0.000 on seven of their eight cells.
+
+---
+
+## What H1 changes
+
+1. **It reproduces the 09-05 cube `fixed_index` finding on a second env and task family.**
+   Cube: 0.704 -> 0.000 (index seed 0) / 0.180 (seed 1). Antmaze: 0.082-0.178 -> 0.000-0.142.
+   The per-step max over 64 fresh policy indices is **load-bearing on both**, and it behaves
+   the same on a 200-step manipulation task and a 1000-step navigation task. It is an
+   optimism device averaged over the index lottery every step, not a policy choice — and
+   removing it is worse than behaviour cloning, not merely equal to it.
+2. **Temporal incoherence is not why antmaze fails.** The per-step reselection is the only
+   thing holding this arm *at* BC rather than at zero.
+3. **The latent-actor arm's ~0.21 is not "persistence".** A pinned index is maximally
+   persistent and pools to 0.016. Whatever the actor arm has comes from the amortized actor
+   being *trained* — a distillation over the index panel with its own learning signal. That
+   makes the actor arm, not the strict arm, the interesting antmaze object.
+4. **The index lottery is enormous on antmaze.** Four draws of `u'` on one checkpoint give
+   0.142 / 0.002 / 0.000 / 0.000. Conditioned on a fixed index, `psi`'s preference over
+   action latents is worth between -0.072 and +0.070 against BC depending on the draw: the
+   learned measure has no index-independent notion of a good action.
+
+Reports: `$PSM_DATA/logs/eval500_antmaze_fixedidx_sd{S}_{epoch}k_is{I}.json`, registered as
+12 separate `ablation` rows in `tools/make_tables.py` (they never pool — a mean over the
+four index seeds of one checkpoint would hide the entire finding).
+
+---
+
+## Antmaze H2 (pre-registration) — is `discount=0.98` (~50-step horizon) too short
+## for a 1000-step maze?  [results in the next two slides]
+
+Pre-registered in the same note, §3. Six retrains of the repo-default affine-strict antmaze
+agent with **`agent.discount=0.99`** and **`0.995`** (horizons 100 and 200 vs the default's
+50), 3 seeds each, 500k steps, `save_interval=50000`. SLURM 2491831-2491836, launched
+2026-09-06 22:18, ~4 h expected. Groups `affine_strict_antmaze_g99` /
+`affine_strict_antmaze_g995`.
+
+Pre-registered expectation: under H2 the in-loop eval leaves the floor by ~250k and the
+500-episode success at 500k is >= 0.15 for `gamma=0.995`, with `gamma=0.99` intermediate,
+**monotone in the horizon**; under not-H2 all six stay in 0.00-0.10 like `gamma=0.98`. An
+anticipated failure mode was stated in advance: a longer discount can *destabilise* the TD
+backup, and `gamma=0.995` collapsing earlier than `gamma=0.98` is a plausible outcome.
+The in-loop 50-episode eval over-reads badly on antmaze (sd2 @300k read **0.40** in-loop and
+**0.088** at 500 episodes) and is used only to pick which checkpoint gets a 500-episode eval.
+
+---
+
+## Antmaze H2 — **CONFIRMED: the discount was the blocker.** gamma=0.99 pools to
+## **0.294 [0.224, 0.364]** over a 30-cell ladder against gamma=0.98's **0.076**
+
+All six retrains COMPLETED (SLURM 2491831-2491836, 3 h 53 m - 4 h 10 m each); every
+`flags.json` re-read after launch differs from `affine_strict_antmaze/sd001` in `discount`
+alone. The ladder is **51 500-episode cells** — gamma=0.99 at every 50k checkpoint 50k-500k
+(30) and gamma=0.995 at 50k-300k plus a 500k endpoint (21) — all on the serial eval path
+(`EVAL_WORKERS=1`), the one the 12 H1 cells and every historical antmaze number used. Full
+per-cell table: `docs/tables/affine_antmaze_discount_ladder.md`. Figure:
+`docs/figures/2026-09-07-affine-antmaze-discount-ladder.{png,json}`.
+
+| arm | horizon | window | n | mean | 95% CI | min | max |
+|---|---|---|---|---|---|---|---|
+| gamma=0.98 (default) | 50 | all measured | 10 | 0.076 | ± 0.043 | 0.000 | 0.178 |
+| **gamma=0.99** | 100 | **all measured** | 30 | **0.294** | **± 0.070** | 0.004 | 0.624 |
+| gamma=0.99 | 100 | 50k-250k | 15 | 0.336 | ± 0.097 | 0.050 | 0.624 |
+| gamma=0.99 | 100 | 300k-500k | 15 | 0.252 | ± 0.100 | 0.004 | 0.590 |
+| gamma=0.995 | 200 | all measured | 21 | 0.214 | ± 0.092 | 0.002 | 0.678 |
+| gamma=0.995 | 200 | 50k-250k | 15 | 0.296 | ± 0.102 | 0.074 | 0.678 |
+| gamma=0.995 | 200 | **300k-500k** | 6 | **0.010** | ± 0.008 | 0.002 | 0.020 |
+
+BC control **0.072**; the affine latent-actor arm — previously the only antmaze arm off the
+floor — **~0.21**. gamma=0.99's interval is **disjoint from gamma=0.98's**, it is ~3.9x BC,
+and it is the first antmaze arm whose *late* window stands on its own (300k-500k = 0.252 ±
+0.100, n=15). **Antmaze-medium is not structurally closed to this agent.** The 50-step
+effective horizon of gamma=0.98 was the obstruction, and the failure it produced — episodes
+running to the 1000-step timeout with success pinned at BC — is exactly what a value
+function blind past 50 steps does on a maze whose goal is hundreds of steps away.
+
+---
+
+## H2: the pre-registered signature is wrong on BOTH halves, and that is the useful part
+
+§3 pre-registered "in-loop leaves the floor by ~250k **and** 500-ep success at 500k >= 0.15
+for gamma=0.995, **monotone in the horizon**".
+
+* **Not monotone.** gamma=0.995 beats gamma=0.99 only at 50k-100k (0.492/0.519 vs
+  0.377/0.305). Pooled over any window it does not: 50k-250k 0.296 vs 0.336, all-measured
+  0.214 vs 0.294. Horizon 100 is enough; horizon 200 is past the useful point.
+* **gamma=0.995 collapses, now dated at 500 episodes.** Its 300k-500k window is **0.010 ±
+  0.008 over 6 cells**, every one between 0.002 and 0.020 — *below the BC control* — on all
+  three seeds at both checkpoints (300k: .008/.020/.018; 500k: .006/.004/.002). This was the
+  destabilisation mode named in advance, and it is **the most reproducible behaviour this
+  agent has ever shown**: three of three seeds, 200k steps apart, same near-zero value.
+* **A 500k-only eval would have got this wrong in both directions** — reading gamma=0.995 as
+  null (0.004) and gamma=0.99 as marginal (0.170 ± 0.227, its *worst* checkpoint). The
+  originally specified "500k plus best in-loop" protocol was inadequate; the 50k ladder is
+  what makes the result readable. Nothing here may be quoted at a single checkpoint.
+
+**Seed spread is still the dominant term**, as on cube: within gamma=0.99, seed 2 runs
+0.43-0.62 across the whole ladder while seed 1 wanders 0.004-0.414, and the across-seed std
+is 0.14-0.28 at every epoch.
+
+**Unregistered calibration finding: the in-loop 50-ep eval is well calibrated here.**
+gamma=0.995 in-loop at 100k read .32/.56/.78 against 500-episode .332/.546/.678, and its
+in-loop 0.000 from 300k is confirmed at 0.002-0.020 over 500 episodes. The 0.40 -> 0.088
+over-read recorded for gamma=0.98 is a property of an agent **sitting at the floor** — a
+50-episode sample of a near-zero rate is almost all noise — not a property of antmaze.
+
+---
+
+## H2 provenance and what remains
+
+* Eval: **51 COMPLETED jobs** — 2491922-2491923, 2491961-2491964, 2491984-2492016,
+  2492023-2492025, 2492030-2492038. All 51 JSONs verified programmatically: 500 episodes,
+  `restore_epoch` matching the filename's epoch token, `num_workers=1`.
+* 2491912/2491913 died at startup on another agent's in-flight `agents/psmflow.py` change
+  (`KeyError: 'entropy'`), wrote no JSON, and were resubmitted as 2491922/2491923. No other
+  eval failed.
+* `tools/fig_affine_antmaze_discount_ladder.py` is idempotent and partial-safe: it reads
+  whatever JSONs exist, renders the rest as gaps, and prints a coverage line
+  (`gamma=0.99: 30, gamma=0.995: 21` = complete). Re-run it plus `tools/make_tables.py`,
+  which carries 19 generated H2 rows (one per discount x checkpoint, seeds pooled, never
+  pooled across checkpoints — gamma=0.995 wins early and collapses late, so an early mean
+  and a late mean describe different agents).
+
+**What remains.** (1) Make `discount=0.99` the antmaze setting and decide whether it becomes
+the repo default — a one-line config change with a 30-cell three-seed ladder behind it.
+(2) Cube and pointmaze at gamma=0.99, in flight with another agent
+(`docs/design/2026-09-07-discount-sweep.md`); cube should be unaffected and pointmaze should
+stay at zero for the COMPENDIUM 4.11 reason, and those two pre-registered negatives are what
+would confirm the mechanism is *horizon* rather than "a bigger gamma helps everything".
+(3) The gamma=0.995 collapse is an unusually clean object — `w_enc_spread` and the psi-spread
+diagnostics run straight through it (third panel of the figure) and whatever explains it may
+also explain the cube arm's ±0.4 within-run swings. (4) The gamma=0.98 antmaze ladder still
+has 20 of 30 cells missing; filling it is 20 evals of already-trained checkpoints and would
+make the three-arm comparison exact rather than pooled-over-what-exists. (5) Combined with
+H1, the antmaze story is now **"the critic was horizon-starved"**, not "the acting rule was
+temporally incoherent".
+
+Discipline log: pre-registration written before submission; a 200-step
+smoke of the exact training path (SLURM 2491830) whose `flags.json` differed from
+`affine_strict_antmaze/sd001` **only** in `discount` (plus the three eval-only `gpi_select`
+keys added 09-05, which training never reads); all six runs' `flags.json` re-read after
+launch and confirmed to carry 0.99 / 0.995; the H1 eval path verified from job 2491818's log
+(`CLI overrides kept: ... gpi_index_seed, gpi_select`) before reading any number; every
+number from a persisted JSON.
+
+---
+
+## H3 (in flight) — **does the discount horizon matter beyond antmaze?** cube and
+## pointmaze retrained at `gamma=0.99`, with opposite predictions registered for the two
+
+Pre-registration: `docs/design/2026-09-07-discount-sweep.md`, written and committed to
+before any job was submitted. Nothing in `agents/` or `utils/` is touched; the only change
+is `agent.discount`.
+
+**Why.** The 09-06 antmaze H2 test (section above) is still running, but two things are
+already visible. `gamma=0.99` reads **0.534** and `gamma=0.995` reads **0.678** at 100k on
+seed 2 over 500 episodes, against the `gamma=0.98` arm's late-checkpoint mean **0.081 ±
+0.050** and BC **0.072** — a 6-8x move on the env this project had written off. And
+`gamma=0.995` then **dies**: all three of its seeds read exactly 0.00 in-loop at 300k and
+350k while all three `gamma=0.99` seeds hold (0.28/0.24/0.64 and 0.28/0.12/0.46). H2's §3
+named that destabilisation as an anticipated failure mode before the runs started, and it
+fired. `gamma=0.99` is therefore the value carried forward: it is the one that both moved
+and survived.
+
+**The test.** Six retrains of the repo-default paper-strict affine agent (`agent=psmflow`),
+3 seeds x 2 envs, 500k steps, `save_interval=50000`, groups `affine_strict_cube_g99` and
+`affine_strict_pointmaze_g99`. SLURM **2492017-2492019** (cube sd0/1/2) and
+**2492020-2492022** (pointmaze sd0/1/2), each gated `--dependency=afterok` on its env's
+200-step smoke (**2491981** cube, **2491982** pointmaze) so no training job can start unless
+the smoke of the exact code path exited 0. Everything else is byte-identical to
+`affine_strict_cube` / `affine_strict_pointmaze`: same frozen flow, same preimage npz, same
+budget, same eval protocol.
+
+---
+
+**The two envs were chosen because they predict opposite things** — a sweep that expects the
+same outcome everywhere tests nothing.
+
+* **Cube: no change.** Cube episodes are 200 steps and the reward is reachable well inside
+  `gamma=0.98`'s ~50-step horizon, so unlike antmaze (goal 200-400 steps away,
+  `0.98^300 ≈ 2e-3`) cube is not horizon-starved. Registered point prediction for the
+  300k-500k late mean: **0.42**, interval **0.33-0.50**, i.e. within ±0.09 of the
+  `gamma=0.98` value **0.415 ± 0.083**. Registered separately and more falsifiably: the
+  **oscillation does not shrink** — at least two of three seeds will still show a
+  >= 0.30 jump between adjacent 50k checkpoints and a >= 0.35 range over the ten. Nothing in
+  the diagnosed mechanism (the `w_enc_spread` encoder collapse, the per-step index lottery
+  of 09-06 H1) is a function of `gamma`, so a *stabilised* ladder would contradict the 09-06
+  diagnosis and is recorded here as the outcome I consider least likely.
+* **Pointmaze: 0.000 everywhere, and the discount cannot change it.** COMPENDIUM §4.11 is a
+  settled negative with a mechanism upstream of anything `gamma` touches: a 13x13 grid tiles
+  the whole `d_a=2` latent box, and **0 of 233 enumerated latents reach the goal** in two
+  full 1000-step rollouts each; the expert's route is latent white noise (within-episode
+  preimage variance / marginal = **0.99**) because the goal is not in the observation, so
+  routes exist only as latent *sequences*. `discount` changes which member of the policy
+  family `psi` prefers; it does not add a member to a family that has none. Registered
+  prediction: **0.000 on all 30 cells** (15000 episodes), anything <= 0.004 counted as
+  consistent since BC itself is 0.002. The one channel that is not a flat no is stated in
+  the note: the deployed rule redraws 64 indices per step, so it executes a *sequence*, and
+  §4.11's probe used a fixed `u` — if per-step stitching were possible, a 50-step horizon in
+  a ~200-step maze is exactly where it would be invisible. **Any cell >= 0.05** would reopen
+  §4.11 for per-step-reselecting acting rules; cells in 0.004-0.05 are floor noise and will
+  be reported as noise, not as a partial rescue.
+
+---
+
+**Failure modes named in advance.** (1) The `gamma=0.995`-style late collapse — in-loop
+success pinned at *exactly* 0.00 on all three seeds from some epoch on; monitored per 50k in
+each run's `eval.csv`, and it does **not** abort the ladder, because the in-loop number is
+the thing this project has repeatedly caught over-reading (antmaze sd2 @300k: 0.40 in-loop,
+0.088 over 500). (2) `training/w_enc_spread` crossing 0.6 markedly earlier than the
+`gamma=0.98` runs' 190k / 215k / 305k. (3) TD divergence in `psm_loss` / `psi_q_spread` /
+`psi_q_range_rel`. (4) Reading the answer off the in-loop eval at all — listed as a failure
+mode because it is a process failure this project has committed before.
+
+---
+
+**Eval plan.** 500 episodes at **every** 50k checkpoint for **all** seeds — 30 cells per env,
+60 jobs — with `EVAL_WORKERS=1`. That is deliberate: `scripts/eval500.sh`'s parallel path
+seeds worker `w` as `seed*N + w` and therefore draws a *different* sample of 500 episode
+inits, so it agrees with an existing number only within the Wilson interval. Every
+`gamma=0.98` ladder this sweep is compared against was produced serially, and the comparison
+is uniform only at N=1. Reports
+`$PSM_DATA/logs/eval500_affine{N}k_strict_{cube|pointmaze}_g99_sd{S}.json`, disjoint from
+every existing basename. Table `docs/tables/affine_discount_ladder.md` and figure
+`docs/figures/2026-09-07-affine-discount-ladder.{png,json}` (generator
+`tools/fig_affine_discount_ladder.py`, which carries both discounts for both envs so the
+object plotted is always the pair); 22 append-only rows in `tools/make_tables.py`, the
+`_g99` infix keeping them from pooling with the `gamma=0.98` rows, whose basenames carry no
+discount token.
+
+Discipline log: hyperparameter table printed in the note's §6 before submission; 200-step
+smokes of the exact training path submitted per env (2491981 / 2491982, both COMPLETED
+0:0 in ~2 min) and made a hard `afterok` gate on all six trainings; both smoke
+`flags.json` diffed against their `gamma=0.98` references before the gate released, which
+caught real config drift since the antmaze `g99` runs 14 h earlier (`agent.actor_mode`,
+the `agent.actor.*` DSRL keys, `eval_workers`) and established it is inert for this arm --
+all of it is actor-only code gated on `train_actor=false`, or an eval-time knob whose
+default is the serial path (note §8.0); expected outcomes *and* expected failures registered before any number
+arrived; and all six runs' own `flags.json` re-read after launch (§8.1) — **identical
+across seeds within each env**, and differing from their `gamma=0.98` references in
+**`agent.discount` alone**. SLURM 2492017-2492022 started 07:49-08:10.
+
+---
+
+## Every cube number this project has ever reported is OGBench **task 2**.
+## Re-evaluated on all five: 0.284 avg vs BC 0.111 — the zero-shot claim survives, unevenly
+
+`cube-single-play-singletask-v0` carries no task token, and `cube_env.py:359` defaults
+`reward_task_id` to **2**; `utils/evaluation.py:86,93` resets with `env.reset()` and never
+passes `options={'task_id': ...}`, so the bare id has always been one task out of five.
+Stated plainly, for the record:
+
+- **every cube number in this file, in `docs/tables/results.md`, in the ladder tables and in
+  `PAPER/ICLR/tables/table_headline.tex` — headline, arms, ablations — is task 2 alone;**
+- **every antmaze and pointmaze number is task 1** (`locomaze/maze.py:348` defaults mazes to 1).
+
+Nothing had to be retrained to fix that. `agents/psmflow.py` reads `batch['rewards']` **only**
+in `infer_z`/`infer_z_a`/`infer_eval_z` (`:609-628`) — the eval-time closed-form task vector —
+so the frozen flow, phi, psi and the latent index are reward-free.
+`ogbench/utils.py:199-202` loads the **same** `cube-single-play-v0.npz` for every task id and
+only calls `relabel_dataset`, which reads `env.unwrapped._reward_task_id`. So changing
+`env_name` to `cube-single-play-singletask-task{K}-v0` gives each task its own dataset reward
+column, its own inferred `w`, and its own success criterion, against one unchanged
+checkpoint. `tools/eval_checkpoint.py` loads no preimage npz and never runs `main.py`'s
+pairing guard, so the env-name change trips nothing (verified: env ids
+`cube-single-singletask-task{1..5}-v0` are all registered, `_reward_task_id` reads 1/2/3/5 as
+expected, and the bare id reads 2).
+
+---
+
+## The five-task table (500 episodes per cell, 3 seeds x 5 checkpoints 300k-500k)
+
+64 SLURM jobs: 4 tasks x 5 checkpoints x 3 seeds on the finished `affine_strict_cube` runs,
+plus one BC control per task. No arm flags on any eval line — the agent config came from each
+run's own `flags.json` (`policy_index=latent acting=gpi train_actor=false psi_form=affine`,
+confirmed in every report JSON).
+
+| task | n (ckpt x seed) | late mean 300k-500k ± 95% CI | min … max | BC control (500 ep) | ratio |
+|---|---|---|---|---|---|
+| task 1 | 15 | 0.314 ± 0.123 | 0.000 … 0.832 | 0.152 [0.123, 0.186] | 2.1x |
+| **task 2** (the default — all earlier numbers) | 15 | **0.415 ± 0.083** | 0.086 … 0.704 | 0.072 [0.052, 0.098] | 5.8x |
+| task 3 | 15 | 0.480 ± 0.074 | 0.190 … 0.730 | 0.230 [0.195, 0.269] | 2.1x |
+| task 4 | 15 | 0.100 ± 0.034 | 0.038 … 0.294 | 0.086 [0.065, 0.114] | 1.2x |
+| task 5 | 15 | 0.113 ± 0.045 | 0.002 … 0.296 | 0.014 [0.007, 0.029] | 8.1x |
+| **5-task average** | 75 cells | **0.284** (± 0.152 across task means) | — | **0.111** | **2.6x** |
+
+Table: `docs/tables/affine_cube_multitask.md` (generated) and a section in
+`docs/tables/results.md`. Figure + series:
+`docs/figures/2026-09-06-affine-cube-multitask.{png,json}`
+(generator `tools/fig_affine_multitask.py`).
+
+---
+
+## Per-checkpoint mean across the three seeds
+
+| epoch | task 1 | task 2 | task 3 | task 4 | task 5 |
+|---|---|---|---|---|---|
+| 300k | 0.507 | 0.393 | 0.339 | 0.087 | 0.213 |
+| 350k | 0.258 | 0.516 | 0.410 | 0.165 | 0.121 |
+| 400k | 0.375 | 0.391 | 0.505 | 0.091 | 0.091 |
+| 450k | 0.233 | 0.468 | 0.532 | 0.097 | 0.054 |
+| 500k | 0.195 | 0.309 | 0.616 | 0.061 | 0.087 |
+| BC | 0.152 | 0.072 | 0.230 | 0.086 | 0.014 |
+
+Per-seed late means (5 checkpoints each), showing the 09-05/09-06 oscillation is **not**
+task-2-specific and is not a fixed per-seed ranking either:
+
+| task | sd0 | sd1 | sd2 |
+|---|---|---|---|
+| 1 | 0.416 | **0.074** | 0.451 |
+| 2 | 0.326 | 0.498 | 0.422 |
+| 3 | 0.464 | 0.530 | 0.446 |
+| 4 | 0.103 | 0.130 | 0.068 |
+| 5 | 0.126 | 0.048 | 0.164 |
+
+---
+
+## What this settles, and what it does not
+
+**The zero-shot claim survives, and it is no longer a one-task claim.** One representation per
+seed, five reward functions inferred in closed form, all beating or matching their own BC
+control: **0.284 vs 0.111 averaged over the five, 2.6x.** Every task is at or above BC; three
+of five (2, 3, 5) are clearly above it, task 1 marginally so (CI lower bound 0.191 vs the BC
+Wilson upper bound 0.186).
+
+**Task 2 was a lucky draw for the headline, and the paper must stop quoting it alone.** Its
+5.8x is the second-best *ratio* but rests on the weakest BC control of the five (0.072). Read
+by absolute success the arm is best on task 3 (0.480) and task 2 (0.415), and lands near
+0.10 on tasks 4 and 5.
+
+**Task 4 is the honest null.** 0.100 ± 0.034 against BC 0.086 [0.065, 0.114] — indistinguishable.
+The method neither helps nor hurts there. This is the first cube task on which the arm has no
+effect, and it is worth understanding before the next environment: whatever makes task 4 hard
+is *not* the inversion (the same latents serve all five tasks) and *not* the representation
+(same phi/psi), so it is the reward-inference step or the task's own difficulty.
+
+**Task 5 is where the method earns its claim most cleanly.** 0.113 vs a BC floor of 0.014 —
+8.1x — a task the behaviour flow essentially cannot do at all, done eight times as often by
+selecting inside the same flow's latent space. Small absolute number, but the cleanest
+separation from the control in the whole project.
+
+**The oscillation is a property of the arm, not of the task.** The per-seed table shows the
+same non-convergence found on 09-05/09-06: seed 1 is best on task 2 (0.498) and worst on task
+1 (0.074); no seed dominates. Task 3 is the exception — monotone 0.339 → 0.616 across the five
+checkpoints on all three seeds, the only clean learning curve any cube task has produced.
+
+**Consequence for the roadmap.** `docs/plans/2026-09-06-env-roadmap.md` §6.0 costed this at
+~0 GPU-hours of training and predicted it would multiply the evidence base by five. It did:
+75 cells instead of 15, on artifacts that already existed. Every future eval — including the
+next environment — should report all five tasks, and `scripts/eval500.sh` now takes an
+`ENV_NAME` override for exactly that.
+
+---
+
+## Tooling changed with this result
+
+- `scripts/eval500.sh` / `scripts/slurm/eval500.sbatch`: `ENV_NAME` overrides the ENVKEY's
+  default env id (this is the whole multi-task mechanism); the sbatch also lets a preset
+  `EVAL_LOGS` through, so BC controls land in `$PSM_DATA/evals` beside `bc_cube.json`.
+- `tools/eval_checkpoint.py`: the report now records **`train_seed`**, read from the restored
+  run's own `flags.json`. `seed` was and remains the *eval* seed (0 on every eval500 line ever
+  run), so until now a JSON carried no machine-readable trace of which training seed produced
+  it — only `restore_path` and the filename. Covered by four new cases in
+  `tests/test_eval_checkpoint_flags.py` (18 pass).
+- `tools/fig_affine_multitask.py` (new) and a `multitask_section` in `tools/make_tables.py`;
+  `docs/tables/results.md`'s header now states the task-2 scope of every other row.
+
+Discipline log: full hyperparameter table printed before submission; a 5-episode task-1 smoke
+(SLURM 2491837) confirmed the env id, the inherited arm config and the report's `env` field
+before the 64 jobs went in; all 60 + 4 JSONs re-validated after the fact for env id, epoch,
+episode count, `train_seed` and arm flags (0 mismatches); every number here from a persisted
+JSON. Nine jobs report SLURM state FAILED with exit 126 *after* writing a complete report and
+printing the final success line — a teardown artifact, not a lost eval; all 60 cells are
+present and were validated.
+
+---
+
+## Pointmaze — **the third published env now has a complete `gamma=0.98` ladder:
+## 0.000 in all 30 cells, 15,000 episodes, zero successes** (and it is horizon-confounded)
+
+Table: `docs/tables/affine_pointmaze_ladder.md` (generated). Rows registered in
+`tools/make_tables.py`; `docs/tables/results.md` regenerated.
+
+The third environment with published Stage-A/B artifacts was brought up end to end and run
+at the repo default (`agent=psmflow`, no flags = paper-strict affine). Three seeds to 500k
+(SLURM 2491814/15/16, **4h00 / 3h55 / 4h00**), `save_interval=50000`, then the full
+500-episode ladder at every 50k checkpoint on every seed — **30 of 30 cells, no gaps**.
+
+| epoch | sd0 | sd1 | sd2 | mean ± std |
+|---|---|---|---|---|
+| 50k … 500k, all ten rungs | 0.000 [0.000, 0.008] | 0.000 [0.000, 0.008] | 0.000 [0.000, 0.008] | 0.000 ± 0.000 |
+
+| pooled | n | mean | 95% CI |
+|---|---|---|---|
+| 300k–500k | 15 | **0.000** | ± 0.000 |
+| all rungs 50k–500k | 30 | **0.000** | ± 0.000 |
+| **BC control** (frozen flow, per-step prior) | 500 ep | **0.002** (1/500) | Wilson [0.0004, 0.0112] |
+
+The in-loop 50-episode evals agree: `evaluation/success` is `0.0` at **every** logged point
+on all three seeds, step 1 through 500k. No figure was produced — 30 identical zeros against
+33 identical in-loop zeros plot as a flat line on the axis and would dress a structural null
+as a measurement.
+
+Note the control: pointmaze BC is **0.002**, not antmaze's 0.072. This env offers almost no
+bar to clear, and "the agent is below BC" would be over-reading a one-episode difference.
+Both the method and its control are at zero here.
+
+---
+
+## The pointmaze null is CONFOUNDED by the same discount that manufactured antmaze's
+
+This ladder ran at `discount=0.98` — a ~50-step effective horizon — on a maze with a
+**1000-step** episode limit. The H2 section above then showed that this exact setting, not
+the environment, is what pinned antmaze at the BC floor (`gamma=0.995` → **0.519 ± 0.175**).
+So the correct statement is **"the affine arm scores 0.000 on pointmaze at `gamma=0.98`"**,
+not "pointmaze is closed to this method".
+
+COMPENDIUM §4.11 remains the standing prior — 0 of 233 enumerated latents reach the goal;
+within-episode preimage variance / marginal = 0.99, so routes exist only as latent
+*sequences* — and it was pre-registered here as the expected outcome before results arrived.
+But it does not settle this table, for two reasons. The reachability probe rolled **fixed-`u`**
+policies while this arm acts by `gpi`, re-drawing `u` from 64 candidates every step (a
+strictly larger family); and whether the critic can *steer* that per-step choice toward a
+goal hundreds of steps away is exactly what the discount controls. The coherence mechanism
+and the horizon mechanism are not alternatives, and a `gamma=0.98` run cannot separate them.
+
+**This ladder is therefore the baseline for H3's `affine_strict_pointmaze_g99` arm**
+(SLURM 2492020-2492022, pre-registered in `docs/design/2026-09-07-discount-sweep.md` with the
+prediction that pointmaze stays at 0.000). Read the two together. A `gamma=0.995` pointmaze
+arm was *not* launched: H2 showed 0.995 destabilises (all three antmaze seeds at exactly 0.00
+in-loop from 300k), so 0.99 is the value worth spending GPUs on, and H3 already has it.
+
+---
+
+## Infra — the OGBench dataset host is dead; a HF mirror is the working route
+
+`pointmaze-medium-navigate-v0.npz` was missing locally and **could not be downloaded from
+upstream**. `https://rail.eecs.berkeley.edu/datasets/ogbench/<name>.npz` now 302s to
+`https://iris.eecs.berkeley.edu/datasets/ogbench/<name>.npz`, which returns a **404**
+WordPress page. This hits *every* OGBench dataset, including `cube-single-play-v0.npz` which
+we already hold — it is an upstream move, not a proxy problem (the no-proxy route fails TLS at
+the same host, and ogbench 1.2.1 on PyPI plus GitHub master still hardcode the dead URL, so no
+version bump or compute-node retry helps).
+
+**What worked:** the HF mirror `ryanhoangt/ogbench_data`, which carries the standard
+`<env>-v0.npz` / `-val.npz` at repo root.
+
+```bash
+.venv/bin/python - <<'EOF'
+import os, shutil
+from huggingface_hub import hf_hub_download
+dst = os.path.expanduser('~/.ogbench/data')
+for f in ['<env>-v0.npz', '<env>-v0-val.npz']:
+    shutil.copyfile(hf_hub_download('ryanhoangt/ogbench_data', f, repo_type='dataset'),
+                    os.path.join(dst, f))
+EOF
+```
+
+Verified against the preimage npz (`obs[0]`, `act[0]` match to the pipeline's action clip),
+and `main.py`'s row-count + first/last-1000-row guard would refuse a wrong copy anyway. The
+mirror also holds `scene-play`, `cube-double/triple/quadruple-play` and `puzzle-3x3/4x4-play`,
+so the outage blocks no environment on the roadmap. Also worth knowing:
+**`OGBENCH_DATASET_DIR` is a no-op** with ogbench 1.1.0 — `ogbench/utils.py:10` hardcodes
+`~/.ogbench/data` and `envs/env_utils.py:139-140` never passes `dataset_dir`; it works here
+only because `$HOME/.ogbench/data` is the same path.
+
+Preimages came from `scripts/hf_preimages.py pull --name pointmaze-medium-navigate --dest
+$PSM_DATA --with-flow` (52 MB, 1M rows, sidecar `restore_path` repaired automatically).
+
+---
+
+## Provenance / caveats (pointmaze)
+
+* `flags.json` re-read after launch on all three seeds: byte-identical to
+  `affine_strict_cube/sd000` except `env_name`, `run_group`, the flow/preimage paths and the
+  three eval-only `gpi_select` keys added 09-05.
+* Ten ladder cells (100k sd2, 150k/200k/250k all seeds; SLURM 2491907-2491921) died at
+  startup in 20-41 s with `KeyError: 'entropy'` — an `assert a_cfg["entropy"]` against a key
+  these runs' `flags.json` predates, since `eval_checkpoint.py` inherits the run's own config.
+  Fixed in `agents/psmflow.py` by another agent (`_actor_opt` fallback + `fill_actor_defaults`
+  as the first statement of `create`); `tests/test_psmflow_config_compat.py` passes 9/9. All
+  ten were resubmitted (2491965-2491974) and completed. **They wrote no JSON, so no partial
+  result entered the table** — the ladder was regenerated only once all 30 files existed.
+* Every cell is `tools/eval_checkpoint.py`, 500 episodes, agent config from the run's own
+  `flags.json`, no arm flags on the CLI. The generator asserts `restore_epoch` and
+  `num_episodes` per file, so a mislabelled JSON cannot silently populate a cell.
+* Eval throughput on this arm: ~11 s/episode serial (measured in the 200-step smoke), i.e.
+  ~1.5 h per 500-episode cell; later cells used the new `EVAL_WORKERS=4` default.
+
+---
+
+<!-- _class: lead -->
+
+## 2026-09-05 — the affine strict arm **oscillates**: cube swings 0.086 ↔ 0.704
+## between adjacent 50k checkpoints, and no logged diagnostic predicts which
+
+The 09-04 entry quoted this arm at 250k (0.532 / 0.620) because that was the latest
+checkpoint the runs had reached. All eight runs have now finished 500k and the full
+checkpoint ladder has been evaluated at 500 episodes. **The 250k number was not the arm
+converging — it was one draw from a wide, non-monotone distribution over checkpoints.**
+The headline claim of 09-04 does not survive as stated; the arm is still the best thing on
+cube, but only as a *mean over late checkpoints*, and it is dead on antmaze.
+
+Figures + machine-readable series: `docs/figures/2026-09-05-affine-cube-collapse.{png,json}`,
+`docs/figures/2026-09-05-affine-antmaze-sweep.{png,json}`.
+
+---
+
+## Repo reorg: done
+
+The 09-04 reorganisation is complete and is the state of the tree: `agent=psmflow` defaults
+to the paper-strict affine arm (`psi_form=affine policy_index=latent train_actor=false
+acting=gpi`), and every agent other than `psmflow` and `fql` now lives under `archive/`.
+See the **2026-09-04 (evening)** entry below for what was built, the test evidence and the
+design note (`docs/design/2026-09-04-affine-psi.md`). The only `agents/` change here
+is the eval-time `gpi_select` ablation switch (`_gpi_select_ablation`), added for
+the ablation batch below and left as a documented switch, not a new default.
+
+---
+
+## Every 500k number, 500 episodes, both envs, both arms
+
+| arm | env | sd0 | sd1 | mean ± 95% CI (t, n=2) |
+|---|---|---|---|---|
+| affine **strict** (`train_actor=false acting=gpi`) | cube | 0.086 | 0.548 | 0.317 ± 2.935 |
+| affine **actor** (`train_actor=true acting=actor`) | cube | 0.162 | 0.130 | 0.146 ± 0.203 |
+| affine **strict** | antmaze | 0.002 | 0.096 | 0.049 ± 0.597 |
+| affine **actor** | antmaze | 0.224 | 0.206 | 0.215 ± 0.114 |
+
+Comparators (all 500k): BC control **cube 0.072**, **antmaze 0.072**; free-psi Arm B cube
+0.083 ± 0.191 (3 seeds); the old latent-actor agent cube 0.230 ± 0.051, antmaze
+0.213 ± 0.140; FB cube 0.721.
+
+**At 500k, on the terminal checkpoint alone, the strict arm beats nothing.** Cube strict
+0.317 is inside the old actor agent's interval and its two seeds (0.086, 0.548) do not
+overlap each other; antmaze strict 0.049 is *below* the BC control; the affine actor arm
+matches the old actor agent on antmaze (0.215 vs 0.213) and is worse on cube (0.146 vs
+0.230). Every n=2 t-interval here is worthless and is printed only for form.
+
+---
+
+## Cube, affine strict: the full checkpoint sweep (500 episodes each)
+
+| epoch | sd0 | sd1 |
+|---|---|---|
+| 100k | 0.078 [0.058, 0.105] | 0.330 [0.290, 0.372] |
+| 250k | **0.532** [0.488, 0.575] | **0.620** [0.577, 0.661] |
+| 300k | 0.286 [0.248, 0.327] | — |
+| 350k | **0.704** [0.663, 0.742] | — |
+| 400k | 0.282 [0.244, 0.323] | 0.346 [0.306, 0.389] |
+| 450k | 0.272 [0.235, 0.313] | 0.568 [0.524, 0.611] |
+| 500k | 0.086 [0.065, 0.114] | 0.548 [0.504, 0.591] |
+
+Ten late (≥250k) checkpoint×seed measurements, 500 episodes each:
+**mean 0.424, sd 0.196, 95% CI ± 0.141, min 0.086, max 0.704.**
+
+sd0 alone goes 0.532 → 0.286 → **0.704** → 0.282 → 0.272 → 0.086 on consecutive 50k
+checkpoints of one run. Each of those is a 500-episode measurement whose Wilson interval is
+±0.04 wide, so **the swing is real training-time non-stationarity, not evaluation noise** —
+adjacent intervals are disjoint by a wide margin. sd1 swings less (0.620 … 0.346 … 0.568 …
+0.548) but is not monotone either.
+
+---
+
+## Antmaze, affine strict: the same non-stationarity, but around the BC control
+
+Four new 500-episode evals (the two highest un-evaluated in-loop checkpoints
+per seed; 50k and 500k were already done). SLURM 2491639-42, ~93 min each at ~11 s/episode.
+
+| epoch | sd0 | sd1 |
+|---|---|---|
+| 50k | 0.112 [0.087, 0.143] | 0.000 [0.000, 0.008] |
+| 250k | — | **0.178** [0.147, 0.214] |
+| 350k | 0.082 [0.061, 0.109] | — |
+| 400k | 0.056 [0.039, 0.080] | 0.134 [0.107, 0.167] |
+| 500k | **0.002** [0.000, 0.011] | 0.096 [0.073, 0.125] |
+
+Late-checkpoint mean (≥250k, 6 measurements): **0.091 ± 0.064**, against BC 0.072, the
+affine *actor* arm's 0.215 and the old actor agent's 0.213.
+
+**Not flat-low, and not the cube pattern either.** The two seeds move in *opposite*
+directions: sd0 decays monotonically to zero (0.112 → 0.082 → 0.056 → 0.002) while sd1
+rises off the floor and then decays (0.000 → 0.178 → 0.134 → 0.096). Every antmaze
+checkpoint sits within ±0.11 of the BC control, so on this env the arm is **not a result at
+all** — its late mean's interval contains BC. The in-loop 50-episode eval is useless here
+(0.00 at 8 of 11 points on sd0 while 500 episodes read 0.002-0.112).
+
+**The encoder does not collapse on antmaze.** `w_enc_spread` *rises* monotonically to ≈1.24
+and stays there for 400k steps — the opposite of cube's 1.30 → 0.25 decay — and the arm is
+still bad. Together with cube — where the spread collapses monotonically while
+success swings up and down four times — that settles it: `w_enc_spread` moves monotonically
+in whichever direction the env dictates and success does not follow it in either env.
+
+`docs/figures/2026-09-05-affine-antmaze-sweep.{png,json}`.
+
+---
+
+## What the oscillation is not: no logged scalar predicts it
+
+Every quantity this arm logs was paired with the 12 cube 500-episode measurements
+(checkpoint × seed) and correlated against success. **Nothing predicts it.**
+
+| logged series | Pearson vs 500ep success | Spearman |
+|---|---|---|
+| `w_enc_spread` (encoder pairwise distance) | −0.386 | −0.231 |
+| `psi_q_index_spread_rel` | +0.017 | +0.266 |
+| `psi_q_spread_rel` | +0.032 | +0.203 |
+| `psi_q_range_rel` | −0.003 | +0.210 |
+| `psi_q_spread` (absolute) | −0.072 | +0.084 |
+| `psm_loss` (measure TD) | +0.106 | +0.322 |
+| `orth_loss` | −0.398 | −0.385 |
+| *in-loop 50-episode eval at the same step* | **+0.916** | **+0.916** |
+
+Read that last row carefully. The in-loop 50-episode eval — the thing this project's
+reporting rules forbid quoting — **tracks the 500-episode number at r = 0.92 on this arm**
+(12 paired points, Pearson = Spearman = 0.916). That is not a licence to quote it; it is
+evidence about *where* the variance lives. The 500-episode CI is ±0.04 and the
+checkpoint-to-checkpoint swing is ±0.3, so the noise is in the **policy at that
+checkpoint**, not in the measurement, and 50 episodes already see most of it.
+
+Ruled out by the table: encoder collapse (`w_enc_spread` decays smoothly and monotonically
+on cube and *rises* monotonically on antmaze, while success does neither); the
+orthonormality constraint (`orth_loss` pinned at ≈−64 from 10k on, flat to three digits in
+every run); a diverging measure TD (`psm_loss` grows ~10x and spikes constantly, unaligned
+with the dips); and any index/readout scale artefact (all four `psi_q_*` statistics,
+|Spearman| ≤ 0.27). **A monotone training trace with a non-monotone eval trace means the
+failure is in the acting rule or in what psi has learned, not in a scalar the loss sees.**
+
+---
+
+## Two probes settled it
+
+### Selection diagnostic — `tools/diag_gpi_selection.py`, `docs/design/2026-09-05-gpi-selection-diag.md`
+
+State-matched probe: the same 256 dataset states and the same 64×64 candidate roster scored
+by four checkpoints of `affine_strict_cube/sd000` (250k / 350k / 400k / 500k).
+
+- **The two pre-registered failure modes are not it.** Selected-`u` norm 2.83-2.95 (roster
+  2.13), top1−top2 gap 0.31-0.43 sd, selected-`u` clip fraction ~1.2% vs the roster's 0.28%
+  — **identical at the good and bad checkpoints**. Edge-seeking and flatness are permanent
+  properties of the rule, present at 0.704 too.
+- **The ranking is re-randomised.** The per-`u` GPI score the argmax consumes correlates
+  only **rho 0.21-0.36 between any pair of checkpoints**, including 250k vs 350k (0.31), the
+  two that both work. Top-5 overlap 0.20-0.28; argmax agreement 11-19%.
+- **Target-critic selection is not a stabiliser.** Online vs target rank the same roster at
+  **rho 0.92-0.96** within a checkpoint (`tau=0.01` has long converged), and the target
+  drifts across checkpoints identically (0.23-0.40). Dropping pessimism changes the ranking
+  even less (0.93-0.95).
+- **The index/action asymmetry.** psi's spread over `u'` is **~30x** its spread over `u`
+  (`index_matters` ~5-13k against a per-`u` spread of a few hundred): the inner argmax over
+  `u`, the one that picks the action, runs on the weakest part of the signal.
+- **MC ground truth** (fixed-`u` rollouts near rewarding transitions): Q-rank vs return-rank
+  Spearman +0.10 / +0.15 / +0.13 / +0.10, while the checkpoint-free baseline `−||u||` scores
+  **+0.28**. MC regret of the Q-argmax 16.8 / 22.8 / 23.0 / 32.4 against 19.1 for a random
+  pick — three of four checkpoints select *worse than chance* on this proxy. Averaging the
+  four rankings lifts Spearman 0.121 → 0.166 and regret 23.75 → 19.2: checkpoint averaging
+  removes the harm, it does not make the selector good.
+
+---
+
+### Eval-time GPI ablations — `docs/design/2026-09-05-gpi-ablations.md`
+
+Eleven 500-episode evals, one run (`affine_strict_cube/sd000`), acting rule swapped at eval
+time with nothing retrained. `eval500_gpiabl_*.json`, now registered in `make_tables.py`.
+
+| arm | rule | @350k | @500k |
+|---|---|---|---|
+| G | `argmax` (shipped) | **0.704** (exact reproduction, 352/500) | 0.086 |
+| E | `mean` — ensemble mean, no pessimism | 0.734 (p=0.29, tie) | — |
+| C | `small_ball` | 0.670 (p=0.25) | **0.046** (p=0.011, *worse*) |
+| D | `soft_topm` m=8 | 0.612 (p=0.002, *worse*) | 0.062 (p=0.15) |
+| A1 | `max_norm`, critic-free | 0.078 | — |
+| A2 | `top_quartile_random`, critic-free | 0.078 | — |
+| B | one prior draw, K=1 | 0.090 | — |
+| F1 | `fixed_index` seed 0 | **0.000** | — |
+| F2 | `fixed_index` seed 1 | 0.180 | — |
+
+Three results, in order of importance:
+
+1. **The critic carries the whole gap, and the norm bias carries none of it.** Both
+   critic-free controls that reproduce the deployed rule's *selection statistics* land at
+   **0.078**, indistinguishable from BC (p=0.72) — `top_quartile_random` even overshoots the
+   deployed |u|=2.8 at 3.01. One prior draw gives 0.090. So the large-norm story is a true
+   description of the argmax and **dead as a performance explanation**.
+2. **The per-step max over fresh policy indices is the mechanism.** Pinning `u'` to one
+   prior draw for a whole eval — same critic, same 64 `u` draws, same argmax over `u` —
+   gives **0.000** and **0.180** depending only on which `u'` was drawn. Seed 0 is
+   *significantly below BC* (0/500, p=1e-9): with the index pinned, ranking `u` by
+   `psi(s,u,u')ᵀw` selects actively harmful actions. The `K×K` pair scan is load-bearing.
+3. **No eval-time intervention recovers 500k.** Five rules leave it at or below BC. The
+   0.704 → 0.086 collapse is in the learned `psi`, not in the rule that reads it — so the
+   fix is training-side or aggregation-side, not acting-side.
+
+---
+
+## Reporting rule (binding, effective now)
+
+> **No single checkpoint of the affine strict arm may be quoted.** Not the best, not the
+> last, not 250k, not 350k. Any number reported for this arm is the **mean over late
+> checkpoints (≥250k) and seeds**, with the spread stated.
+
+| env | late-ckpt mean (≥250k) | n (ckpt×seed) | range | BC control |
+|---|---|---|---|---|
+| cube | **0.424 ± 0.141** | 10 | 0.086 - 0.704 | 0.072 |
+| antmaze | **0.091 ± 0.064** | 6 | 0.002 - 0.178 | 0.072 |
+
+On cube the arm is still a real result — the only PSMFlow configuration above 0.4, against
+Arm B's 0.083, the old actor agent's 0.230 and FB's 0.721. On antmaze its interval contains
+BC and it is not a result at all. The 09-04 headline "0.532 / 0.620 @250k" is **superseded**
+and must not be re-quoted on its own; likewise 0.704 and 0.086 are the same agent, the same
+rule and the same norm bias.
+
+`tools/make_tables.py` now enforces the shape: one row per (arm, env, **checkpoint**), plus
+one explicitly labelled `late-ckpt mean` row per env, plus the GPI ablation block. The four
+rows that previously globbed `eval500_affine_strict_*_sd?.json` under a "500k" label were in
+fact reading the **100k** JSONs; that is fixed. Both BC controls now resolve (they live in
+`$PSM_DATA/evals/` on this cluster, not `logs/`), and `_load` de-duplicates an eval reached
+through two names so a 1-seed control cannot print as 2.
+
+---
+
+## Open items
+
+**1. `index_agg=expectile` — the best-motivated next experiment.** Both probes point at the
+same object: the deployed 0.704 is an **optimistic per-step max over 64 samples of a learned
+function** on the axis where psi has ~30x more spread, which is exactly the structure E4a
+indicted. `index_agg=expectile` (already in the tree, `configs/agent/psmflow.yaml:86-88`)
+distils an upper expectile of `psi(s,u',u)ᵀw` over `u' ~ p0` into a z-free scalar head and
+takes no argmax over samples at acting time. Run it **on the affine agent**
+(`psi_form=affine policy_index=latent train_actor=false acting=gpi index_agg=expectile`),
+The ablations note's §7.4 names the cheap companions: a **larger `index_panel`** (shipped
+16; the yaml records `index_panel: 1` as the InFOM-like setting) and a **`gpi_num_u` sweep
+on the index axis alone**. Neither note proposes specific sweep values — pick them, print
+the table before launch. Judge the result on the **late-checkpoint mean and its spread**,
+never a peak.
+
+**2. Aggregation, not sharpening.** Checkpoint averaging is the only intervention measured
+to help (MC Spearman 0.121 → 0.166, regret 23.75 → 19.2). A param EMA of psi is the way to
+turn "report the mean over checkpoints" into an *agent*. Within-checkpoint softening
+(`soft_topm`) is a measured loss and is not the same medicine.
+
+**3. Closed — do not re-run.** Target-critic selection (rho 0.92-0.96 with the deployed
+rule, a no-op), ensemble mean instead of min (0.734 vs 0.704, p=0.29, a tie),
+`small_ball` (holds 350k, hurts 500k) and `max_norm`/`top_quartile` (BC-level). `lr_sf`
+lowering is *not* yet tested and remains open, but note the drift is in the ranking, not in
+the loss scale.
+
+**4. DSRL-NA actor.** The actor arms are stable and capped (cube 0.108 / 0.113 / 0.146 at
+100k / 250k / 500k — a total span of 0.04 against the strict arm's 0.62); the strict arm is
+unstable and high. A noise-aliased/DSRL-NA-style latent actor is the standing proposal for
+getting the strict arm's ceiling with the actor arm's smoothness. Not started.
+
+**5. Antmaze needs a reason, not another seed.** The arm sits at BC on antmaze at every
+checkpoint while `w_enc_spread` behaves in the opposite direction to cube. Nothing here
+explains that; the affine *actor* arm reaches 0.215 there, so the substrate is fine
+and the strict/GPI path is what fails.
+
+---
+
+<!-- _class: lead -->
+
+## 2026-09-04 (evening) — the affine measure head psi = A(s,u)ᵀ w(u′) + beta(s,u):
+## cube strict 0.532 / 0.620 at 250k, against Arm B's 0.083 at 500k
+
+Design + pre-registration: `docs/design/2026-09-04-affine-psi.md`, written **before** launch,
+expectations included. Rem. `tradeoff` records that the shipped agent adopts Prop.
+`bilinear`'s form but **not** the affineness of psi in the policy coordinate — `w^{u′}` is
+absorbed into a free network. The affine form is implemented explicitly below. The paper
+asserts `w^{u′}` exists (Assumption `affine`) and gives **no formula** for it, so the encoder
+`u′ -> w(u′)` is **our design choice**, stated as such in the design note.
+
+### What was built
+
+| what | where |
+|---|---|
+| `AffinePsiMap` — `psi(s,u,u′) = A(s,u)ᵀ w(u′) + beta(s,u)`, drop-in for `PsiMap` | `utils/psm_networks.py:439-500` |
+| `_AffinePsiTower` — `(s,u)` trunk, two heads (`A`: `h -> z_dim·d_w`, `beta`: `h -> z_dim`), **no `u′` input at all** | `utils/psm_networks.py:403-436` |
+| `encode_index` / `sa_terms` — the halves exposed so affineness and collapse are measurable | `utils/psm_networks.py:481-495` |
+| `psi_form: free \| affine` + `affine:{w_dim,encoder_hidden,encoder_layers,norm_w}` | `configs/agent/psmflow.yaml:52-65`, `agents/psmflow.py:899-906` |
+| head selection + the `policy_index=latent` guard | `agents/psmflow.py:699-726` |
+| `index_spread` — `psi_q_spread_rel`, `psi_q_range_rel`, `psi_q_index_spread_rel`, `w_enc_spread` | `agents/psmflow.py:298-349`, called at `:512-516` |
+| `RESTORE_EPOCH` (default 500000) so arms can be evaluated at a common earlier checkpoint | `scripts/eval500.sh:29,83,90` |
+| eval-JSON registration, 4 rows (not run) | `tools/make_tables.py:92-105` |
+
+**Design choices.** ONE encoder shared across the `num_parallel` ensemble — `w^{u′}` is a
+property of the policy, not of a critic member, so the ensemble disagrees only through
+`(A, beta)`, which is what `pessimism_penalty` measures. `w(u′)` on the **unit sphere** (not
+`psm_norm`'s `sqrt(d)`): `(A,w)` is identified only up to `(cA, w/c)`; unit norm pins it,
+keeps psi's scale independent of `d_w`, and makes collapse read as small *pairwise distance*
+at fixed radius. `A` and `beta` never see `u′` — Assumption `affine` enforced by
+construction, not by a penalty. `d_w = 128 = z_dim`.
+
+---
+
+### Tests — full suite clean
+
+`tests/test_psmflow_affine.py`, **11 tests**: default path **byte-identical** to
+`psi_form=free` (post-update params compared leaf by leaf, plus identical
+`psm_loss`/`orth_loss`/`actor_loss`, and the shipped info dict gains no key); psi **exactly
+affine** in `w(u′)` — `psi(u′₁) − psi(u′₂) == Aᵀ(w(u′₁) − w(u′₂))` and `psi == Aᵀw + beta`,
+both to 1e-4; `A`, `beta` index-free; `w(u′)` on the unit sphere and not constant; finite
+step in **both** arms; `psi_form=affine` + `policy_index=task_vector` refused; unknown
+`psi_form` refused; `sample_actions` in both acting modes; affine checkpoint structurally
+distinct from the free one.
+
+Whole suite, module-per-process: **248 passed, 3 skipped, 0 failed** (39 modules).
+`ruff` on the touched files adds one finding (`C408` on the new `affine=dict(...)`), the
+same kind as the 8 sibling config entries; it removes one (`I001` in `psm_networks.py`).
+
+**Restore path checked on GPU, not just in unit tests.** `tools/eval_checkpoint.py` was run
+against an affine checkpoint with **none** of `psi_form / policy_index / train_actor /
+acting` on the CLI: `agent_config_source.inherited` came back
+`['acting','policy_index','psi_form','train_actor']` from the run's own `flags.json`
+(`logs/affine_restorecheck.json`). The reported evals below pass those four explicitly, so
+their `agent_config_source` shows `flags_json` set and the four keys under `cli_overrides`.
+
+---
+
+### Runs — 8 jobs, both envs, seeds 0/1, launched at 500k
+
+`agent=psmflow`, `psi_form=affine`, `policy_index=latent`, `use_point_preimage=true`,
+`u_clip=3.0`, `offline_steps=500000`, `eval_interval=50000`, `eval_episodes=50` (in-loop,
+never quoted), `save_interval=50000`; `affine_strict_*` = `train_actor=false acting=gpi`,
+`affine_actor_*` = `train_actor=true acting=actor`. Full HP table printed pre-launch;
+200-step GPU smokes run for both arms; all 8 `flags.json` re-read after launch and confirmed.
+
+**The runs did NOT reach 500k inside the compute window.** The affine head's `A` output
+(`1024 -> 16384`) makes a step 24-36 ms under 8-way contention against the free head's ~7 ms,
+and the strict arm's antmaze GPI eval costs **10.1 s/episode** (84 min per 500-episode eval).
+Everything below is therefore quoted at the latest checkpoint each arm reached and could be
+evaluated at — **100k for all four arms, plus 250k for cube** — never at 500k. Every number
+is a fresh 500-episode `tools/eval_checkpoint.py` run; no in-loop 50-episode value is quoted
+anywhere in this entry. The 8 training jobs are still running toward 500k.
+
+---
+
+### 500-episode results (per-seed Wilson; comparators are 500k numbers)
+
+**Headline — the affine strict arm on cube, at 250k, is the best zero-shot PSMFlow number
+on record and both seeds agree.**
+
+| arm | epoch | sd0 | sd1 | mean ± 95% CI (t, n=2) | pooled (1000 ep) |
+|---|---|---|---|---|---|
+| **affine strict, cube** | **250k** | **0.532** [0.488, 0.575] | **0.620** [0.577, 0.661] | **0.576 ± 0.559** | 0.576 [0.545, 0.606] |
+| affine strict, cube | 100k | 0.078 [0.058, 0.105] | 0.330 [0.290, 0.372] | 0.204 ± 1.601 | 0.204 [0.180, 0.230] |
+| affine actor, cube | **250k** | 0.130 [0.103, 0.162] | 0.096 [0.073, 0.125] | 0.113 ± 0.216 | 0.113 [0.094, 0.135] |
+| affine actor, cube | 100k | 0.110 [0.085, 0.140] | 0.106 [0.082, 0.136] | 0.108 ± 0.025 | 0.108 [0.090, 0.129] |
+| affine actor, antmaze | 100k | 0.176 [0.145, 0.212] | 0.216 [0.182, 0.254] | 0.196 ± 0.254 | 0.196 [0.173, 0.222] |
+| affine actor, antmaze | 50k | 0.218 [0.184, 0.256] | 0.224 [0.190, 0.263] | 0.221 ± 0.038 | 0.221 [0.196, 0.248] |
+| affine strict, antmaze | 50k | 0.112 [0.087, 0.143] | 0.000 [0.000, 0.008] | 0.056 ± 0.712 | 0.056 [0.043, 0.072] |
+| affine strict, antmaze | 100k | *eval running (>75 min each)* | | | |
+
+Comparators, all at **500k** and all with more training than anything above:
+
+| comparator (cube) | | comparator (antmaze) | |
+|---|---|---|---|
+| Arm B — free psi, strict, `acting=gpi` | 0.083 ± 0.191 (3) | PSMFlow (point, actor) | 0.213 ± 0.140 |
+| gpi-matched control (point arm, gpi) | 0.054 ± 0.032 (5) | BC per-step prior | 0.072 |
+| PSMFlow actor (point) | 0.230 ± 0.051 (5) | | |
+| BC per-step prior | 0.072 | | |
+| FB (zero-shot, raw actions) | 0.721 ± 0.020 | | |
+
+**Read the strict-cube row against Arm B.** Arm B is the *same algorithm with a free psi*:
+`policy_index=latent`, `train_actor=false`, `acting=gpi`. Its three recorded seeds are
+0.006 / 0.160 / 0.084 and its matched gpi control is 0.054. The affine head at **half the
+training** returns 0.532 / 0.620 — every one of the four Wilson intervals involved is
+disjoint from every Arm B seed's, and the pooled 0.576 [0.545, 0.606] sits **7x** its
+comparator. It also beats the actor arm (0.230) and is the only PSMFlow configuration that
+has ever come within reach of FB's 0.721 on cube. The n=2 t-interval (±0.559) is worthless
+and is quoted only for form; the evidence here is the **agreement of two independent seeds
+at 500 episodes each**, which Arm B never had.
+
+**And it climbs.** The same two runs read 0.078 / 0.330 at 100k and 0.532 / 0.620 at 250k.
+The 09-03 entry's warning — the gpi arm "climbs late… do not judge this arm before ~400k" —
+holds here in the affine arm's favour: 250k is still early, and the runs continue to 500k.
+
+**The actor arms do not show the effect — and cube actor was measured at the SAME 250k
+checkpoint, so this is not a training-budget artifact.** cube actor 0.108 at 100k and 0.113
+at 250k (flat), antmaze actor 0.196 at 100k / 0.221 at 50k — all level with their free-psi
+comparators, while cube strict went 0.204 → 0.576 over the same interval. On this evidence the
+affine head helps the arm that *selects by ranking psi* (gpi) and does nothing for the arm
+that delegates selection to an amortized actor. That is exactly where a better-conditioned
+psi should show up, and it is the first time in this project's record that the strict,
+paper-faithful arm has beaten the actor arm.
+
+### Diagnostics — the mechanism the head was built to change
+
+At the **100k** checkpoint (`w_enc_spread`, `psi_q_index_spread_rel`, `psi_q_spread_rel`):
+
+| run | sd | `w_enc_spread` | `psi_q_index_spread_rel` | `psi_q_spread_rel` |
+|---|---|---|---|---|
+| affine strict cube | 0 / 1 | 1.200 / 1.307 | **0.627 / 0.559** | 0.033 / 0.043 |
+| affine actor cube | 0 / 1 | 1.232 / 1.304 | **0.612 / 0.586** | 0.035 / 0.039 |
+| affine strict antmaze | 0 / 1 | 1.152 / 1.169 | **0.599 / 0.287** | 0.061 / 0.020 |
+| affine actor antmaze | 0 / 1 | 1.153 / 1.170 | **0.574 / 0.292** | 0.056 / 0.019 |
+
+At **250k**, cube strict reads `w_enc_spread` 0.453 / 0.414, `psi_q_index_spread_rel`
+**0.818 / 0.877**, `psi_q_spread_rel` 0.045 / 0.034.
+
+`psi_q_index_spread_rel` is the relative spread of `Q` across prior policy indices `u′` —
+the quantity GPI's outer argmax consumes. It reads **29-88%** against the **~1%** that every
+free-psi measurement in this project has reported (D1 0.9%, D3 1.1%, Arm B 0.9%, E4b 0.86%,
+DSRL-SAC 1.1-1.5%), and it **rises** with training (0.56-0.63 at 100k → 0.82-0.88 at 250k)
+alongside the success climb. Spread across prior *action* latents (`psi_q_spread_rel`, the
+inner argmax's quantity) is 2-6% — above the 1% band, but by a factor of a few, not fifty.
+
+`w_enc_spread` starts at 0.72-1.11 (5k), peaks at 1.15-1.31 (100k) against the ~1.414 a
+random unit-sphere sample gives, and on **cube** falls to 0.41-0.45 by 250k while
+`psi_q_index_spread_rel` keeps rising — the encoder is *concentrating* its directions and
+`A` is growing to compensate, not collapsing (a collapsed encoder reads ~0 and would take
+the index spread with it). Antmaze holds ~1.19 at 160k. **Watch this number**: if it reaches
+~0 while the index spread falls with it, the affine structure has degenerated back to a
+`u′`-free psi, and that is the diagnostic that would say so.
+
+---
+
+### Verdict against the pre-registration
+
+Pre-registered (design note §6): **success** = `psi_q_index_spread_rel` >> 1% **and**
+strict > Arm B (0.083); **failure** = the same ~1% band and BC-level strict.
+
+- **Success fires on both halves, for cube strict.** Index spread 29-88% against ~1%, and
+  0.532 / 0.620 against Arm B's 0.083 ± 0.191 — at half the training, with two agreeing
+  seeds. The stated failure branch ("the affine form is not the missing piece either") is
+  **refuted**.
+- The hypothesis was that the affine bottleneck acts as a *regularizer on the policy slot*.
+  The diagnostic says the mechanism is real and specific: psi stops being flat across `u′`,
+  which is precisely the faculty Arm B lacked and E1/E4a indicted (ranking).
+- **Scope, honestly.** Two seeds, at 250k not 500k, on **one environment and one arm**. The
+  actor arms show nothing (cube 0.108 → 0.113, antmaze 0.196, level with their comparators).
+  And **antmaze strict at 50k is 0.112 / 0.000, i.e. below its BC control** — at a fifth of
+  cube-strict's 250k budget, on the env whose latent geometry the 09-03 S1 probe already
+  found less navigable (ratio 0.79 vs 0.91). Its 100k evals were still running when the
+  compute window closed. Nothing here says the affine head fixes antmaze, and nothing says the
+  cube result survives to 500k.
+- Also unchanged: this is still below FB's 0.721 and far below FQL's 0.949.
+
+**Next, in order.**
+1. Let the 8 jobs reach 500k and run `scripts/eval500.sh` at `RESTORE_EPOCH=500000` for all
+   8. The four `eval500_affine_{strict,actor}_<env>_sd<k>.json` names are already registered
+   in `tools/make_tables.py` (not yet run).
+2. Collect the pending antmaze-strict evals (50k and 100k, submitted, 84 min each).
+3. A **third seed** on cube strict — 0.576 pooled over two seeds is strong, but this project
+   has been burned by two-seed cube numbers before (09-03, seeds spanning 0.090-0.374).
+4. The obvious ablation now: `psi_form=affine` with `acting=actor` is already run and flat,
+   so the next cut is `d_w` (128 → 32/512) to test whether the *bottleneck width* is the
+   active ingredient, and `norm_w=false` to test whether the sphere constraint is.
+
+**Housekeeping.** The working tree carried a **pre-existing, uncommitted deletion** of 20
+comment lines in `agents/psmflow.py` (the `q_dist` / action-branch / FB-graft field
+docstrings added in `6e166d7`) before this work touched the file. It is not part of it and shows up in `git diff` as a deletion — restore it before committing. **DONE** in
+the reorg below: restored verbatim, since all three switches they document still exist.
+
+---
+
+<!-- _class: lead -->
+
+### 2026-09-04 (late) — the affine agent is now THE agent; everything else moved to `archive/`
+
+Consequence of the number above, not a new experiment. **No results in this section.**
+
+**The default flipped.** `agent=psmflow` with no flags is now the paper-strict affine
+LatentFlowPSM. The four arm flags and one dataset flag that the 0.532 / 0.620 runs passed on
+the command line are now the config:
+
+| key | was | is | source |
+|---|---|---|---|
+| `psi_form` | `free` | **`affine`** | `affine_strict_cube_sd{0,1}` flags.json |
+| `policy_index` | `task_vector` | **`latent`** | ditto |
+| `train_actor` | `true` | **`false`** | ditto |
+| `acting` | `actor` | **`gpi`** | ditto |
+| `use_point_preimage` | `false` | **`true`** | ditto; `main.py` refuses a corrected-target npz with `false`, so the old default was unusable anyway |
+
+Everything else is byte-identical to those runs' `flags.json` (`z_dim` 128, `num_parallel` 2,
+`discount` 0.98, `tau` 0.01, `ortho_coef` 1000, both pessimism penalties 0.5, `lr_phi` 1e-5,
+`lr_sf` 1e-4, `sf` 1024x1, `phi` 256x2, `affine` `{w_dim:128, encoder_hidden:256,
+encoder_layers:2, norm_w:true}`, `index_agg` max, `u_clip` 3.0, `gpi_num_u` 64).
+`configs/agent/psmflow.yaml` and `get_config()` both moved, and both now name the free psi
+and the task-vector index as *ablations*.
+
+**Back-compat for old checkpoints.** Flipping a default silently rewrites what
+`tools/eval_checkpoint.py` builds for a run whose `flags.json` predates the key — a pre-09-04
+psmflow checkpoint has no `psi_form` at all, so it would have been rebuilt as an affine head
+(and, with its own `policy_index=task_vector` inherited on top, would have tripped
+`create()`'s guard). `LEGACY_AGENT_DEFAULTS` in that file back-fills the **pre-2026-09-04**
+value for any of the five keys the run does not carry, records it in
+`agent_config_source.legacy_defaults`, and a typed CLI override still wins. Three tests pin it.
+
+**`archive/`.** Every agent except `psmflow` and `fql` moved there with `git mv`, with its
+yaml, its tests and the tools/scripts/plans built on it: `psm`, `affine_psm`,
+`latent_affine_psm`, `latentrl`, `fb`, `ifql`, `iql`, `rebrac`, `sac`. Also archived: the
+diagnostics for hypotheses the compendium records as settled negative (fixed-`u` family,
+interface ceiling, flow Jacobian, mixture-preimage width, D1–D3 free-head critic forensics),
+the dropped ICLR F1–F4 figure scripts, and the superseded plan queue. `archive/README.md` is
+a one-line-each index; `pyproject.toml` now excludes `archive` from ruff and pins
+`testpaths = ["tests"]`. **`fb` was archived rather than kept**: `tools/make_tables.py` is
+pure JSON I/O, so its FB rows (cube 0.721) keep printing from the eval JSONs already on disk;
+only *re-running* FB needs the agent back.
+
+**Two edits the move forced.** (1) `agents/psmflow.py` imported seven pure helpers from
+`agents/psm.py`, so they are now `utils/psm_common.py` and `archive/agents/psm.py`
+re-exports them. (2) The latent actor's network and loss are **kept, not archived** — it is
+the DSRL-style comparator and the substrate for the planned DSRL-NA distillation of the GPI
+argmax; it is simply off by default, and `tests/test_psmflow_actor.py` now builds it
+explicitly through a `_legacy_agent()` helper.
+
+**Tests rewritten, not deleted.** Six modules asserted the OLD default was the default.
+Each now pins the new default explicitly and keeps the old arm as a named ablation through
+`_legacy_agent()` (`test_psmflow_agent`, `_actor`, `_policy_index`, `_backup_explore`,
+`_affine`, `_groundtruth`). `test_psmflow_groundtruth.py` gained a **new** chain-MDP pin for
+the default arm: with no actor to interrogate, its ground truth is `gpi_select` itself —
+the (u_i, u′_j) search must return a goal-ward latent at every non-goal state, which it does.
+
+### Verification (all run after the move)
+
+| check | result |
+|---|---|
+| `python -c "from agents import agents"` | `['fql', 'psmflow']` |
+| all nine archived agents still import from `archive.agents.*` | 9/9 OK |
+| full suite, module-per-process (26 modules) | **176 passed, 3 skipped, 0 failed** |
+| `ruff check .` | 145 findings, from 357 at HEAD under the same config (archive excluded). The only *added* finding in the live tree is the `affine=dict(...)` `C408` already noted above |
+| 200-step GPU smoke, `main.py agent=psmflow` with **no** agent flags (sbatch 2491622, kisski-inference) | COMPLETED in 1:53. Its `flags.json` agent block diffs against `affine_strict_cube_sd0`'s: **NONE** — the defaults reproduce the 0.532/0.620 configuration exactly |
+| `tools/eval_checkpoint.py` on `affine_strict_cube_sd0@250000`, 5 episodes, **no** arm flags (sbatch 2491624) | restored and ran; provenance printed *"run config already matches this checkout's defaults"*, CLI overrides only the three path flags. 1/5 solved (n=5) |
+
+`squeue` before: 7 training jobs running, 0 pending. After: 6 running (`affine_strict_cube_sd0`
+reached 500k on its own in the meantime), 0 pending — **no job was ever pending while the
+tree was mid-move**, so nothing could import a half-moved tree.
 
 ---
 
@@ -300,7 +1831,7 @@ was **not run**: this cluster holds none of the historical `eval500_*.json`, so
 `make_tables.py --logs $PSM_DATA/logs` would rewrite `docs/tables/results.md` with `--` in
 every other cell. Run it on midi-01, or after the four JSONs are copied to that logs dir.
 
-### Also this session
+### Also
 
 - `scripts/eval500.sh` gained a `latentrl` mode and now **rejects unknown modes**: it
   previously fell through to `agent=psmflow` for any first argument other than `bc`, so
@@ -585,7 +2116,7 @@ cube 50 min, antmaze 56-59 min per 500k run on one H100 (10 concurrent).
    was read off it. Stage-B inversion quality is **not** shown to move Stage-C success, and
    the standing "the actor is BC with an 8% perturbation" reading does not need revisiting
    on this evidence. Do not quote the +0.05 anywhere — it was a one-seed artefact, and this
-   is the second time this session a single seed pointed the wrong way.
+   is the second time in this entry that a single seed pointed the wrong way.
 
    *Consequence for verdict 2:* the mixture is still the worst arm, but with the correct
    3-seed `pointps` comparator the cube gap narrows from 0.286 → 0.194 to
@@ -724,7 +2255,7 @@ not the problem (oracle-aim 0.934), the decoder is not the problem (exact decode
 −0.038 ± 0.027 paired), and neither of the paper's two deviations was load-bearing. The
 open problem is a critic that can rank latents.
 
-### Infrastructure, same session
+### Infrastructure, same day
 
 `/var/local` (24 GB) hit 100% at 16:42 and killed all six runs mid-training with
 `OSError: [Errno 28]`, losing ~3.5 h; they were relaunched on `/data-local` at 17:40 and
@@ -871,9 +2402,9 @@ Both are specced next-step candidates, not started.
 ### Housekeeping from the 16:40 incident
 
 The teardown cause was `/var/local` filling (killed six runs; since cleaned to
-47%). Repo policy going forward: experiment STORE on `/data-local`. My armB
+47%). Repo policy going forward: experiment STORE on `/data-local`. The armB
 sd1/sd2 relaunches to /var/local died of the same disk exhaustion at ~100k with no
-checkpoint and are DROPPED — Arm A/B seed replication rides on the other session's
+checkpoint and are DROPPED — Arm A/B seed replication rides on the parallel
 full-500k b-runs (`psmflow_paperfaith_arm{A,B}_20260831b`, 3 seeds each on
 /data-local, ~300k/500k as of this entry); their Arm B results supersede the
 250k sd0 numbers above when they land.
@@ -890,7 +2421,7 @@ Two things came out of reading the ICLR draft against the code, and one port fol
 
 ### The draft describes a method we are not running
 
-`PAPER/ICLR` was re-added this session (skeleton: prewriting form + intro + preliminaries
+`PAPER/ICLR` was re-added (skeleton: prewriting form + intro + preliminaries
 + a working-notes method section; `experiments.tex` and `related-work.tex` are empty, the
 abstract is template text). Audited claim by claim against the run record:
 
@@ -1028,7 +2559,7 @@ the Jacobian is now excluded, and lead 2 of the 08-29 entry is closed negative.
   sweep says coverage@64 0.115 and decode_mix 0.263 vs decode_pt 0.0002, against a working
   point-arm number of 0.220 +/- 0.005 (3 seeds, BC control 0.090).
 
-### Also this session
+### Also
 
 - `PAPER/` untracked from `main`, `feat/psm-integration` and `feat/inversion-integration`
   (tip removal only; history keeps it), then the ICLR skeleton re-added — it builds clean
@@ -1199,7 +2730,7 @@ latents decoding 53% of an action scale away, so that ablation was never fair.
 
 ## 2026-08-13 — the residual dial WORKS (0.90–0.91 at 500 ep, 3 seeds); the collapse is a PESSIMISM spiral, not optimism
 
-The W4/l1stab arc, verified end-to-end this session. All artifacts in
+The W4/l1stab arc, verified end to end. All artifacts in
 `/data-local/amsks/PSMFLows/logs/`.
 
 ### Peak checkpoints hold at 500 episodes
@@ -1232,7 +2763,7 @@ this also recalibrates C1: real data actions sit ~0.52 from their own neighbours
 FQL's 0.577 is near data-noise level under the matched statistic — the "off the data"
 framing in note.tex needs this baseline context.
 
-### Also this session
+### Also
 
 - **Inversion re-cert PASSES** (`audit_inversion_recert.json`): ESS 81.3/94.6/7.6,
   roundtrip 1e-4/1e-4/2e-4, invalid 13/0/881 — all matching the HF card.
@@ -1464,7 +2995,7 @@ support/coverage story.
 
 <!-- _class: lead -->
 
-## 2026-08-10 session — LatentFlowPSM measured end to end; ICLR figures F1-F4
+## 2026-08-10 — LatentFlowPSM measured end to end; ICLR figures F1-F4
 
 Executed `docs/plans/2026-08-10-iclr-figures.md`. Everything below is a 500-episode
 evaluation with a Wilson interval, quoted beside the per-step-prior BC control from the
@@ -1553,11 +3084,11 @@ little outcome information. The unexplained part is why DPG on it still produces
 
 <!-- _class: lead -->
 
-## 2026-08-05 session — ROOT CAUSE: the fixed-u family is structurally non-goal-covering; Rung-1 is dead on navigate data
+## 2026-08-05 — ROOT CAUSE: the fixed-u family is structurally non-goal-covering; Rung-1 is dead on navigate data
 
 All Stage-C variants (pointpre x2, mixture, pointpre1M, mix0 audit — 11 runs) read **0.0
-success** on pointmaze task1; cube Stage-C floors at 0.02–0.06. D1–D3 pass. This session
-root-caused it. **It is not a bug anywhere — the policy family itself has no goal-reaching
+success** on pointmaze task1; cube Stage-C floors at 0.02–0.06. D1–D3 pass. Root cause
+below. **It is not a bug anywhere — the policy family itself has no goal-reaching
 member, so even a perfect psi gives GPI a flat landscape.** Three measurements:
 
 ### 1. Exhaustive reachability: 0 of 233 latents ever reach the goal
@@ -1629,7 +3160,7 @@ the "fixed noise = policy index" premise does not. Candidate directions, in roug
 
 <!-- _class: lead -->
 
-## 2026-08-04 session — full audit + roadmap; the D3 ESS statistic was wrong (again), and it changes the story back
+## 2026-08-04 — full audit + roadmap; the D3 ESS statistic was wrong (again), and it changes the story back
 
 Deliverable: **`docs/plans/2026-08-04-status-roadmap-audit.md`** — status, OGBench roadmap
 (gates, baselines, success criteria, viz/analysis scripts), full code audit, rewrite plan.
@@ -1653,7 +3184,7 @@ N=200 recomputes (`watch_cube` / `watch_pointmaze` tmux, ETA ~12:30 08-04) are N
 they give comfortable headroom over a marginal 21.7 — let them finish, then run the fixed
 D3 on both npz.
 
-### Also fixed this session (audit P0s)
+### Also fixed (audit P0s)
 
 - `tools/latent_q_sanity.py` (D4): the 10k relabel batch was **unseeded** (global
   np.random) — the gate number changed run to run. Now seeded off `cfg.seed`, same pattern
@@ -1664,7 +3195,7 @@ D3 on both npz.
   `np.random.default_rng()` (OS entropy) — identical seed + weights gave different `w_inf`
   and eval success. Now seeded off the `seed` argument.
 
-### Later same session — D2 recovered (PASSES both envs), preimage analyzer landed
+### Later the same day — D2 recovered (PASSES both envs), preimage analyzer landed
 
 - **D-tools now persist their reports** (`utils/log_utils.py:write_report`; `report_out`
   config key, default `<hydra run dir>/<tool>.json`) — the class of loss that ate the
@@ -1778,7 +3309,7 @@ reproduce across 5 independent rng seeds, 0/13 finite controls ever do. So a NaN
 an npz means the inverse diverged, not that the EM misbehaved — the earlier attribution to
 `fql.py`'s masking was wrong.
 
-### Fixed this session
+### Fixed
 
 - **`preimage_ess` reported 100/100 on total failure** (`fql.py`, both EM and non-EM
   variants). When no sample is usable the uniform fallback makes every weight
@@ -1838,7 +3369,7 @@ wandb `qcmsr46t`. Note `utils/log_utils.py:73` `mkdtemp()`s the wandb dir and so
 
 <!-- _class: lead -->
 
-## 2026-07-29 session — PSMFlow v1 Tasks 3–8 done; cube preimages landed; D3 ESS gate FAILS
+## 2026-07-29 — PSMFlow v1 Tasks 3–8 done; cube preimages landed; D3 ESS gate FAILS
 
 Reference docs: note `PAPER/RESEARCH_NOTE.md` · spec `docs/design/2026-07-20-psmflow-v1-design.md`
 · plan `docs/plans/2026-07-20-psmflow-v1.md`.
@@ -1949,7 +3480,7 @@ see the 07-28 slide), so a re-trained flow will not be step-identical to the cur
 
 <!-- _class: lead -->
 
-## 2026-07-28 session — PSMFlow v1 Tasks 1–2; two numerics bugs cleared
+## 2026-07-28 — PSMFlow v1 Tasks 1–2; two numerics bugs cleared
 
 Workstream switched to the **PSMFlow v1 plan**. Execution order is 1→2→…→8; GPU work
 (Stage A → D1/D3 gates → preimages → psmflow 3 seeds → D4 → zero-shot vs PSM/FB) is
@@ -1979,7 +3510,7 @@ ahead of jax by `main.py`, the GPU tools, and `tests/conftest.py`.
 self-contained numerics test would pass vacuously (it is opt-in behind `PSMFLOWS_FLOW_CKPT`;
 the committed test pins the import ORDER instead).
 
-### The residual NaN ESS — fixed this session
+### The residual NaN ESS — fixed
 
 Not "the EM proposal is broken at `flow_steps>=100`". One unguarded NaN with a wide blast
 radius, from two compounding causes:
@@ -2038,7 +3569,7 @@ Hydra agent cfg + meta sidecar in `tools/precompute_preimages.py`; `noise_preima
 
 <!-- _class: lead -->
 
-## 2026-07-26 session — flowBC actor for affine PSM; reference-HP audit
+## 2026-07-26 — flowBC actor for affine PSM; reference-HP audit
 
 **Question:** affine PSM sits at floor on `cube-single-play-singletask-v0`. Are we
 using the flowBC actor the reference uses for cube?
@@ -2133,7 +3664,7 @@ concluding the timescale idea is wrong.
   the ortho diagonal term is inert at ≈ −d, so `ortho_coef=1000` contributes a ≈ −50000
   offset. **Read `orth_offdiag` (decorrelation) and `psm_offdiag`, not `psm_loss`.**
 
-### Known issue, NOT fixed (flagged, outside this session's scope)
+### Known issue, NOT fixed (flagged, out of scope here)
 
 `main.py:80` sets `dataset.return_index = True` only for `agent_name == 'psm'`, so
 `affine_psm` falls back to `jnp.arange(B)` for the codebook hash — a transition's proto
@@ -2150,7 +3681,7 @@ GPUs, **one seed per GPU**, `SEEDS=`/`ACTOR=`/`EXTRA=`/`EVAL_INT=` env overrides
 
 <!-- _class: lead -->
 
-## 2026-07-15 session — FB agent ported to JAX (bit-exact)
+## 2026-07-15 — FB agent ported to JAX (bit-exact)
 
 Ported the PyTorch **Forward–Backward (FB)** agent (`../Factored-FB` `agents/fb/*`)
 to JAX/Flax, mirroring the PSM port protocol. **Spec** `docs/design/
@@ -2184,7 +3715,7 @@ to JAX/Flax, mirroring the PSM port protocol. **Spec** `docs/design/
 
 <!-- _class: lead -->
 
-## 2026-07-13 session — fresh from-scratch parity runs
+## 2026-07-13 — fresh from-scratch parity runs
 
 **Goal:** measure how much our JAX PSM+flow recovers vs the reference on
 from-scratch runs (not transplant), 3 seeds, 500k.
@@ -2222,7 +3753,7 @@ Compare: `.venv/bin/python scripts/compare_multiseed.py [GROUP]` (defaults to
 `/var/local/amsks/exp/multiseed_group.txt`; the 1M group is in
 `recover1M_s2_group.txt`). Reference cache has seeds 0,1,2,3,4,5,7.
 
-### Next (2026-07-13 → next session)
+### Next (from 2026-07-13)
 
 1. **Read the 1M seed-2 result** — does it reach the ref's 0.7–0.8 ceiling? If
    yes ⇒ we DO have parity, just needed budget; the "systematic gap" was a
@@ -2230,7 +3761,7 @@ Compare: `.venv/bin/python scripts/compare_multiseed.py [GROUP]` (defaults to
 2. Let seeds 0/1 finish 500k; re-run `compare_multiseed.py` for the 3-seed table.
 3. If ceiling confirmed, consider 1M runs for seeds 0/1 too (one-per-GPU) to
    get a real 3-seed peak distribution vs the reference's spread.
-4. GPUs 1 & 3 usable; 0 & 2 were busy/full (other users) this session.
+4. GPUs 1 & 3 usable; 0 & 2 were busy/full (other users) at the time.
 
 ---
 
@@ -2252,7 +3783,7 @@ Compare: `.venv/bin/python scripts/compare_multiseed.py [GROUP]` (defaults to
 
 ---
 
-## How we got here (this session)
+## How we got here
 
 1. Started from an "eval@100k red flag". First pass concluded *faithful* — but that was an
    **improper comparison** (wrong reference algo for s5/10/7 + mid-run vs 1.5M peak).
@@ -2342,19 +3873,18 @@ naming **matches the fixture** convention → prefix keys with `w__` and reuse e
 
 ---
 
-## Code changes this session
+## Code changes
 
 - **Committed & pushed** `31ed43d` "PSM: reference-parity fixes (eval z-inference + masks) +
   audit tooling": masks always-γ (`agents/psm.py`), eval z-shift/relabel (`main.py`,
   `config.yaml`), `eval_interval 100k→20k`, `docs/`, `scripts/launch_psm_cube.sh`.
-  **NB: commits follow existing history conventions.**
-- **UNCOMMITTED** (working tree): `proto_table_path` hook — `agents/psm.py` `create()` loads a
+  - **UNCOMMITTED** (working tree): `proto_table_path` hook — `agents/psm.py` `create()` loads a
   transplanted table when `agent.proto_table_path` set; `configs/agent/psm.yaml` declares it
   (`null` default). 15/15 PSM tests still pass.
 
 ---
 
-## Runs (this session)
+## Runs
 
 | group / run | what | status |
 |---|---|---|

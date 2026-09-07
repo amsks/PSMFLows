@@ -1,7 +1,7 @@
 # PSMFlow v1 — implementation spec (flow-indexed successor measures + GPI eval)
 
 **Date:** 2026-07-20 · **Branch:** `feat/psm-integration` · **Design source:**
-`PAPER/RESEARCH_NOTE.md` (commit d330c7b; user-approved). This spec covers **Phase A**:
+`PAPER/RESEARCH_NOTE.md` (commit d330c7b, adopted). This spec covers **Phase A**:
 behavior-flow pretraining, preimage pipeline hardening, the new `psmflow` agent with
 Rung-1 (flow-GPI) inference, diagnostics D1–D4, and first runs on standard-coverage
 data. **Out of scope (later specs):** Rung 2 (test-time latent Q-iteration), Rung 3

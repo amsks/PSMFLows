@@ -1,9 +1,36 @@
 # PSMFlows — Compendium
 
-**Purpose.** Everything currently known about this project, assembled so an agent with no
+**Purpose.** Everything currently known about this project, assembled so a reader with no
 prior context can pick the work up. Theory, algorithm, code seams, every number that
 survived verification, and the live hypotheses. Discarded avenues appear only where knowing
 they are closed prevents re-running them.
+
+> **CURRENT PRIMARY (2026-09-04, amended 2026-09-05).** The project's algorithm is the
+> **paper-strict affine LatentFlowPSM**, and it is now the DEFAULT of `agent=psmflow`:
+> `psi_form=affine policy_index=latent train_actor=false acting=gpi`, i.e.
+> `psi(s,u,u') = A(s,u)^T w(u') + beta(s,u)` (Prop. `bilinear` literally), no actor, GPI
+> acting. On `cube-single-play`, 500 episodes: **0.424 ± 0.141** (mean ± 95% CI over the 10
+> late checkpoint×seed measurements, ≥250k), against the free-psi Arm B's 0.083, the
+> latent-actor agent's 0.230, a BC control of 0.072 and FB's 0.721. Design +
+> pre-registration: `docs/design/2026-09-04-affine-psi.md`; outcome in `docs/HANDOFF.md`
+> (2026-09-04 evening). Everything below that describes the *free* psi or the task-vector
+> index as "the shipped agent" is history: those are now explicit non-default ablation
+> switches. Every agent other than `psmflow` and `fql` has moved to `archive/`.
+>
+> **Instability — read before quoting this arm (2026-09-05).** It is not converged and the
+> 09-04 headline "0.532 / 0.620 @250k" was one draw, not a plateau: seed 0 reads
+> 0.532 → 0.286 → 0.704 → 0.282 → 0.272 → **0.086** across consecutive 50k checkpoints (500
+> episodes each, Wilson ±0.04, so the swing is training-time non-stationarity, not eval
+> noise), no logged diagnostic predicts it (|Spearman| ≤ 0.39 for `w_enc_spread`,
+> `psi_q_*`, `psm_loss`, `orth_loss`), and on antmaze the arm sits at or below the BC
+> control (late-checkpoint mean there is 0.091 ± 0.064, n = 6, whose interval contains BC).
+> **No single checkpoint of it may be quoted** — report the mean over late checkpoints and
+> seeds with its spread. Two probes localised it: the per-`u` GPI ranking is *re-randomised*
+> between checkpoints (Spearman 0.21-0.36 for any pair, `docs/design/2026-09-05-gpi-selection-diag.md`)
+> and no eval-time selection rule recovers the bad checkpoint, while pinning the policy
+> index collapses the good one to 0.000-0.180 — the per-step max over fresh `u'` is the
+> mechanism (`docs/design/2026-09-05-gpi-ablations.md`). Next experiment:
+> `index_agg=expectile`. Details: `docs/HANDOFF.md` (2026-09-05).
 
 **Status as of 2026-09-01.** The method's core empirical claim is **not** supported on cube.
 Three experiments (E1–E4) localized the failure precisely: the action interface is fine, the
@@ -14,7 +41,7 @@ only the critic.
 
 Sources: `PAPER/main.tex` at commit `5249267` (the formal writeup; untracked from the
 working tree, read with `git show 5249267:PAPER/main.tex`), `PAPER/ICLR/` (current draft
-skeleton), `docs/HANDOFF.md` (dated session record, 1700+ lines), `docs/tables/results.md`
+skeleton), `docs/HANDOFF.md` (the dated lab record), `docs/tables/results.md`
 (generated), `docs/design/2026-07-23-psmflows-formal-writeup-design.md`, and the code.
 
 ---

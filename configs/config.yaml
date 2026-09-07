@@ -29,6 +29,11 @@ eval_interval: 20000
 save_interval: 1000000
 
 eval_episodes: 10  # match reference eval_n_episodes (evals/ogbench.py rollout)
+# tools/eval_checkpoint.py only. Split the eval episodes over N worker PROCESSES on one
+# GPU (rollout is one CPU core plus ~3.2 GB of an 80 GB H100, so N of them fit). 1 keeps
+# the historical single-process path bit for bit; EVAL_WORKERS in the environment is the
+# other way to set it. main.py's in-loop eval ignores this.
+eval_workers: 1
 video_episodes: 0
 video_frame_skip: 3
 

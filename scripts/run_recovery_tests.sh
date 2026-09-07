@@ -13,7 +13,7 @@
 #                      the same state.
 #
 # Usage:
-#   PSM_DATA=/path/for/big/files bash scripts/run_recovery_tests.sh [cube|antmaze|pointmaze|all]
+#   PSM_DATA=/path/for/big/files bash scripts/run_recovery_tests.sh [cube|antmaze|pointmaze|scene|all]
 #
 #   SMOKE=1        tiny sizes -- checks the wiring in ~a minute, numbers not reportable
 #   SKIP_FETCH=1   the artifacts are already in place
@@ -37,8 +37,9 @@ case "$WHICH" in
   cube)      KEYS=(cube) ;;
   antmaze)   KEYS=(antmaze) ;;
   pointmaze) KEYS=(pointmaze) ;;
+  scene)     KEYS=(scene) ;;
   all)       KEYS=(cube antmaze pointmaze) ;;
-  *) echo "unknown target: $WHICH (cube|antmaze|pointmaze|all)" >&2; exit 1 ;;
+  *) echo "unknown target: $WHICH (cube|antmaze|pointmaze|scene|all)" >&2; exit 1 ;;
 esac
 
 if [ -z "${SKIP_FETCH:-}" ]; then
@@ -64,6 +65,7 @@ for key in "${KEYS[@]}"; do
     cube)      ENV_NAME=cube-single-play-singletask-v0;                 NAME=cube-single-play ;;
     antmaze)   ENV_NAME=antmaze-medium-navigate-singletask-v0;          NAME=antmaze-medium-navigate ;;
     pointmaze) ENV_NAME=pointmaze-medium-navigate-singletask-task1-v0;  NAME=pointmaze-medium-navigate ;;
+    scene)     ENV_NAME=scene-play-singletask-v0;                        NAME=scene-play ;;
   esac
   NPZ="$PSM_DATA/preimages/$NAME.npz"
   FLOW="$PSM_DATA/flow/$NAME"

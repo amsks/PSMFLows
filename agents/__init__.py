@@ -1,25 +1,20 @@
-from agents.affine_psm import AffinePSMAgent
-from agents.fb import FBAgent
+"""Agent registry — what `main.py agent=<name>` and `tools/eval_checkpoint.py` can build.
+
+Two agents, one pipeline. `fql` is Stage A (the behaviour flow `G(s,u)` fit by flow
+matching, and its inverse: `compute_full_proposal_distribution_em` is Stage B's core) and
+also the BC control every Stage-C number is quoted beside. `psmflow` is the method: the
+paper-strict affine LatentFlowPSM, primary since 2026-09-04.
+
+Every other agent this repo has carried (psm, affine_psm, latent_affine_psm, latentrl, fb,
+ifql, iql, rebrac, sac) moved to `archive/agents/` on 2026-09-04 and is deliberately NOT
+importable here -- `agent=fb` etc. now fail at the hydra config group, which is the point.
+See `archive/README.md` for what each one was and how to revive it.
+"""
+
 from agents.fql import FQLAgent
-from agents.ifql import IFQLAgent
-from agents.iql import IQLAgent
-from agents.latent_affine_psm import LatentAffinePSMAgent
-from agents.latentrl import LatentRLAgent
-from agents.psm import PSMAgent
 from agents.psmflow import PSMFlowAgent
-from agents.rebrac import ReBRACAgent
-from agents.sac import SACAgent
 
 agents = dict(
-    affine_psm=AffinePSMAgent,
-    fb=FBAgent,
     fql=FQLAgent,
-    ifql=IFQLAgent,
-    iql=IQLAgent,
-    latent_affine_psm=LatentAffinePSMAgent,
-    latentrl=LatentRLAgent,
-    psm=PSMAgent,
     psmflow=PSMFlowAgent,
-    rebrac=ReBRACAgent,
-    sac=SACAgent,
 )

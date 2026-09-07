@@ -71,7 +71,7 @@ def main(cfg: DictConfig):
             # re-wrap it here or it stays a plain dict when p_aug/frame_stack are set.
             val_dataset = Dataset.create(**val_dataset)
 
-    if config['agent_name'] in ('psmflow', 'latentrl', 'latent_affine_psm'):
+    if config['agent_name'] == 'psmflow':
         # These train on the preimage-augmented dataset (latents per transition).
         from utils.flow_inversion import load_augmented_dataset, repair_invalid_preimages
         assert config.get('preimage_path'), (
@@ -196,17 +196,7 @@ def main(cfg: DictConfig):
         if dataset is not None:
             dataset.p_aug = cfg.p_aug
             dataset.frame_stack = cfg.frame_stack
-            if config['agent_name'] == 'rebrac':
-                dataset.return_next_actions = True
-            if config['agent_name'] in ('psm', 'affine_psm', 'latent_affine_psm'):
-                # The proto behavior sampler keys on the global buffer row index
-                # (reference train.py with_index). Emit it as batch['index'].
-                # WITHOUT this both agents fall back to arange(B) — i.e. BATCH POSITION —
-                # so pi_z is a function of where a transition lands in the batch rather
-                # than of its state, and the TD bootstrap target is re-randomized on every
-                # resample. affine_psm was missing from this list.
-                dataset.return_index = True
-            if config['agent_name'] in ('psmflow', 'latentrl', 'latent_affine_psm'):
+            if config['agent_name'] == 'psmflow':
                 # Emit u_0 / u_0' per transition: either a draw from the stored EM mixture
                 # or the exact backward-ODE point, per the point-vs-mixture ablation.
                 dataset.return_preimage_noise = True
@@ -242,10 +232,7 @@ def main(cfg: DictConfig):
             # Offline RL.
             batch = train_dataset.sample(config['batch_size'])
 
-            if config['agent_name'] == 'rebrac':
-                agent, update_info = agent.update(batch, full_update=(i % config['actor_freq'] == 0))
-            else:
-                agent, update_info = agent.update(batch)
+            agent, update_info = agent.update(batch)
         else:
             # Online fine-tuning.
             online_rng, key = jax.random.split(online_rng)
@@ -292,10 +279,7 @@ def main(cfg: DictConfig):
             else:
                 batch = replay_buffer.sample(config['batch_size'])
 
-            if config['agent_name'] == 'rebrac':
-                agent, update_info = agent.update(batch, full_update=(i % config['actor_freq'] == 0))
-            else:
-                agent, update_info = agent.update(batch)
+            agent, update_info = agent.update(batch)
 
         # Log metrics.
         if i % cfg.log_interval == 0:
@@ -319,15 +303,7 @@ def main(cfg: DictConfig):
             # agent over a dataset sample so eval is goal-directed. No-op for agents
             # without infer_eval_z (they act directly on observations).
             eval_agent = agent
-            if hasattr(agent, 'infer_w_goal'):
-                # Affine (full) PSM: goal-conditioned eval. Solve w_inf for the env goal
-                # (LP or closed-form via infer_eval); the amortized w-conditioned actor
-                # (trained in-loop) then acts on w_inf — no per-eval distillation needed.
-                from utils.evaluation import extract_goal
-                goal = extract_goal(eval_env)
-                assert goal is not None, "affine_psm eval needs a goal-conditioned env (info['goal'])."
-                eval_agent = agent.infer_eval(train_dataset, goal)
-            elif hasattr(agent, 'infer_eval_z'):
+            if hasattr(agent, 'infer_eval_z'):
                 # Match the reference eval z-inference (evals/ogbench.py): sample
                 # `eval_relabel_size` transitions and shift rewards by `eval_reward_shift`
                 # (=1.0) so cube-single's {-1,0} task reward becomes {0,1} => z points at

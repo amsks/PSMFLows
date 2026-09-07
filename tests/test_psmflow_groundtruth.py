@@ -10,11 +10,19 @@ moves left, clipped at the ends. Behaviour data covers both actions from every s
 Latents are the identity (`noise_preimage := actions`), so the frozen flow is UNUSED here
 and the u <-> a correspondence is exact — which is what makes the ground truth knowable.
 
-Under the 08-05 semantics (decisions.tex) psi(s, w, u)^T phi is the occupancy of "emit
-latent u now, then follow the actor's policy for w". With reward at state 4: the
-goal-ward latent must outscore the goal-averse one from every state, value must increase
-toward the goal, and — the policy-improvement pin — the ACTOR itself must emit goal-ward
-latents under the inferred w even though the behaviour data is direction-balanced.
+Two arms are checked, because the two have different ground truths.
+
+`policy_index=task_vector` (the pre-2026-09-04 arm, built here with an explicit config
+pin): psi(s, w, u)^T phi is the occupancy of "emit latent u now, then follow the actor's
+policy for w". With reward at state 4 the goal-ward latent must outscore the goal-averse
+one from every state, value must increase toward the goal, and — the policy-improvement
+pin — the ACTOR itself must emit goal-ward latents under the inferred w even though the
+behaviour data is direction-balanced.
+
+The DEFAULT arm (affine psi, latent index, no actor, GPI acting) has no actor to pin, and
+its psi is indexed by a policy latent rather than by w. Its ground truth is the acting rule
+itself: `gpi_select` searches (u_i, u\'_j) pairs and must come back with a goal-ward latent
+at every non-goal state.
 """
 import jax
 import jax.numpy as jnp
@@ -41,10 +49,16 @@ def _chain_dataset(reps=40):
                 noise_preimage=act.copy())  # identity latents: u := a
 
 
-def _trained_agent(steps=2000):
+def _trained_agent(steps=2000, **over):
     cfg = get_config()
     with cfg.unlocked():
         cfg["allow_untrained_flow"] = True
+        # The task-vector arm: `_score` reads psi at a z_dim index slot and the actor pins
+        # below need an actor at all. Explicit since the defaults flipped on 2026-09-04.
+        cfg["psi_form"] = "free"
+        cfg["policy_index"] = "task_vector"
+        cfg["train_actor"] = True
+        cfg["acting"] = "actor"
         cfg["z_dim"] = 16
         cfg["batch_size"] = 64
         cfg["discount"] = 0.9
@@ -52,6 +66,8 @@ def _trained_agent(steps=2000):
         cfg["lr_phi"] = 1e-4      # tiny problem: the reference 1e-5 is needlessly slow
         cfg["sf"]["hidden_dim"] = 128
         cfg["phi"]["hidden_dim"] = 64
+        for k, v in over.items():
+            cfg[k] = v
     data = _chain_dataset()
     n = data["observations"].shape[0]
     agent = PSMFlowAgent.create(0, data["observations"][:1], data["actions"][:1], cfg)
@@ -94,3 +110,19 @@ def test_chain_actor_emits_goalward_latents():
         obs = jnp.eye(S)[s].astype(jnp.float32)[None]
         u = float(agent.config["u_clip"] * agent.actor(obs, agent.task_z[None], noise)[0, 0])
         assert u > 0, f"state {s}: actor latent {u:.3f} is not goal-ward"
+
+
+def test_chain_gpi_selects_goalward_latents_on_the_default_arm():
+    """The DEFAULT agent's ground truth (affine psi, latent index, no actor, GPI acting).
+
+    There is no actor to interrogate here and psi's index slot carries u', not w, so the
+    check is the acting rule the write-up actually specifies: gpi_select scores the
+    (u_i, u'_j) panel by psi(s, u'_j, u_i)^T w and executes the argmax's u_i. On this chain
+    that must come out rightward at every non-goal state — the same fact the arm above
+    proves through the actor, proved instead through the search."""
+    agent, _ = _trained_agent(steps=3000, psi_form="affine", policy_index="latent",
+                              train_actor=False, acting="gpi", gpi_num_u=32)
+    for s in range(S - 1):
+        obs = jnp.eye(S)[s].astype(jnp.float32)
+        u = float(agent.gpi_select(obs, seed=jax.random.PRNGKey(s))[0])
+        assert u > 0, f"state {s}: gpi latent {u:.3f} is not goal-ward"

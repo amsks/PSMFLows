@@ -17,8 +17,11 @@
 #   PSM_DATA     scratch dir with room for ~2 GB per environment
 #
 #SBATCH --job-name=psm-preimage
-#SBATCH --output=%x-%j.out
-#SBATCH --error=%x-%j.out
+# SLURM does NOT expand environment variables in #SBATCH directives, so this is the
+# literal $PSM_DATA/logs/slurm on KISSKI rather than the variable. A relative path here
+# lands the log in the submit CWD -- i.e. the repo root. Launchers override both flags.
+#SBATCH --output=/mnt/home/amohan/psm-data/logs/slurm/%x-%j.out
+#SBATCH --error=/mnt/home/amohan/psm-data/logs/slurm/%x-%j.err
 #SBATCH --time=36:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
@@ -29,7 +32,7 @@ set -euo pipefail
 
 : "${PSM_REPO:?PSM_REPO=<path to the PSMFLows checkout> required}"
 : "${PSM_DATA:?PSM_DATA=<scratch dir for npz + flow> required}"
-: "${ENVKEY:?ENVKEY=cube|antmaze|pointmaze required}"
+: "${ENVKEY:?ENVKEY=cube|antmaze|pointmaze|scene required}"
 : "${NAME:?NAME=<artifact name in the HF repo> required}"
 ALPHA="${ALPHA:?ALPHA required}"
 PRIOR_SCALE="${PRIOR_SCALE:?PRIOR_SCALE required}"
@@ -42,6 +45,7 @@ case "$ENVKEY" in
   cube)      ENV_NAME=cube-single-play-singletask-v0;               FLOW=cube-single-play ;;
   antmaze)   ENV_NAME=antmaze-medium-navigate-singletask-v0;        FLOW=antmaze-medium-navigate ;;
   pointmaze) ENV_NAME=pointmaze-medium-navigate-singletask-task1-v0; FLOW=pointmaze-medium-navigate ;;
+  scene)     ENV_NAME=scene-play-singletask-v0;                     FLOW=scene-play ;;
   *) echo "unknown ENVKEY: $ENVKEY" >&2; exit 1 ;;
 esac
 
@@ -55,11 +59,17 @@ mkdir -p "$PSM_DATA" "$OGBENCH_DATASET_DIR"
 
 EPOCH="${EPOCH:-500000}"
 echo "=== 1/3 pull the frozen Stage-A flow ($FLOW @ $EPOCH) ==="
-# Decoder only. A Stage-B job produces latents; it has no use for anyone else's, and the
-# canonical npz is 0.3-0.5 GB of download that would be discarded.
-"$PY" scripts/hf_preimages.py --repo "$HF_REPO" pull \
-    --name "$FLOW" --flow-name "$FLOW" --dest "$PSM_DATA" --flow-only --flow-epoch "$EPOCH"
 FLOW_DIR="$PSM_DATA/flow/$FLOW"
+# Local first. A flow trained on THIS cluster is not in the HF repo yet (the push in 3/3
+# is what puts it there), and pulling would fail before the 20 h inversion even starts.
+# Decoder only otherwise. A Stage-B job produces latents; it has no use for anyone else's,
+# and the canonical npz is 0.3-0.5 GB of download that would be discarded.
+if [ -f "$FLOW_DIR/params_$EPOCH.pkl" ]; then
+  echo "    using the local $FLOW_DIR/params_$EPOCH.pkl (no download)"
+else
+  "$PY" scripts/hf_preimages.py --repo "$HF_REPO" pull \
+      --name "$FLOW" --flow-name "$FLOW" --dest "$PSM_DATA" --flow-only --flow-epoch "$EPOCH"
+fi
 
 OUT="$PSM_DATA/preimages_${NAME}.npz"
 echo "=== 2/3 invert the dataset -> $OUT ==="

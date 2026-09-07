@@ -72,7 +72,7 @@ Code line numbers are current on `feat/inversion-integration` @ `1116712`.
 | Laplace covariance `\Sigma_\alpha=(I+2\alpha J^\top J)^{-1}` | Prop. `laplace`, eq. `laplace`, main.tex:757-762 | `agents/fql.py:95` `cov_eigvals = clip(1.0/(2.0*alpha*eigvals + prior_scale), 0.01, 1.0)` | **faithful** at `prior_scale=1`. The `clip(0.01, 1.0)` floor/ceiling is not in the paper (the ceiling is vacuous at `prior_scale=1`, `fql.py:93-94`) |
 | Laplace mean `m_\alpha=2\alpha\Sigma_\alpha J^\top J u^\star` | eq. `laplace` | **NOT IMPLEMENTED** — `fql.py:97` returns `x_0` (`=u*`) as the mean, i.e. the `α→∞` limit `m_α→u*`, and refines it by EM instead | deviation, benign: the paper itself calls EM "a multi-modal refinement of this Laplace object" (Rem. `laplace-geometry`, main.tex:786) |
 | "fit `q_α` via Prop. laplace (**EM refinement optional**)" | Alg. `pretrain` l.2, main.tex:940 | `agents/fql.py:145-295` (`compute_full_proposal_distribution_em`), 10 EM steps, `n_components=num_clusters` | faithful. **Note `configs/inversion/default.yaml:1` `num_clusters: 1`** — the shipped "mixture" is a *single* Gaussian, so the multi-modal refinement the paper describes has never actually been run with `K>1` |
-| `u_i ~ q_\alpha(\cdot\mid s_i,a_i)` used in the loss | eq. `loss-empirical`, main.tex:917; §10 `Dataset latents` (l.1096) softens to "a latent `u_i` with `G(s_i,u_i)≈a_i`" | **Both arms exist**: mixture draw `utils/datasets.py:181-185` → `utils/flow_inversion.py:121-171`; point `utils/datasets.py:177-178`. Selected by `agent.use_point_preimage` (`main.py:213`, `configs/agent/psmflow.yaml:106`) | **IMPLEMENTED DIFFERENTLY in practice**: every shipped result uses `use_point_preimage=true` (COMPENDIUM §3.5/§4.9, and the CLAUDE.md launch line), i.e. `q_α = δ_{u*}`, not the ε-relaxed posterior |
+| `u_i ~ q_\alpha(\cdot\mid s_i,a_i)` used in the loss | eq. `loss-empirical`, main.tex:917; §10 `Dataset latents` (l.1096) softens to "a latent `u_i` with `G(s_i,u_i)≈a_i`" | **Both arms exist**: mixture draw `utils/datasets.py:181-185` → `utils/flow_inversion.py:121-171`; point `utils/datasets.py:177-178`. Selected by `agent.use_point_preimage` (`main.py:213`, `configs/agent/psmflow.yaml:106`) | **IMPLEMENTED DIFFERENTLY in practice**: every shipped result uses `use_point_preimage=true` (COMPENDIUM §3.5/§4.9, and the README launch line), i.e. `q_α = δ_{u*}`, not the ε-relaxed posterior |
 | Preimage validity / repair | **not in the paper** | `utils/flow_inversion.py:31-105` | extra machinery, necessary (see §3) |
 
 ### 1.3 The objects
@@ -187,7 +187,7 @@ L_SM = (1/B²)Σ_{i,j}(ψ(s_i,u_i,u')ᵀφ(s'_j) − γ ψ̄(s'_i,u',u')ᵀφ̄(
   "identify a distribution over latent noise actions" a **core contribution**
   (`introduction.tex:19-24`).
 - **Code.** Both arms exist (`utils/datasets.py:177-185`). Every shipped number used
-  `agent.use_point_preimage=true` (COMPENDIUM §3.5, §4.9; CLAUDE.md's own launch line), i.e.
+  `agent.use_point_preimage=true` (COMPENDIUM §3.5, §4.9; the README launch line), i.e.
   `q_α → δ_{u*}`. Compounding it, `configs/inversion/default.yaml:1` sets `num_clusters: 1`,
   so even the mixture arm is a single Gaussian — the multi-modal EM the paper describes has
   never been run.
@@ -346,5 +346,5 @@ ICLR draft calls a core contribution.
    source of truth from `2007e65^`.
 2. `PAPER/ICLR/content/method.tex` is 30 lines and predates every settled result in
    COMPENDIUM §4. Its Q-iteration equations are Rung 2, which does not exist in code.
-3. `configs/agent/psmflow.yaml:106` says `use_point_preimage: false` while CLAUDE.md's
+3. `configs/agent/psmflow.yaml:106` says `use_point_preimage: false` while the README's
    documented launch line passes `true`. The config default is not what anything ran.

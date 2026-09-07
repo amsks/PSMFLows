@@ -3,7 +3,7 @@
 # into $PSM_DATA, and repair their provenance sidecars for this machine.
 #
 # Usage:
-#   PSM_DATA=/path/for/big/files bash scripts/fetch_preimages_hf.sh [cube|antmaze|pointmaze|all]
+#   PSM_DATA=/path/for/big/files bash scripts/fetch_preimages_hf.sh [cube|antmaze|pointmaze|scene|all]
 #
 # The repo is private, so authenticate first (`hf auth login`, or export HF_TOKEN=hf_...).
 # Re-running is cheap: the hub skips files already present with the same hash.
@@ -28,8 +28,9 @@ case "$WHICH" in
   cube)      NAMES=(cube-single-play) ;;
   antmaze)   NAMES=(antmaze-medium-navigate) ;;
   pointmaze) NAMES=(pointmaze-medium-navigate) ;;
+  scene)     NAMES=(scene-play) ;;
   all)       NAMES=(cube-single-play antmaze-medium-navigate pointmaze-medium-navigate) ;;
-  *) echo "unknown target: $WHICH (cube|antmaze|pointmaze|all)" >&2; exit 1 ;;
+  *) echo "unknown target: $WHICH (cube|antmaze|pointmaze|scene|all)" >&2; exit 1 ;;
 esac
 
 mkdir -p "$PSM_DATA"

@@ -2,9 +2,14 @@
 
 The defining property of this agent versus PSM: actions live in the LATENT space of a
 frozen behaviour flow (u_data = Stage-B preimages), so every action training or acting
-implies is a flow decode (in-support). Since the 08-05 redesign (PAPER/decisions.tex),
-policy identity lives in the task vector w and the TD backup bootstraps the AMORTIZED
-ACTOR's latent at s' — policy improvement in latent space, not a fixed-index family.
+implies is a flow decode (in-support).
+
+`_agent()` builds the DEFAULT agent, which since 2026-09-04 is the paper-strict affine
+LatentFlowPSM: `psi_form=affine policy_index=latent train_actor=false acting=gpi`. psi's
+index slot carries a prior draw u', the backup continues that same u' at s', and there is
+no actor. `_legacy_agent()` builds the pre-09-04 arm (free psi indexed by the task vector,
+with the amortized latent actor trained and deployed), which is now an explicit ablation;
+the tests that pin THAT arm's behaviour take it explicitly rather than riding on defaults.
 """
 import math
 import os
@@ -52,6 +57,16 @@ def _agent(**overrides):
                                _config(**overrides))
 
 
+# The pre-2026-09-04 arm, now a non-default ablation: a free psi whose index slot carries
+# the task vector w, with the amortized latent actor trained and deployed.
+LEGACY_ARM = {"psi_form": "free", "policy_index": "task_vector",
+              "train_actor": True, "acting": "actor"}
+
+
+def _legacy_agent(**overrides):
+    return _agent(**{**LEGACY_ARM, **overrides})
+
+
 def test_update_runs_and_is_finite():
     agent = _agent()
     agent, info = agent.update(_batch())
@@ -69,10 +84,23 @@ def test_flow_params_are_frozen():
         np.testing.assert_array_equal(np.asarray(b), np.asarray(a))
 
 
-def test_psi_slots_take_w_and_u():
-    """z-slot carries the task vector w (z_dim), action-slot the latent u (d_a);
-    both slots must be live inputs."""
+def test_psi_slots_take_the_policy_index_and_u():
+    """DEFAULT (policy_index=latent): the index slot carries a POLICY LATENT u' of action
+    width, the action slot the latent u; both must be live inputs."""
     agent = _agent()
+    obs = np.zeros((4, OBS), np.float32)
+    idx = np.full((4, ACT), 0.1, np.float32)
+    u = np.full((4, ACT), 0.5, np.float32)
+    out = np.asarray(agent.psi(obs, idx, u))
+    assert out.shape[-2:] == (4, 16)
+    assert not np.allclose(out, np.asarray(agent.psi(obs, -idx, u))), "index slot is dead"
+    assert not np.allclose(out, np.asarray(agent.psi(obs, idx, -u))), "u slot is dead"
+
+
+def test_legacy_psi_slots_take_w_and_u():
+    """policy_index=task_vector: the z-slot carries the task vector w (z_dim), the
+    action-slot the latent u (d_a); both must be live inputs."""
+    agent = _legacy_agent()
     obs = np.zeros((4, OBS), np.float32)
     w = np.full((4, 16), 0.1, np.float32)
     u = np.full((4, ACT), 0.5, np.float32)
@@ -117,12 +145,12 @@ def test_untrained_flow_requires_explicit_optin():
         assert "flow_ckpt_path" in str(e)
 
 
-def test_bootstrap_latent_comes_from_the_actor():
-    """The TD bootstrap action must be the ACTOR's latent at s' under task_w — policy
-    improvement in latent space. Bootstrapping a fixed index instead was the root cause
-    of the flat-value failure (decisions.tex 08-05): psi then faithfully represents a
-    family with no goal-reaching member."""
-    agent = _agent()
+def test_bootstrap_latent_comes_from_the_actor_on_the_legacy_arm():
+    """policy_index=task_vector: the TD bootstrap action is the ACTOR's latent at s' under
+    task_w — policy improvement in latent space. (The DEFAULT arm bootstraps the prior
+    index draw u' instead; that is pinned in test_psmflow_policy_index.py, and it is what
+    makes Prop. insample's C=1 apply.)"""
+    agent = _legacy_agent()
     batch = _batch()
     sampled = agent.sample_step_inputs(batch, jax.random.PRNGKey(0))
     # Perturbing actor params must change u_next — the target is actor-coupled...
@@ -145,6 +173,38 @@ def test_latent_draws_respect_the_typical_set_box():
     for name, u in (("u_data", sampled.u_data), ("u_next", sampled.u_next)):
         u = np.asarray(u)
         assert u.max() <= 1.0 + 1e-6 and u.min() >= -1.0 - 1e-6, name
+
+
+def test_index_clip_tightens_only_the_policy_index_draws():
+    """`index_clip` boxes the prior INDEX draws u' (psi's index slot, and the bootstrap
+    action slot under policy_index=latent) without touching the data latent u_data or the
+    GPI candidate actions, which stay on u_clip."""
+    agent = _agent(index_clip=0.5, u_clip=3.0)
+    batch = _batch()
+    batch["noise_preimage"] = np.full_like(batch["noise_preimage"], 2.0)
+    sampled = agent.sample_step_inputs(batch, jax.random.PRNGKey(3))
+    u_index = np.asarray(sampled.u_index)
+    assert np.abs(u_index).max() <= 0.5 + 1e-6, "u' escaped index_clip"
+    assert np.abs(u_index).max() > 0.5 - 1e-3, "index_clip is not the active bound"
+    np.testing.assert_array_equal(np.asarray(sampled.u_next), u_index)
+    np.testing.assert_array_equal(np.asarray(sampled.u_data), 2.0)
+    # The GPI candidates u are still drawn from the u_clip box.
+    agent, _ = agent.update(batch)
+    stars = np.stack([np.asarray(agent.gpi_select(_batch(i)["observations"][0],
+                                                  seed=jax.random.PRNGKey(i)))
+                      for i in range(8)])
+    assert np.abs(stars).max() <= 3.0 + 1e-6
+    assert np.abs(stars).max() > 0.5, "u_cand was boxed by index_clip"
+
+
+def test_index_clip_null_falls_back_to_u_clip():
+    a = _agent(u_clip=0.75)                       # index_clip left at its null default
+    b = _agent(u_clip=0.75, index_clip=0.75)
+    assert a.config["index_clip"] is None
+    sa = a.sample_step_inputs(_batch(), jax.random.PRNGKey(5))
+    sb = b.sample_step_inputs(_batch(), jax.random.PRNGKey(5))
+    np.testing.assert_array_equal(np.asarray(sa.u_index), np.asarray(sb.u_index))
+    assert np.abs(np.asarray(sa.u_index)).max() <= 0.75 + 1e-6
 
 
 @pytest.mark.skipif(not os.path.isdir(STAGE_A_CKPT),
@@ -280,8 +340,11 @@ def test_acts_through_the_real_eval_call_path():
 
 
 def test_gpi_select_returns_a_candidate_it_actually_scored():
-    """u* must be one of the sampled candidates, not an index into the wrong axis."""
-    agent = _agent()
+    """u* must be one of the sampled candidates, not an index into the wrong axis.
+
+    Pinned on the task-vector arm, where gpi_select scans candidates only. The default
+    arm's (u_i, u'_j) PAIR scan has its own test in test_psmflow_policy_index.py."""
+    agent = _legacy_agent()
     agent, _ = agent.update(_batch())
     ob = _batch(1)["observations"][0]
     u_star = np.asarray(agent.gpi_select(ob, seed=jax.random.PRNGKey(0)))

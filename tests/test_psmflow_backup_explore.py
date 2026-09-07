@@ -5,6 +5,12 @@ backup only ever evaluated psi at the actor's own latent, so psi was fit on the 
 latent space the actor already occupied and Q came out flat to ~1% of |Q| across the whole
 prior.
 
+SCOPE: this knob only exists on the `policy_index=task_vector` arm. Under the DEFAULT
+`policy_index=latent` the backup already continues the prior index draw u' at s' -- the
+bootstrap latent is a p0 draw by construction -- so `backup_explore_frac` is inert there and
+`agents/psmflow.py` says so. Every test below therefore builds the arm explicitly with
+`_legacy_agent()`.
+
 Two properties, both load-bearing:
   - at the default 0.0 the sampler is BIT-IDENTICAL to the pre-feature code, so every
     published run stays reproducible. This is why the extra keys are split inside the
@@ -16,7 +22,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tests.test_psmflow_agent import _agent, _batch
+from tests.test_psmflow_agent import _batch, _legacy_agent
 
 
 def _sampled(agent, seed=0):
@@ -25,7 +31,7 @@ def _sampled(agent, seed=0):
 
 def test_default_is_off_and_matches_actor_latent():
     """frac=0.0 -> u_next is exactly the actor's latent, no RNG stream shift."""
-    agent = _agent()
+    agent = _legacy_agent()
     assert agent.config["backup_explore_frac"] == 0.0
     s = _sampled(agent)
 
@@ -40,8 +46,8 @@ def test_default_is_off_and_matches_actor_latent():
 
 
 def test_enabled_changes_the_bootstrap_latents():
-    off = _sampled(_agent())
-    on = _sampled(_agent(backup_explore_frac=0.5))
+    off = _sampled(_legacy_agent())
+    on = _sampled(_legacy_agent(backup_explore_frac=0.5))
     assert not bool(jnp.array_equal(off.u_next, on.u_next))
     # Everything else the sampler draws is untouched: only the bootstrap arm differs.
     assert bool(jnp.array_equal(off.task_w, on.task_w))
@@ -52,8 +58,8 @@ def test_enabled_changes_the_bootstrap_latents():
 def test_replacement_rate_is_about_right():
     """~frac of rows differ from the actor's latent, and all stay inside the clip box."""
     frac = 0.5
-    agent = _agent(backup_explore_frac=frac)
-    base = _sampled(_agent())
+    agent = _legacy_agent(backup_explore_frac=frac)
+    base = _sampled(_legacy_agent())
     on = _sampled(agent)
     changed = ~np.all(np.isclose(np.asarray(base.u_next), np.asarray(on.u_next)), axis=-1)
     rate = changed.mean()
@@ -65,7 +71,7 @@ def test_replacement_rate_is_about_right():
 
 def test_update_still_runs_with_exploration_on():
     import math
-    agent = _agent(backup_explore_frac=0.3)
+    agent = _legacy_agent(backup_explore_frac=0.3)
     agent2, info = agent.update(_batch())
     for k in ("psm_loss", "orth_loss", "actor_loss"):
         assert math.isfinite(float(info[k])), (k, info[k])
@@ -81,7 +87,7 @@ def test_explore_keys_are_folded_not_split_from_a_consumed_key():
     `test_default_is_off_and_matches_actor_latent` pins; what is pinned here is that the
     ENABLED branch no longer derives its draws from the consumed key.
     """
-    agent = _agent(backup_explore_frac=1.0)
+    agent = _legacy_agent(backup_explore_frac=1.0)
     batch = _batch()
     B, adim = batch["observations"].shape[0], agent.config["action_dim"]
     rng = jax.random.PRNGKey(0)

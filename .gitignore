@@ -6,6 +6,7 @@ dist/
 .DS_Store
 .idea/
 .ruff_cache/
+.claude/
 
 # Virtual environments
 # `.venv` is a SYMLINK to /data-local here, and a trailing-slash pattern never matches a

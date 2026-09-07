@@ -1,12 +1,13 @@
-"""The amortized latent actor (flowBC recipe over latents) — load-bearing since 08-05.
+"""The amortized latent actor (flowBC recipe over latents) — a NON-DEFAULT arm since 09-04.
 
-The measure backup bootstraps the actor's latent at s' (decisions.tex 08-05), so the
-actor is not an optional rung. Pins:
-  - the actor and its vf train on EVERY update, with finite losses;
+The primary agent (`train_actor=false acting=gpi`) has no actor at all, so every test here
+builds the arm explicitly via `_legacy_agent()` (`train_actor=true acting=actor`, task-vector
+index). The arm is retained deliberately: it is the DSRL-style comparator and the substrate
+for the planned DSRL-NA distillation of the GPI argmax into an amortized head. Pins:
+  - the actor and its vf train on EVERY update of that arm, with finite losses;
   - actor gradients do not leak into psi: an actor-only config change (bc_coeff) must
     leave the psi one-step delta byte-identical (sampling is unaffected by it);
-  - acting="actor" (the default) emits a latent inside the u_clip box and decodes to a
-    valid action.
+  - acting="actor" emits a latent inside the u_clip box and decodes to a valid action.
 """
 import math
 
@@ -14,7 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tests.test_psmflow_agent import _agent, _batch
+from tests.test_psmflow_agent import _batch, _legacy_agent
 
 
 def _tree_equal(a, b):
@@ -23,7 +24,7 @@ def _tree_equal(a, b):
 
 
 def test_actor_trains_every_update():
-    agent = _agent()
+    agent = _legacy_agent()
     agent2, info = agent.update(_batch())
     for k in ("actor_loss", "actor_q", "actor_bc_flow_loss", "actor_bc_error"):
         assert math.isfinite(float(info[k])), (k, info[k])
@@ -35,8 +36,8 @@ def test_actor_trains_every_update():
 def test_actor_gradients_do_not_leak_into_psi():
     """Same init, same batch, different bc_coeff (an actor-loss-only knob): the psi and
     phi one-step deltas must be byte-identical, the actor's must differ."""
-    a1 = _agent()
-    a2 = _agent(actor=dict(hidden_dim=512, hidden_layers=2, embedding_layers=2,
+    a1 = _legacy_agent()
+    a2 = _legacy_agent(actor=dict(hidden_dim=512, hidden_layers=2, embedding_layers=2,
                            vf_hidden_dim=512, vf_hidden_layers=4, flow_steps=10,
                            bc_coeff=7.0))
     u1, _ = a1.update(_batch())
@@ -47,7 +48,7 @@ def test_actor_gradients_do_not_leak_into_psi():
 
 
 def test_acting_actor_decodes_a_clipped_latent():
-    agent = _agent()
+    agent = _legacy_agent()
     agent = agent.replace(task_z=jnp.ones_like(agent.task_z))
     obs = jnp.zeros((6,), jnp.float32)
     a = np.asarray(agent.sample_actions(obs, seed=jax.random.PRNGKey(0)))

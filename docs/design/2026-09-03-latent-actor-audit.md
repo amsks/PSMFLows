@@ -17,9 +17,9 @@ the prior-Q distribution its own critic defines. PSMFlow-with-actor is, to measu
 behaviour cloning with an 8% perturbation. Two real bugs found, both latent (not hit by any
 shipped config).
 
-Probe scripts and JSON: `/tmp/claude-10025/-mnt-home-amohan-git-Austin-PSMFLows/28ad4e4b-a7a5-4c94-90a3-9708af3c15cc/scratchpad/`
-(`probe1_gradpath.json`, `probe2_trained_antmaze.json`, `probe3_utilization.json`,
-`probe4_cube500.json`, `probe5_udata_box.json`).
+Probe scripts and JSON (`probe1_gradpath.json`, `probe2_trained_antmaze.json`,
+`probe3_utilization.json`, `probe4_cube500.json`, `probe5_udata_box.json`) were written to
+scratch and are not retained; the numbers below are the record.
 Trained checkpoint used: `/mnt/home/amohan/psm-data/exp/PSMFLows/psmflow_antmaze_mix_a26p5_20260902/sd000_s_2491447.0.20260902_174348`
 @500000 (`acting=actor`, `train_actor=true`, `policy_index=task_vector`, `u_clip=3.0`,
 `bc_coeff=1.0`, `action_critic.enabled=false` — i.e. the shipped "PSMFlow (zero-shot)" arm).

@@ -10,7 +10,7 @@ any code change, any run.
 
 ## 0. What changed relative to the research note
 
-Working the proofs surfaced three corrections. All were user-approved on 2026-07-23.
+Working the proofs surfaced three corrections. All three were adopted on 2026-07-23.
 
 ### F1 — "support conversion" cannot be a support statement
 
@@ -80,7 +80,7 @@ propositions.
   \gamma^{t-1}\mathbf 1_{\{s_t \in X\}}]$, matching FB and matching the implemented loss,
   with a footnote on the other variant.
 
-## 1. Decisions taken (user-approved)
+## 1. Decisions taken
 
 | Decision | Choice |
 |---|---|

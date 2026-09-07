@@ -1,15 +1,15 @@
-"""E3 Arm B: psi indexed by a POLICY LATENT, as the write-up's Sec. PSMFlows states it.
+"""psi indexed by a POLICY LATENT -- the DEFAULT since 2026-09-04, as the write-up states it.
 
-The shipped agent trains psi(s, w, u): the index slot carries the task vector, and the TD
-backup bootstraps the amortized actor's latent at s'. The write-up proves things about
-psi(s, u, u') -- a fresh u' ~ p0 per batch element indexes the policy, the backup
-continues that SAME u' at s' (so the bootstrap action G(s', u') is a p0 decode, which is
-Prop. insample's hypothesis and the only way its C=1 applies), and w enters only through
-the readout Q = psi^T w.
+The write-up proves things about psi(s, u, u'): a fresh u' ~ p0 per batch element indexes
+the policy, the backup continues that SAME u' at s' (so the bootstrap action G(s', u') is a
+p0 decode, which is Prop. insample's hypothesis and the only way its C=1 applies), and w
+enters only through the readout Q = psi^T w. This is what `agent=psmflow` now builds with no
+flags. The older `policy_index=task_vector` arm -- psi(s, w, u), backup on the amortized
+actor's latent -- is reachable as an explicit ablation and is pinned here too.
 
 What is pinned here:
-  - the default path is untouched, bit for bit (published runs stay reproducible);
-  - psi's index slot really changes width, from z_dim to d_a;
+  - the DEFAULT config is the paper-strict arm (affine psi, latent index, no actor, GPI);
+  - psi's index slot really changes width between the arms, d_a vs z_dim;
   - the backup index equals the online index -- psibar(s', u', u'), not the actor's latent;
   - a gradient step runs and is finite with the actor branch removed entirely;
   - acting searches (u_i, u'_j) pairs and returns a latent inside the clip box;
@@ -24,19 +24,33 @@ import numpy as np
 
 import pytest
 
-from tests.test_psmflow_agent import ACT, _agent, _batch
+from tests.test_psmflow_agent import ACT, _agent, _batch, _legacy_agent
 
 
 def _armb(**overrides):
     return _agent(policy_index="latent", train_actor=False, acting="gpi", **overrides)
 
 
-def test_default_config_is_the_shipped_agent():
+def test_default_config_is_the_paper_strict_agent():
+    """No flags => the write-up's Sec. PSMFlows agent: affine psi, latent index, no actor,
+    GPI acting. This is the configuration that measured cube 0.532 / 0.620."""
     agent = _agent()
+    assert agent.config["psi_form"] == "affine"
+    assert agent.config["policy_index"] == "latent"
+    assert agent.config["train_actor"] is False
+    assert agent.config["acting"] == "gpi"
+    s = agent.sample_step_inputs(_batch(), jax.random.PRNGKey(0))
+    assert s.u_index is not None, "the default path indexes psi by a policy latent"
+    assert agent._index(s) is s.u_index
+
+
+def test_task_vector_index_is_still_reachable():
+    """policy_index=task_vector (the pre-09-04 arm): no index draw, psi indexed by w."""
+    agent = _legacy_agent()
     assert agent.config["policy_index"] == "task_vector"
     assert agent.config["train_actor"] is True
     s = agent.sample_step_inputs(_batch(), jax.random.PRNGKey(0))
-    assert s.u_index is None, "the index draw must not exist on the default path"
+    assert s.u_index is None, "the task-vector arm must not draw a policy index"
     assert agent._index(s) is s.task_w
 
 
@@ -58,8 +72,8 @@ def test_backup_continues_the_same_index():
     agent = _armb()
     s = agent.sample_step_inputs(_batch(), jax.random.PRNGKey(0))
     assert bool(jnp.array_equal(s.u_next, s.u_index))
-    # ... and it is NOT the actor's latent, which is what the shipped backup uses.
-    base = _agent().sample_step_inputs(_batch(), jax.random.PRNGKey(0))
+    # ... and it is NOT the actor's latent, which is what the task-vector backup uses.
+    base = _legacy_agent().sample_step_inputs(_batch(), jax.random.PRNGKey(0))
     assert not bool(jnp.array_equal(s.u_next, base.u_next))
 
 

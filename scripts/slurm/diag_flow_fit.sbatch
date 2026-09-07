@@ -13,8 +13,11 @@
 # line (the decode error of the exact inverse, i.e. the best any latent could do).
 # Everything else samples u ~ N(0, I) and needs the decoder alone.
 #SBATCH --job-name=flowfit
-#SBATCH --output=%x-%j.out
-#SBATCH --error=%x-%j.out
+# SLURM does NOT expand environment variables in #SBATCH directives, so this is the
+# literal $PSM_DATA/logs/slurm on KISSKI rather than the variable. A relative path here
+# lands the log in the submit CWD -- i.e. the repo root. Launchers override both flags.
+#SBATCH --output=/mnt/home/amohan/psm-data/logs/slurm/%x-%j.out
+#SBATCH --error=/mnt/home/amohan/psm-data/logs/slurm/%x-%j.err
 #SBATCH --time=01:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
@@ -23,7 +26,7 @@ set -euo pipefail
 
 PSM_REPO="${PSM_REPO:-/mnt/home/amohan/git/Austin/PSMFLows}"
 PSM_DATA="${PSM_DATA:-/mnt/home/amohan/psm-data}"
-: "${ENVKEY:?ENVKEY=cube|antmaze|pointmaze required}"
+: "${ENVKEY:?ENVKEY=cube|antmaze|pointmaze|scene required}"
 ANCHORS="${ANCHORS:-2048}"
 SAMPLES="${SAMPLES:-512}"
 KMAX="${KMAX:-512}"
@@ -34,6 +37,7 @@ case "$ENVKEY" in
   cube)      ENV_NAME=cube-single-play-singletask-v0;                FLOW=cube-single-play ;;
   antmaze)   ENV_NAME=antmaze-medium-navigate-singletask-v0;         FLOW=antmaze-medium-navigate ;;
   pointmaze) ENV_NAME=pointmaze-medium-navigate-singletask-task1-v0; FLOW=pointmaze-medium-navigate ;;
+  scene)     ENV_NAME=scene-play-singletask-v0;                     FLOW=scene-play ;;
   *) echo "unknown ENVKEY: $ENVKEY" >&2; exit 1 ;;
 esac
 

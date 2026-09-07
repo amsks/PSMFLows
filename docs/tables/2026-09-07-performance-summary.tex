@@ -1,0 +1,56 @@
+% Standalone: ~/bin/tectonic docs/tables/2026-09-07-performance-summary.tex
+\documentclass[10pt]{article}
+\usepackage[a4paper,landscape,margin=1.4cm]{geometry}
+\usepackage{booktabs,xcolor}
+\usepackage[T1]{fontenc}
+\renewcommand{\arraystretch}{1.15}
+\newcommand{\nr}{\textcolor{gray}{n.r.}}
+\begin{document}
+\pagestyle{empty}
+\begin{center}{\large\bfseries Success rate (\%), 2026-09-07}\end{center}
+
+\noindent\textbf{A. Ours} \hfill {\small 500 episodes, 3 seeds, mean $\pm$ 95\% CI across seeds}
+\begin{center}\small
+\begin{tabular}{l r r r r r r}
+\toprule
+ & BC control & FB (local) & \multicolumn{2}{c}{LatentFlowPSM, GPI} & Best single eval & DSRL-NA actor \\
+\cmidrule(lr){4-5}
+env & & & all ckpts & 300k--500k & seed @ ckpt & 300k--500k \\
+\midrule
+cube-single-play, task 2   & 7.2  & 0.0 & 36.7 $\pm$ 20.5 & 41.5 $\pm$ 21.4 & \textbf{70.4} (sd0 @ 350k) & 30.7 $\pm$ 37.2 \\
+cube-single-play, 5-task avg & 11.1 & \nr & --- & 28.4 & 83.2 (task 1) & \nr \\
+antmaze-medium-navigate, task 1 ($\gamma$=0.99) & 7.2 & \nr & 29.4 $\pm$ 43.9 & 25.2 $\pm$ 38.9 & \textbf{62.4} (sd2 @ 250k) & \nr \\
+pointmaze-medium-navigate, task 1 & 0.2 & \nr & 0.0 & 0.0 & 0.0 & \nr \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\vspace{8pt}
+\noindent\textbf{B. Zero-shot, TD-JEPA Table 1} \hfill {\small 5-task mean, 10 seeds, $\pm$ SE}
+\begin{center}\small
+\begin{tabular}{l r r r r r r}
+\toprule
+env & Laplacian & HILP & FB & RLDP & BYOL-$\gamma$ & TD-JEPA \\
+\midrule
+antmaze-medium-navigate & 50.0 $\pm$ 4.9 & \textbf{83.6} $\pm$ 2.6 & 73.0 $\pm$ 2.7 & 74.6 $\pm$ 4.2 & 51.4 $\pm$ 1.6 & 70.4 $\pm$ 3.7 \\
+cube-single-play        & 15.1 $\pm$ 1.5 & 74.2 $\pm$ 3.5 & 49.6 $\pm$ 3.8 & 19.8 $\pm$ 2.4 & \textbf{79.4} $\pm$ 2.8 & 34.2 $\pm$ 2.9 \\
+pointmaze-medium-navigate & \nr & \nr & \nr & \nr & \nr & \nr \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\vspace{8pt}
+\noindent\textbf{C. Per-task offline RL, FQL} \hfill {\small 8 seeds, $\pm$ SD}
+\begin{center}\small
+\begin{tabular}{l r r r r}
+\toprule
+env & BC (5-task) & FQL (5-task) & BC (default task) & FQL (default task) \\
+\midrule
+cube-single-play        & 5 $\pm$ 1  & \textbf{96} $\pm$ 1 & 3 $\pm$ 1 & 97 $\pm$ 2 \\
+antmaze-medium-navigate & \nr & \nr & \nr & \nr \\
+antmaze-large-navigate  & 11 $\pm$ 1 & 79 $\pm$ 3 & 0 $\pm$ 0 & 80 $\pm$ 8 \\
+pointmaze-medium-navigate & \nr & \nr & \nr & \nr \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{document}
