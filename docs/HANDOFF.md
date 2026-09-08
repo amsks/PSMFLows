@@ -224,7 +224,39 @@ squashed-but-unscaled space, so our entropy target is box-invariant and comparab
 
 ---
 
-### 7. Next
+### 7. RUNNING: the stability campaign -- oscillation is the blocker, not ranking
+
+`docs/design/2026-09-08-oscillation-stability.md` (pre-registered). Every cube seed already
+reaches 0.6-0.7 and none of them holds it: per-seed maxima **0.704 / 0.620 / 0.596**, mean
+of maxima **0.640**, against a pooled 300-500k figure of **0.415**. Seed 0 traverses
+0.532 -> 0.286 -> 0.704 -> 0.282 -> 0.272 -> 0.086 at 500 episodes, where sampling noise is
++/-0.04. The capability is present; the consistency is not.
+
+Correlating every logged training metric against 500-episode success over 28
+(seed, checkpoint) pairs: **`orth_offdiag` is the strongest predictor at -0.375** (tighter
+orthonormality, better policy) and **`psm_loss` is +0.079, i.e. nothing.** Standing warning:
+on this method loss diagnostics are not a proxy for policy quality -- the same lesson
+`psi_bound` taught.
+
+The ortho settled-negative does NOT cover this. It was measured against loss-growth rate at
+gamma=0.995; `ortho_coef=1e4/1e5`, `lr_sf=1e-5` and `tau=1e-3` have never been scored on
+cube success at gamma=0.98.
+
+Four arms, 3 seeds each, checkpoints every 50k, control = existing `affine_strict_cube`:
+`tau1e3_cube`, `oc1e4_cube`, `lrsf1e5_cube`, `oc1e4_lrsf1e5_cube`.
+
+**Scored on stability, not the mean** -- per-seed swing and mean step over the 300-500k
+ladder, reported beside the pooled mean. An arm at 0.45 flat beats an arm averaging 0.70
+and 0.09. Control swing to beat: 0.618 / 0.222 / 0.254.
+
+Also corrected here: at a good checkpoint the critic is worth ~8x over random
+(argmax 0.704, mean 0.734, small_ball 0.670 vs every critic-free rule at ~0.08). The
+"critic picks worse than random" result in 8.4 came from the MC probe's held-fixed-latent
+regime, which is not what GPI deploys.
+
+---
+
+### 8. Next
 
 1. **Read the faithful-DSRL result against BC.** If it does not clear 0.072 the problem is
    upstream of steering.
