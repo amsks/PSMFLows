@@ -187,6 +187,36 @@ margin.
 **Read it against the BC control (0.072), not against actor-free GPI.** The question is
 whether steering works at all on this substrate, not whether it beats GPI.
 
+#### RESULT (landed same night, 500 episodes)
+
+| arm | sd0 250k/500k | sd1 250k/500k | sd2 250k/500k | pooled |
+|---|---|---|---|---|
+| u_clip=1.5 | 0.100 / 0.018 | 0.174 / 0.298 | 0.162 / 0.064 | **0.136 +/- 0.079** |
+| u_clip=3.0 | 0.102 / 0.116 | 0.250 / 0.026 | 0.274 / 0.076 | **0.141 +/- 0.079** |
+
+against BC **0.072**, `gpi_distill` **0.307 +/- 0.091**, actor-free GPI **0.415 +/- 0.083**.
+
+**Fixing the backup did not rescue steering.** The structural criticism was right -- under
+policy_index=latent the actor's action never enters the Bellman target, so `dsrl_sac` was
+not SAC -- but making the latent MDP genuinely on-policy yields ~0.14, *below* the
+mislabelled `gpi_distill` and a third of actor-free GPI, with a CI whose lower edge is
+under the BC control. The backup was not the binding constraint.
+
+**No box effect.** The in-loop 50-episode read suggested u_clip=1.5 beat 3.0 by 2.2x
+(0.184 vs 0.085) and that was reported as empirical support for DSRL's offline
+b_W in [0.5, 1.5]. It does not survive 500 episodes: 0.136 vs 0.141, indistinguishable.
+**Recorded so the claim is not revived from the in-loop curves** -- and as one more instance
+of why the 50-episode evals are not reportable.
+
+**Training past 250k hurts this arm.** u_clip=3.0 pools 0.209 at 250k against 0.073 at
+500k; per-seed swings are 0.250 -> 0.026 and 0.100 -> 0.018. n=3, but it matches the
+instability seen everywhere else.
+
+**Interpretation.** Every thread this session converges on the same place: the critic
+cannot rank (Spearman 0.06-0.16, negative 10th percentile) while 79% of decoded prior
+candidates succeed. An actor climbing that critic has nothing to climb, on-policy backup or
+not. The ranking objective, not the backup and not the box, is the binding constraint.
+
 Verified directly from `ajwagen/dsrl` configs: `target_ent: 0.0` is held constant across
 `action_magnitude` 1.0 / 1.5 / 2.5, so it is NOT tied to a box size (an earlier claim in
 this record that it was b=1.5-specific is withdrawn). Our log-prob is computed in the
