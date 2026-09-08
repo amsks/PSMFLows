@@ -120,8 +120,21 @@ the 300-500k ladder**:
 - `step` = mean |difference| between consecutive checkpoints, per seed
 - reported beside the pooled mean, never instead of it
 
-Control values to beat (sd0 / sd1 / sd2, 300-500k): swing **0.618 / 0.222 / 0.254**,
-pooled mean 0.415.
+Scored by `tools/stability_ladder.py`. Control values to beat, `affine_strict_cube`
+300-500k (sd0 / sd1 / sd2):
+
+| seed | mean | swing | step | min | max |
+|---|---|---|---|---|---|
+| sd0 | 0.326 | **0.618** | 0.259 | 0.086 | 0.704 |
+| sd1 | 0.498 | **0.222** | 0.107 | 0.346 | 0.568 |
+| sd2 | 0.422 | **0.272** | 0.124 | 0.292 | 0.564 |
+| arm | **0.415** | **0.371** | 0.163 | | |
+
+The arm mean reproduces the published 0.415 headline exactly, which is the check that the
+ladder is being assembled from the right evals. Three filters were needed to get there,
+each of which produced a wrong table first: acting-rule overrides (a `gpi_num_u` cell is a
+different policy on the same weights), other-task evals (`..._task3_sd0.json` shares the
+run and epoch and carries no CLI override, only a different `env`), and smoke reports.
 
 ## 7. Pre-registered predictions
 

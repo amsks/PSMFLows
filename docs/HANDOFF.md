@@ -226,7 +226,7 @@ squashed-but-unscaled space, so our entropy target is box-invariant and comparab
 
 ### 7. RUNNING: the stability campaign -- oscillation is the blocker, not ranking
 
-`docs/design/2026-09-08-oscillation-stability.md` (pre-registered). Every cube seed already
+`docs/design/2026-09-08-oscillation-stability.md` (pre-registered); scored by `tools/stability_ladder.py`. Every cube seed already
 reaches 0.6-0.7 and none of them holds it: per-seed maxima **0.704 / 0.620 / 0.596**, mean
 of maxima **0.640**, against a pooled 300-500k figure of **0.415**. Seed 0 traverses
 0.532 -> 0.286 -> 0.704 -> 0.282 -> 0.272 -> 0.086 at 500 episodes, where sampling noise is
