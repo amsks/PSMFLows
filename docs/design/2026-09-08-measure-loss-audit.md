@@ -693,3 +693,140 @@ i.e. FB's exact arrangement, and `psi_bound`/`ortho_mode=relative` kept as belt-
 rather than as the fix; (4) `pessimism_penalty: 0.0` in `configs/agent/psmflow.yaml`, with
 `ortho_mode: relative` as a cheap second line of defence and `discount` left where the
 launcher puts it.**
+
+---
+
+### 8.1 Verdict, filled 2026-09-08
+
+All nine arms (2492186-2492197) completed. Growth refitted on a **common 10k-150k window**
+so the arms (150k steps) and the pre-existing baselines (500k) are comparable; the §7
+numbers were fit over 50k-500k and must not be read against these.
+`$PSM_DATA/logs/audit_measure_loss/growth_arms.json`, `growth_baseline_10_150.json`.
+
+antmaze `medium-navigate`, gamma=0.995. Higher steps/decade = slower divergence.
+
+| arm | kappa_measure | steps/decade | log10 |Q| growth |
+|---|---|---|---|
+| `mla_g995_pess10` | 1.0 | 1.5e4 | 4.15 |
+| `affine_strict_antmaze_g995` (baseline) | 0.5 | 5.18 / 4.25 / 3.84e4 | 1.25-1.78 |
+| `mla_g995_pess025` | 0.25 | 8.0e4 | 0.73 |
+| `mla_g995_pess0` | 0.0 | 1.08e5 / 1.95e5 | 0.45 / 0.33 |
+
+**Q1 — yes, and the lever is the exact-min ensemble target.** The rate is monotone in
+`pessimism_penalty` across four dose levels spanning 13x, against a baseline seed scatter of
+35%. H-PESS as pre-registered.
+
+**Q2 — delay only, confirmed.** `orel` measured 5.77 / 4.84 / 4.25e4 against the baseline's
+5.18 / 4.25 / 3.84e4: within scatter, seed for seed. `oc1e4` 4.53e4 and `oc1e5` 5.05e4 are
+the same story with a fixed coefficient. Orthonormality has no psi gradient and cannot fix a
+psi-scale instability.
+
+**Q3 and Q4 — the pre-registered structural fix is REFUTED on cube, and no default changes.**
+`pessimism_penalty=0.0` with `actor_pessimism_penalty=0.5` (FB's arrangement; this is
+already expressible, see 8.2) was run on both envs at 500 episodes, 3 seeds,
+pooled 300k-500k:
+
+| env | kappa_measure=0 | kappa_measure=0.5 |
+|---|---|---|
+| cube-single-play, gamma=0.98 | **0.136** | 0.415 +/- 0.083 |
+| antmaze-medium-navigate, gamma=0.99 | **0.334** | 0.252 +/- 0.100 |
+
+Cube loses two thirds. Antmaze's gain is inside overlapping CIs. Both are strongly bimodal
+across seeds -- cube {0.011, 0.369, 0.029}, antmaze {0.280, 0.139, 0.584} -- so the pooled
+means are three-sample statistics on a bimodal population, not estimates of a common mean.
+`configs/agent/psmflow.yaml` therefore keeps `pessimism_penalty: 0.5`.
+
+Two predictions in §6 did not survive. `tau=1e-3` measured 1.01e5 steps/decade, 2.3x slower
+than baseline, against a pre-registration of "fixes nothing"; `freepsi` measured 7.4e4, 1.7x
+slower, against "the affine head is not the scale mechanism". Both are single-seed against
+35% baseline scatter -- leads for a seeded arm, not results.
+
+### 8.2 Two corrections to the note above this line
+
+**The "no config key expresses pessimism on Q only" gap in §5.2 is stale.**
+`pessimism_penalty` (measure TD target) and `actor_pessimism_penalty` (acting and the actor's
+Q) have been separate keys throughout. The arrangement the note asks for is
+`agent.pessimism_penalty=0.0 agent.actor_pessimism_penalty=0.5`, which is exactly what
+`scripts/slurm/launch_measure_pess0.sh` ran on 2026-09-07. No code was needed.
+
+**Growth rate is not a proxy for policy health, and `psi_bound` is the counterexample.**
+`pbound` has by far the best growth number measured anywhere in this note -- 4.86e5 / 5.70e5
+/ 4.84e5 steps/decade, 11x the baseline, with |Q| growth held to 0.73-0.75 decades -- and
+the worst policy. Its early (50k-250k) success is 0.124 / 0.096 / 0.256 against the
+baseline's 0.288 / 0.292 / 0.344, and only one seed of three keeps a live policy late
+(0.320, against 0.020 / 0.004). `both` is worse still: early 0.208 / 0.072 / 0.296, late
+0.004 / 0.000 / 0.080. Bounding the measure buys stability by flattening the very
+differences acting has to rank. **`psi_bound` should be read as settled negative** -- it is
+the arm whose growth number most invites revival and whose evals most clearly forbid it.
+
+### 8.3 What the ensemble spread actually measures
+
+`tools/diag_ensemble_disagreement.py`, 8 checkpoints spanning both envs and all three
+discounts (`$PSM_DATA/logs/diag_disagreement/`). Relative disagreement on prior draws vs on
+in-support latents, ratio prior/in-support:
+
+| checkpoint | prior | in-support | ratio |
+|---|---|---|---|
+| cube g98 sd0 100k / 350k | 0.0364 / 0.0345 | 0.0367 / 0.0347 | 0.99 / 0.99 |
+| antmaze g98 sd0 100k / 500k | 0.0472 / 0.0457 | 0.0476 / 0.0458 | 0.99 / 1.00 |
+| antmaze g995 sd0 50k / 100k | 0.0150 / 0.0131 | 0.0151 / 0.0133 | 0.99 / 0.98 |
+| antmaze g995 sd2 100k | 0.0137 | 0.0139 | 0.99 |
+| antmaze g99 mpess0 sd2 300k | 0.0751 | 0.0747 | 1.01 |
+
+The ratio is 1.00 everywhere. **The critic ensemble's disagreement carries no information
+about whether a latent is in the data support.** `kappa * spread` is therefore not a
+support-aware penalty at all; it is a near-uniform one-signed shift, which is precisely the
+mechanism §3 derives. This is independent confirmation of H-PESS that does not go through
+the growth fit, and it also explains why removing the term costs less than a support-aware
+penalty would -- it was never buying support-awareness. Whatever cube gets from kappa=0.5 is
+conservatism in the target, not in-support discipline.
+
+### 8.4 The dead seeds are a SELECTION failure, not a critic-scale failure
+
+`tools/diag_gpi_selection.py` on cube `mpess0` @350k, three seeds, plus the healthy
+kappa=0.5 seed (`$PSM_DATA/logs/diag_deadseeds/`). `spearman` is rank correlation between
+the critic's Q over the candidate roster and Monte-Carlo returns from those same candidates.
+
+| run | rollout succ | q_spread_rel | unc@best | MC succ of pool | spearman | spearman p10 |
+|---|---|---|---|---|---|---|
+| `affine_strict_cube` sd0 (kappa=0.5) | 0.800 | 0.704 | 0.017 | 0.791 | 0.147 | -0.276 |
+| `mpess0` sd0 (dead) | 0.000 | 19.90 | 1.485 | 0.791 | 0.059 | -0.168 |
+| `mpess0` sd1 (live) | 0.650 | 18.26 | 1.336 | 0.791 | 0.164 | -0.050 |
+| `mpess0` sd2 (dead) | 0.050 | 6.09 | 0.449 | 0.791 | -0.020 | -0.251 |
+
+Two things follow. **The candidate pool is not the problem**: 79% of the decoded prior
+candidates succeed under MC rollout, identically in every seed, so the frozen flow offers a
+good action at essentially every state. **The critic cannot rank them**: Spearman is
+0.06-0.16 in every arm including the healthy one, and the 10th percentile over states is
+negative everywhere -- on a tenth of states the ranking is inverted.
+
+The eval-time sweep on the dead `mpess0` sd0 @350k confirms this is decisive. Same frozen
+checkpoint, only the acting flag changes, 500 episodes:
+
+| acting | success |
+|---|---|
+| base (`gpi_num_u=64`, argmax) | 0.002 |
+| `gpi_select=mean` | 0.000 |
+| `u_clip=1.5` | 0.006 |
+| **`gpi_num_u=8`** | **0.140** |
+
+Cutting the roster from 64 to 8 is a 70x recovery on a frozen checkpoint. With a Spearman of
+0.06 the argmax over 64 draws is close to a max over noise, so it reliably selects the
+candidate with the largest positive Q error; at K=8 the selection bias is much smaller and
+acting falls back toward sampling the 79%-successful pool. `u_clip` and dropping acting
+pessimism do nothing, so this is the size of the argmax and not the radius of the box or the
+conservatism of the score.
+
+This does not contradict the 2026-09-07 finding that acting-side knobs are a no-op: that was
+measured against the gamma=0.995 *divergence*. Dead seeds at gamma=0.98-0.99 are a different
+failure, and for that one an acting-side knob is the largest single effect on record.
+
+### 8.5 What should happen next
+
+1. `gpi_num_u` is the cheapest open lever and has never been swept. K in {4, 8, 16, 32, 64}
+   at eval on existing checkpoints, both envs, live and dead seeds. Costs no training.
+2. The kappa=0.25 arm on cube 0.98 and antmaze 0.99, 3 seeds, 500k. It is the only setting
+   with a rate benefit (8.0e4, 1.8x) that has not been shown to cost cube its performance.
+3. Whether the low Spearman is fixable at all is now the central question for the method.
+   `index_agg=expectile` exists precisely to avoid an argmax over samples of a learned
+   function and has never been evaluated at 500 episodes against this failure.
