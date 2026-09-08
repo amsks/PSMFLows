@@ -161,6 +161,88 @@ Recorded before any arm lands, so the verdict cannot be shopped.
    Bellman-trained selection head from `2026-09-08-measure-loss-audit.md` 8.5, not more
    hyperparameters.
 
-## 8. Verdict
+## 8. Verdict, filled 2026-09-08 (INTERIM -- 2 of 12 runs still training)
 
-To be filled in when the arms land.
+**Every arm failed. The two that look like they worked, did not.**
+
+In-loop 50-episode ladders, 300-500k, `tools/stability_ladder.py`. The control is scored on
+the SAME in-loop basis for comparability (its e500 ladder gives 0.415 / 0.371, so the
+in-loop proxy is sound):
+
+| arm | mean | swing | step | swing / mean |
+|---|---|---|---|---|
+| control `affine_strict_cube` | **0.432** | 0.353 | 0.135 | **0.82** |
+| `tau1e3_cube` | 0.119 | **0.193** | 0.062 | 1.62 |
+| `oc1e4_cube` | 0.296 | 0.533 | 0.213 | 1.80 |
+| `lrsf1e5_cube` | 0.104 | **0.173** | 0.068 | 1.66 |
+| `oc1e4_lrsf1e5_cube` | 0.256 | 0.240 | 0.151 | 0.94 (2 seeds, 1 partial) |
+
+`tau1e3` and `lrsf1e5` roughly halve the swing -- and drop the mean 4x, from 0.432 to
+0.119 and 0.104. **They do not hold a good policy steady; they sit near the floor, where a
+small swing is free.** Normalising by the mean makes it unambiguous: every completed arm is
+*relatively more* unstable than the control. Slowing the optimisation did not damp the
+oscillation, it just trained worse. `oc1e4` is worse on both axes.
+
+### Against section 7's pre-registration
+
+| prediction | outcome |
+|---|---|
+| 1. `tau` cuts swing, mean roughly unchanged | **half right** -- swing fell as predicted, the mean collapsed, which was not predicted and is what matters |
+| 2. `ortho_coef=1e4` is the high-variance bet; close the line if success does not improve when `orth_offdiag` drops | **failed on both axes -- the ortho line is CLOSED.** The r=-0.375 correlation was confounded, as flagged: it extrapolated a 1.4% observed range to a 10x coefficient change |
+| 3. `lr_sf=1e-5` lowers swing and mean, ladder under control | **exactly right**, including the named failure mode |
+| 4. the combination is not additive | consistent so far (2 seeds) |
+| 5. **expected failure: every arm oscillates at the control amplitude -> the instability is intrinsic to the objective** | **this is what happened** |
+
+### What it means
+
+No optimisation-rate knob damps the oscillation at a useful level. Combined with 3 --
+`psm_loss` correlates +0.079 with success -- the conclusion is that **the instability is in
+the contrastive measure objective, not in any learning rate, target rate or regulariser
+weight.** Per section 7 prediction 5, the next move is the Bellman-trained selection head,
+not more hyperparameters. See section 9.
+
+### Caveats
+
+- **In-loop 50-episode ladders**, which swing +/-0.15. The 4x mean collapse is far outside
+  that, so the direction is not in doubt, but no number here is reportable. eval500 on each
+  checkpoint is required before any of this is quoted.
+- `oc1e4_lrsf1e5` sd1 is partial (2 points) and sd2 is still training.
+
+---
+
+## 9. Where this leads: train the selection head by Bellman backup
+
+The chain, stated so the reasoning can be attacked rather than re-derived:
+
+1. Slowing the optimiser does not help (section 8) -- so the instability is not in the
+   optimisation rates.
+2. `psm_loss` does not predict success, r=+0.079 (section 3) -- so the objective being
+   minimised is not the objective we care about.
+3. The critic ranks weakly (Spearman ~0.15, `2026-09-08-measure-loss-audit.md` 8.4) and it
+   is trained CONTRASTIVELY.
+
+Contrastive training constrains the ANGLE between representations and leaves norm growth
+off-support unconstrained. That is precisely a scorer which retrieves well and ranks badly.
+"Good Rankers, Bad Objectives" (arXiv:2607.27422) isolates it on this exact architecture --
+a bilinear contrastive critic scoring best-of-K -- and finds, **parameter-matched**,
+contrastive training at Kendall tau ~0.40 against Bellman training's ~0.70. The failure is
+attributed to the objective, not the bilinear form.
+
+**Proposal.** `q_dist(s, w, u)` already exists as a scalar selection head, but
+`q_dist_loss` regresses it onto `psi^T w` -- it distils the contrastive critic and inherits
+its ordering. Replace that target with a real TD backup.
+
+**This does not cost zero-shot**, which is the obvious objection. The reward for any task
+is recoverable from the basis, `r_w(x) = phi(x)^T w`, so a w-conditioned scalar critic can
+be trained by ordinary TD on synthetic rewards over the same random `w` the measure loss
+already draws (`mix_ratio`). Bellman training, task-conditioned, no retraining at test time.
+
+**Risk.** The head would inherit phi. That is acceptable here specifically because phi is
+the one thing that is stable -- `orth_offdiag` sits at 63.7-64.6 across all of training and
+never moves.
+
+**Gate before any code.** Check that `r_w = phi^T w` yields a signal TD can learn from
+rather than being too sparse to bite on. Offline, on the dataset, no GPU. If it fails, the
+whole approach is void and the alternatives are a larger critic ensemble (`num_parallel`
+is 2, and 8.3 showed its spread carries no support information) or weight averaging across
+the oscillation.

@@ -254,9 +254,46 @@ Also corrected here: at a good checkpoint the critic is worth ~8x over random
 "critic picks worse than random" result in 8.4 came from the MC probe's held-fixed-latent
 regime, which is not what GPI deploys.
 
+**INTERIM VERDICT (10 of 12 runs complete).** Every arm failed; see section 8 of the design
+doc. In-loop ladders, control scored on the same basis:
+
+| arm | mean | swing | swing/mean |
+|---|---|---|---|
+| control | **0.432** | 0.353 | **0.82** |
+| `tau1e3` | 0.119 | 0.193 | 1.62 |
+| `oc1e4` | 0.296 | 0.533 | 1.80 |
+| `lrsf1e5` | 0.104 | 0.173 | 1.66 |
+
+`tau1e3` and `lrsf1e5` halve the swing and drop the mean 4x -- they sit near the floor,
+where a small swing is free. Every arm is *relatively* more unstable than the control.
+**The ortho line is closed**: `oc1e4` was worse on both axes, so the r=-0.375 correlation
+was confounded. This is section 7's pre-registered expected failure, and it says the
+instability is in the contrastive objective rather than in any rate.
+
 ---
 
-### 8. Next
+### 8. Where this leads: a Bellman-trained selection head
+
+Three facts compose: slowing the optimiser does not help; `psm_loss` predicts success at
+r=+0.079; and the critic that ranks weakly is trained contrastively. Contrastive training
+constrains the ANGLE and leaves norm growth off-support free -- a scorer that retrieves
+well and ranks badly. arXiv:2607.27422 isolates this on our exact architecture:
+parameter-matched, contrastive ranks at Kendall tau ~0.40 against Bellman's ~0.70.
+
+`q_dist(s, w, u)` already exists but is REGRESSED onto `psi^T w`, so it inherits the
+contrastive ordering. Give it a real TD target instead. Zero-shot survives because the
+reward for any task is recoverable from the basis, `r_w(x) = phi(x)^T w`, so the head can
+be trained by ordinary TD on synthetic rewards over the `w` the measure loss already draws.
+
+**Gate before any code:** confirm `r_w = phi^T w` gives TD a learnable signal rather than
+being too sparse. Offline, no GPU. Fallbacks if it fails: larger critic ensemble
+(`num_parallel` is 2, and its spread carries no support information) or weight averaging.
+
+Full argument in `docs/design/2026-09-08-oscillation-stability.md` section 9.
+
+---
+
+### 9. Next
 
 1. **Read the faithful-DSRL result against BC.** If it does not clear 0.072 the problem is
    upstream of steering.
