@@ -295,21 +295,42 @@ Full argument in `docs/design/2026-09-08-oscillation-stability.md` section 9.
 
 ### 9. Next
 
-1. **Read the faithful-DSRL result against BC.** If it does not clear 0.072 the problem is
-   upstream of steering.
-2. **Finish the K sweep** -- cube sd2, and antmaze K=64. Then decide on `gpi_num_u`.
-3. **The ranking problem is the central question.** "Good Rankers, Bad Objectives"
-   (arXiv:2607.27422) studies our exact head -- a bilinear contrastive critic scoring
-   best-of-K -- and finds, parameter-matched, contrastive training ranks at Kendall
-   tau ~0.40 against Bellman training's ~0.70. Failure attributed to the OBJECTIVE, not
-   the bilinear form; contrastive constrains the angle and leaves norm growth off-support
-   unconstrained. Their fix is two heads: contrastive for retrieval, a **Bellman-trained**
-   scalar for selection. Note `q_dist` is expectile-distilled from `psi^T w`, so it
-   inherits the contrastive ranking rather than fixing it.
-4. Real DSRL-NA on `psi_a` if a DSRL comparator is wanted -- DSRL-NA, LPS
-   (arXiv:2603.05296) and QPILOTS all independently moved scoring into action space.
-5. `kappa=0.25` on cube 0.98 + antmaze 0.99 -- still the only rate benefit not shown to
+Ranked. Items struck through landed during this session.
+
+**DONE this session.** ~~Read the faithful-DSRL result against BC~~ -- it scores
+0.136 / 0.141 against BC 0.072, with a CI whose lower edge is under the control, so it does
+NOT clearly clear BC (section 6). ~~Finish the K sweep~~ -- complete, section 3.
+
+1. **Gate the Bellman selection head (offline, no GPU).** Check that `r_w(x) = phi(x)^T w`
+   gives TD a learnable signal rather than being too sparse to bite on. This single check
+   decides whether the whole line in section 8 is viable. Do it before writing any loss.
+2. **If the gate passes: give `q_dist` a real TD target** instead of regressing it onto
+   `psi^T w`. New loss in `agents/psmflow.py`, behind a config seam defaulting to the
+   current distillation so published numbers are untouched. This is the only proposal on
+   record that attacks WHY the ordering is bad rather than the machinery around it.
+3. **eval500 the stability arms** to confirm section 7's interim verdict. 4 arms x 3 seeds
+   x 5 checkpoints = 60 jobs, or narrow to `tau1e3` and `oc1e4` (30) since those carry the
+   two pre-registered predictions. The 4x mean collapse is far outside 50-episode noise so
+   the direction is not in doubt -- this is for the record, not the decision.
+4. **Larger critic ensemble.** `num_parallel` is 2, which makes the uncertainty estimate
+   `|M1 - M2|` two samples, and 8.3 of the measure-loss audit showed its spread carries no
+   support information at all. The best-of-N literature reports ensembles largely remove
+   argmax over-optimisation. A config change and one arm; cheapest untested lever left.
+5. **Weight-averaging probe, not commitment.** Averaging across the oscillation only works
+   if the swing is around ONE solution. Check whether consecutive good and bad checkpoints
+   are near each other in weight space before investing.
+6. **Decide `gpi_num_u`.** Cube sd2 was never swept and cube/antmaze disagree (K=16 vs
+   K=64). Do not change the default on two seeds per env.
+7. `kappa=0.25` on cube 0.98 + antmaze 0.99 -- still the only rate benefit not shown to
    cost cube.
+8. Real DSRL-NA on `psi_a` -- only if a DSRL comparator is wanted. Lower priority now that
+   the faithful arm underperforms: `latentrl` already supplies a defensible DSRL-SAC row.
+
+**Superseded.** `2026-09-08-measure-loss-audit.md` 8.5 lists `gpi_num_u`, `kappa=0.25` and
+`index_agg=expectile` as the next moves. The first two survive as items 6-7 above. The
+third is superseded: `q_dist` under `index_agg=expectile` is distilled from `psi^T w` and
+inherits the contrastive ordering, so evaluating it as-is tests the wrong thing -- item 2
+is that idea done properly.
 
 ---
 
