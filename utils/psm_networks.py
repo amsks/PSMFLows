@@ -1,6 +1,6 @@
 """Network definitions for the measure agents. Modules only — losses live in agents/.
 
-Code <-> symbols (agents/psmflow.py's module docstring holds the full map; PSM is
+Code <-> symbols (docs/reference/psmflow-symbols.md holds the full map; PSM is
 arXiv 2411.19418):
 
   PhiMap                 phi(x), the basis over future states
@@ -220,6 +220,15 @@ class TanhGaussianLatentActor(nn.Module):
     embedding_layers: int = 2
     log_std_min: float = -20.0
     log_std_max: float = 2.0
+    #: `prior_init=True` starts the policy AT the flow's prior instead of outside it.
+    #: With orthogonal init and log_std ~ 0 the step-0 latent has per-dim std
+    #: scale * std(tanh N(0,1)) ~ 1.88 at scale=3, against the prior's 1.0, so the actor
+    #: begins on decodes the flow was never fitted on and the first thousands of steps
+    #: climb a critic evaluated off-manifold. Zeroing the mu head and biasing log_std to
+    #: log(prior_init_std) starts it inside the support. Default False reproduces every
+    #: run before 2026-09-08.
+    prior_init: bool = False
+    prior_init_std: float = 0.3
 
     @nn.compact
     def __call__(self, obs, z):
@@ -229,8 +238,14 @@ class TanhGaussianLatentActor(nn.Module):
         h = jnp.concatenate([s_embedding, z_embedding], -1)
         for _ in range(self.hidden_layers):
             h = nn.relu(nn.Dense(self.hidden_dim, kernel_init=_ORTH1)(h))
-        mu = nn.Dense(self.action_dim, kernel_init=_ORTH1)(h)
-        log_std = nn.Dense(self.action_dim, kernel_init=_ORTH1)(h)
+        if self.prior_init:
+            mu = nn.Dense(self.action_dim, kernel_init=nn.initializers.zeros)(h)
+            log_std = nn.Dense(
+                self.action_dim, kernel_init=nn.initializers.zeros,
+                bias_init=nn.initializers.constant(math.log(self.prior_init_std)))(h)
+        else:
+            mu = nn.Dense(self.action_dim, kernel_init=_ORTH1)(h)
+            log_std = nn.Dense(self.action_dim, kernel_init=_ORTH1)(h)
         return mu, jnp.clip(log_std, self.log_std_min, self.log_std_max)
 
 

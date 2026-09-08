@@ -92,7 +92,7 @@ actor:
   index_panel: 0
   # --- actor_mode != ddpg only (the DSRL arms) ---
   q_coeff: 1.0             # weight on the (alpha*log pi - Q) term; 0.0 = pure distillation
-  na_coeff: 1.0            # weight on the GPI-argmax regression (dsrl_na)
+  na_coeff: 1.0            # weight on the GPI-argmax regression (gpi_distill)
   na_candidates: 16        # prior action latents scored per state to form that argmax
   na_states: 256           # batch rows the NA target is built on (cost = na_states x
                            # na_candidates psi forward passes per step)
@@ -104,18 +104,21 @@ actor:
   lr_alpha: 3.0e-4
   log_std_min: -20.0       # SB3's clamp, ported verbatim
   log_std_max: 2.0
+  prior_init: false        # start the tanh-Gaussian AT the flow prior, not outside it:
+  prior_init_std: 0.3      # at u_clip=3 the default init has per-dim std 1.88 vs prior 1.0
 # Which latent actor `train_actor: true` trains and `acting: actor` deploys.
 #   ddpg      (DEFAULT) the shipped NoiseConditionedActor + flowBC recipe:
 #             -Q/|Q| + bc_coeff * distill + the CFM velocity field.
 #   dsrl_sac  DSRL's actor ported to latents: a tanh-Gaussian pi(u | s, w) over the box
 #             [-u_clip, u_clip], reparameterised, with SAC's entropy term and an
 #             auto-tuned alpha (sb3_dsrl/stable_baselines3/sac/sac.py:279-294).
-#   dsrl_na   DSRL-NA's prior-only signal, distilled into the POLICY instead of into a
+#   gpi_distill  candidate-argmax behaviour distillation. NOT DSRL-NA (which is a dual
+#             critic distilling an ACTION-space Q into the latent one); renamed 2026-09-08.
 #             second critic (psi already IS a critic over latents): a regression onto
 #             argmax over na_candidates prior draws of the panel-max GPI score. Every
 #             target is a p0 draw, which is the support device that replaces bc_coeff.
 # See docs/design/2026-09-06-dsrl-actor-audit.md.
-actor_mode: ddpg           # ddpg | dsrl_sac | dsrl_na
+actor_mode: ddpg           # ddpg | dsrl_sac | gpi_distill  (dsrl_na = old alias)
 acting: gpi                # gpi | actor. DEFAULT gpi: the write-up's Sec. PSMFlows agent
                            # acts by a per-step argmax over (u_i, u'_j) pairs and has no
                            # actor at all. `actor` selects the amortized latent actor above
@@ -219,6 +222,9 @@ preimage_path: null        # REQUIRED: tools/precompute_preimages.py output npz
 use_point_preimage: true   # point-vs-mixture ablation. true is the default because
                            # main.py REFUSES a modern (corrected-target) preimage npz with
                            # false, and every published number was produced with true.
+
+mask_invalid_preimages: false   # drop rows whose Stage-B inversion diverged from the
+                           # measure loss. false = train on them (every number pre-09-08)
 
 u_clip: 3.0                # typical-set clamp on latent draws
 index_clip: null           # box for the policy-INDEX draws u' only (psi's index slot, the

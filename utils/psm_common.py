@@ -12,11 +12,24 @@ import jax.numpy as jnp
 import optax
 
 
-def contrastive_loss(M, target_M, discount, off_diag, off_diag_sum):
-    """PSM Eq. 7. The diagonal term takes diag(diff) x num_parallel, not (1-g)*diag(M)."""
+def contrastive_loss(M, target_M, discount, off_diag, off_diag_sum, row_weight=None):
+    """PSM Eq. 7. The diagonal term takes diag(diff) x num_parallel, not (1-g)*diag(M).
+
+    `row_weight` (B,) optionally down-weights ROWS -- transition i contributes
+    psi(s_i, index_i, u_i), so a row is exactly the (s, u) pair whose validity can be in
+    doubt when the Stage-B inversion diverged. Columns carry only phi(s'_j) and are always
+    sound. None (the default) weights every row 1 and reproduces the published loss
+    bit for bit.
+    """
     diff = M - discount * target_M
-    offdiag = 0.5 * jnp.sum((diff * off_diag) ** 2) / off_diag_sum
-    diag = -jnp.mean(jnp.diagonal(diff, axis1=1, axis2=2)) * M.shape[0]
+    if row_weight is None:
+        offdiag = 0.5 * jnp.sum((diff * off_diag) ** 2) / off_diag_sum
+        diag = -jnp.mean(jnp.diagonal(diff, axis1=1, axis2=2)) * M.shape[0]
+    else:
+        mask = off_diag * row_weight[:, None]
+        offdiag = 0.5 * jnp.sum((diff * mask) ** 2) / jnp.maximum(jnp.sum(mask), 1.0)
+        diag = -(jnp.sum(jnp.diagonal(diff, axis1=1, axis2=2) * row_weight)
+                 / jnp.maximum(jnp.sum(row_weight), 1.0))
     return offdiag + diag, diag, offdiag
 
 

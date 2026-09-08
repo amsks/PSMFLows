@@ -24,7 +24,7 @@ from utils.flow_inversion import sample_preimage_noise
 
 def steer_actions(agent, states, target_actions, rng, *, mode='mean',
                   num_samples=100, n_steps=10, n_initial_steps=100, alpha=1.0,
-                  num_clusters=3):
+                  num_clusters=3, u_clip=3.0):
     """Ground target actions onto the BC flow manifold via their noise preimage.
 
     Args:
@@ -37,6 +37,7 @@ def steer_actions(agent, states, target_actions, rng, *, mode='mean',
             (draw from the EM mixture preimage).
         num_samples, n_steps, n_initial_steps, alpha: proposal-refinement hyperparameters.
         num_clusters: mixture components for mode='sample' (ignored for mode='mean').
+        u_clip: box the mixture draw is clamped to (mode='sample' only).
 
     Returns:
         steered: (B, action_dim) actions on the flow's in-distribution manifold.
@@ -46,21 +47,26 @@ def steer_actions(agent, states, target_actions, rng, *, mode='mean',
     keys = jax.random.split(rng, states.shape[0])
 
     if mode == 'mean':
-        x0, _cov, _ess = jax.vmap(
+        x0, _cov, _ess = jax.jit(jax.vmap(
             lambda s, a, k: agent.compute_full_proposal_distribution(
                 s, a, k, num_samples=num_samples, n_steps=n_steps,
                 n_initial_steps=n_initial_steps, alpha=alpha)
-        )(states, target_actions, keys)
+        ))(states, target_actions, keys)
         noise = x0
     elif mode == 'sample':
-        means, covs, weights, _ess = jax.vmap(
+        means, covs, weights, _ess = jax.jit(jax.vmap(
             lambda s, a, k: agent.compute_full_proposal_distribution_em(
                 s, a, k, num_samples=num_samples, n_steps=n_steps,
                 n_initial_steps=n_initial_steps, alpha=alpha, n_components=num_clusters)
-        )(states, target_actions, keys)
-        noise = jnp.asarray(
-            sample_preimage_noise(np.asarray(means), np.asarray(covs), np.asarray(weights))
-        )
+        ))(states, target_actions, keys)
+        # Seed the mixture draw from `rng` rather than the global numpy state, so a call
+        # is reproducible; and clamp as `latents_from` does, since an unclamped mixture
+        # draw can land outside the box the decode is trustworthy on.
+        gen = np.random.default_rng(np.asarray(jax.random.key_data(rng)).ravel().tolist())
+        noise = jnp.clip(jnp.asarray(
+            sample_preimage_noise(np.asarray(means), np.asarray(covs), np.asarray(weights),
+                                  rng=gen)
+        ), -u_clip, u_clip)
     else:
         raise ValueError(f"mode must be 'mean' or 'sample', got {mode!r}")
 

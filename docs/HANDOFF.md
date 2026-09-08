@@ -18,7 +18,199 @@ hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RES
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
 Branch: `feat/inversion-integration` · Machine: `kisski` (GWDG, SLURM/H100) · prior: `midi-01` (UT CS)
-Date: **2026-09-07** (latest) · prior: 2026-09-06, 2026-09-05, 2026-09-04, 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+Date: **2026-09-08** (latest) · prior: 2026-09-07, 2026-09-06, 2026-09-05, 2026-09-04, 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+
+---
+
+<!-- _class: lead -->
+
+## 2026-09-08 — the measure-loss verdict, the K sweep, and the first faithful DSRL arm
+
+---
+
+### 1. Measure-loss audit: verdict filled
+
+`docs/design/2026-09-08-measure-loss-audit.md` §8. All nine pre-registered arms landed.
+Growth refitted on a **common 10k-150k window** (the §7 numbers were 50k-500k and must not
+be read against these). antmaze `medium-navigate`, gamma=0.995:
+
+| arm | kappa_measure | steps/decade | log10 |Q| growth |
+|---|---|---|---|
+| `mla_g995_pess10` | 1.0 | 1.5e4 | 4.15 |
+| baseline | 0.5 | 5.18 / 4.25 / 3.84e4 | 1.25-1.78 |
+| `mla_g995_pess025` | 0.25 | 8.0e4 | 0.73 |
+| `mla_g995_pess0` | 0.0 | 1.08e5 / 1.95e5 | 0.45 / 0.33 |
+
+**H-PESS confirmed** -- monotone in `pessimism_penalty` across four dose levels spanning
+13x, against 35% baseline seed scatter. Orthonormality delays only (`orel` within scatter
+seed-for-seed). **The pre-registered structural fix is REFUTED on cube**: kappa_measure=0
+scores 0.136 vs 0.415, while antmaze's 0.334 vs 0.252 is inside overlapping CIs. Default
+stays at 0.5.
+
+**`psi_bound` is settled negative** -- best growth number measured anywhere (11x baseline)
+and the worst policy (early success 0.096-0.256 vs baseline 0.288-0.344). Growth rate is
+not a proxy for policy health.
+
+**Ensemble spread carries no support information**: prior/in-support disagreement ratio is
+1.00 across eight checkpoints. `kappa*spread` is a uniform one-signed shift, not a
+support-aware penalty.
+
+---
+
+### 2. Dead seeds are a SELECTION failure
+
+`$PSM_DATA/logs/diag_deadseeds/`. Over the candidate roster, Spearman(Q, MC return) is
+**0.06-0.16 in every arm including healthy seeds**, with a negative 10th percentile --
+on a tenth of states the ranking is inverted. Meanwhile **79% of decoded prior candidates
+succeed under MC**, identically in every seed. The flow offers a good action nearly
+everywhere; the measure cannot pick it.
+
+---
+
+### 3. `gpi_num_u` sweep (new, `scripts/slurm/launch_gpi_num_u_sweep.sh`)
+
+500 episodes, frozen checkpoints, only `agent.gpi_num_u` overridden. Positive control
+(K=8 on the dead seed) reproduced 0.134 against the 0.140 on record before the rest ran.
+
+| checkpoint | K=4 | K=8 | K=16 | K=32 | K=64 | best |
+|---|---|---|---|---|---|---|
+| cube healthy sd0 | 0.274 | 0.488 | **0.514** | 0.452 | 0.312 | K=16 |
+| cube healthy sd1 | 0.132 | 0.244 | 0.334 | 0.340 | **0.374** | K=64 |
+| cube dead (`mpess0`) | **0.218** | 0.134 | 0.078 | 0.012 | 0.004 | K=4 |
+| antmaze g99 sd2 | 0.350 | 0.394 | 0.458 | 0.482 | **0.510** | K=64 |
+
+**The optimum is per-seed, not just per-domain, and there is no single right K.** The dead
+seed collapses **54x** from K=4 to K=64 -- max over a critic it cannot rank, i.e. max over
+noise. Healthy cube sd0 is an inverted U peaking at 16 and losing a third by 64. Healthy
+cube sd1 and antmaze are monotone increasing out to 64.
+
+Shared-K comparison (one hyperparameter, no per-seed picking): on the two healthy cube
+seeds K=16 gives 0.424 against K=64's 0.343. But antmaze prefers 64 (0.510 vs 0.458).
+So cube and antmaze want different K, which is what the literature reports. **Two seeds per
+env; cube sd2 was not swept. Do not change the default on this alone.**
+
+Note antmaze here is monotone INCREASING, the opposite of Diffusion-DICE's antmaze result.
+Its seed is the healthiest we have, which fits the pattern that K-tolerance tracks critic
+quality rather than the domain.
+
+Literature agrees there is no consensus: published N spans 1-400, tuned per task, and
+FQL's own IDQL/IFQL rejection-sampling baselines use **32 for every OGBench task including
+cube-single-play**. Diffusion-DICE (arXiv:2407.20109) Table 4 shows an 82.0 -> 51.8
+monotone collapse on antmaze-umaze-diverse over K=1..16. The argmax's optimization
+pressure is `log N - (N-1)/N` nats, exact for continuous latents: K=64 is 3.16 nats.
+
+---
+
+### 4. What we called DSRL was not DSRL
+
+External review, verified against the code. Two findings:
+
+**`dsrl_na` is not DSRL-NA.** DSRL-NA is a dual-critic scheme: an ACTION-space critic Q_A
+trained on real transitions, distilled into the latent critic, exploiting the fact that
+many latents decode to the same action. Ours regresses the actor onto the argmax of 16
+prior draws scored by the GPI rule -- candidate-argmax behaviour distillation, the
+SfBC/IDQL family. **Renamed `gpi_distill`**, with `dsrl_na` kept as a read-time alias so
+old flags.json files still restore. `psi_a(s, w, a)` in the action branch already IS the
+action-space critic real NA would need.
+
+**The default arm structurally cannot do SAC.** Under `policy_index=latent`,
+`sample_step_inputs` computes the actor's bootstrap latent and then overwrites it with the
+prior draw u'. psi is the successor measure of the constant-latent policy pi_{u'}, which
+is what makes GPI well-posed -- and means the backup never contains the actor's action. An
+actor trained against it is doing policy improvement against a value function that is not
+Q^pi for any pi it converges to. The assertion chain closes the escape hatch:
+`gpi_distill` -> `index_panel>0` -> `policy_index=latent`.
+
+**`psi_form=affine` and a faithful DSRL arm are mutually exclusive.** Now stated in the
+module docstring; the config space does not enforce it.
+
+**The paper is unaffected.** `table_headline.tex`'s DSRL-SAC rows (0.183, 0.127) come from
+the archived `latentrl` agent, whose backup does use the actor's latent
+(`archive/agents/latentrl.py:176,182`). Only the psmflow ablations were mislabelled, and
+no published number depends on them.
+
+**One review claim did not hold.** The BC anchor was said to cancel the steering at
+`bc_coeff=1.0`. Every shipped DSRL run used `bc_coeff=0.0` (14 `gpi_distill` + 18
+`dsrl_sac`); the `bc_coeff=1.0` runs are the 33 older ddpg-era ones. So the plateau
+happened with no BC pull, and the actor's 1.70-vs-2.13 contraction is regression-to-mean
+onto a re-randomised target, not a constraint.
+
+---
+
+### 5. Code changes (all default-off; published numbers unchanged)
+
+- `actor_mode=gpi_distill`, `dsrl_na` aliased on read (`ACTOR_MODE_ALIASES`).
+- `MEASURE_DEFAULTS` now also backfills `index_panel`, `expectile_mu`,
+  `mask_invalid_preimages`. (The earlier gap: `psi_form`/`index_agg`/`gpi_select`/
+  `index_clip` were guarded with `.get(legacy)` in `create` but read unguarded at runtime;
+  both `index_clip` tests were failing before this landed.)
+- **Mode-based eval.** `sample_actions` ignored its `temperature` argument, so the DSRL
+  arms were evaluated stochastically while `utils.evaluation` passes `eval_temperature=0`.
+  Now returns `u_clip * tanh(mu)` at temperature 0, which is how SAC is normally evaluated.
+  **Every DSRL number on record was a stochastic-policy eval.**
+- **`mask_invalid_preimages`** (default false). `preimage_valid` was recorded by
+  `repair_invalid_preimages` and never consulted, so diverged rows trained the measure on
+  (u, a) pairs where u does not decode to a. `contrastive_loss` gained an optional
+  `row_weight`; verified to reproduce the published loss bit for bit at weight 1.
+  **Scale check: cube has 13 diverged rows in 1,000,000 (0.0013%)**, so on this dataset the
+  flag is correctness hygiene and will not move a number. It matters only if an inversion
+  is ever run at settings that diverge more.
+- **`actor.prior_init`** (default false). Default init gives per-dim latent std **1.88** at
+  u_clip=3 against the flow's prior 1.0, so the policy started outside the support the flow
+  was fitted on. `prior_init` zeroes the mu head and biases log_std to log(0.3).
+- `flow_steering.py`: jitted both `vmap`s (bare vmap over the proposal reproducibly returns
+  all-NaN on GPU), seeded the mixture draw from the passed rng instead of global numpy
+  state, and clamped it to `u_clip`.
+- Corrected the `u_data` clip comment: its justification does not hold under
+  `policy_index=latent`, where the bootstrap is a prior draw.
+
+---
+
+### 6. RUNNING: the first faithful DSRL arm
+
+`scripts/slurm/launch_dsrl_faithful.sh`, cube, 3 seeds x 2 boxes, 500k.
+
+    actor_mode=dsrl_sac policy_index=task_vector psi_form=free index_agg=max
+    actor.index_panel=0 train_actor=true acting=actor
+    actor.bc_coeff=0 actor.prior_init=true
+
+`policy_index=task_vector` is the one index under which `u_next` survives into the backup,
+so this is the first arm where the latent MDP is genuinely on-policy. It gives up
+Prop. `bilinear` by necessity.
+
+Two boxes so the structural change and the box change are separable: **u_clip=1.5 and 3.0**.
+DSRL recommends `b_W` in **[0.5, 1.5] for offline** and [1, 3] for online; every run in this
+repo has used 3.0, the top of the *online* range (150 runs at 3.0, 2 at 1.0). Their decoder
+also trains with `randn_clip_value: 3`, so 3.0 sits at the edge of trained support with no
+margin.
+
+**Read it against the BC control (0.072), not against actor-free GPI.** The question is
+whether steering works at all on this substrate, not whether it beats GPI.
+
+Verified directly from `ajwagen/dsrl` configs: `target_ent: 0.0` is held constant across
+`action_magnitude` 1.0 / 1.5 / 2.5, so it is NOT tied to a box size (an earlier claim in
+this record that it was b=1.5-specific is withdrawn). Our log-prob is computed in the
+squashed-but-unscaled space, so our entropy target is box-invariant and comparable.
+
+---
+
+### 7. Next
+
+1. **Read the faithful-DSRL result against BC.** If it does not clear 0.072 the problem is
+   upstream of steering.
+2. **Finish the K sweep** -- cube sd2, and antmaze K=64. Then decide on `gpi_num_u`.
+3. **The ranking problem is the central question.** "Good Rankers, Bad Objectives"
+   (arXiv:2607.27422) studies our exact head -- a bilinear contrastive critic scoring
+   best-of-K -- and finds, parameter-matched, contrastive training ranks at Kendall
+   tau ~0.40 against Bellman training's ~0.70. Failure attributed to the OBJECTIVE, not
+   the bilinear form; contrastive constrains the angle and leaves norm growth off-support
+   unconstrained. Their fix is two heads: contrastive for retrieval, a **Bellman-trained**
+   scalar for selection. Note `q_dist` is expectile-distilled from `psi^T w`, so it
+   inherits the contrastive ranking rather than fixing it.
+4. Real DSRL-NA on `psi_a` if a DSRL comparator is wanted -- DSRL-NA, LPS
+   (arXiv:2603.05296) and QPILOTS all independently moved scoring into action space.
+5. `kappa=0.25` on cube 0.98 + antmaze 0.99 -- still the only rate benefit not shown to
+   cost cube.
 
 ---
 

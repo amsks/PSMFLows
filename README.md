@@ -105,7 +105,7 @@ of the write-up; the other values are ablations.
 | `policy_index` | `latent` | what fills psi's index slot: a prior draw `u'`, or the task vector `w`. |
 | `acting` | `gpi` | per-step argmax over `(u_i, u'_j)` pairs, or one shot through the amortized actor. |
 | `train_actor` | `false` | whether the amortized latent actor is trained at all. |
-| `actor_mode` | `ddpg` | which latent actor: the flow-BC head, or the tanh-Gaussian `dsrl_sac` / `dsrl_na` heads. |
+| `actor_mode` | `ddpg` | which latent actor: the flow-BC head, or the tanh-Gaussian `dsrl_sac` / `gpi_distill` heads (`dsrl_na` is the old alias for `gpi_distill`). |
 | `gpi_select` | `argmax` | eval-time selection rule over the `K` prior draws (`max_norm`, `small_ball`, `soft_topm`, `mean`, `fixed_index`, ...). |
 | `index_agg` | `max` | how the index slot is aggregated: argmax over the panel, or an upper expectile distilled into `q_dist`. |
 

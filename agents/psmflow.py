@@ -11,6 +11,19 @@ ablation, and the two loss stabilisers (``ortho_mode``, ``psi_bound``) default O
 ``docs/reference/psmflow-symbols.md`` is the full code<->paper symbol map, the defaults and
 the stabilisers -- read it before touching the losses. File order: construction, losses,
 update, acting, inference.
+
+DESIGN FORK -- the affine head and a faithful DSRL arm do NOT compose. ``psi_form=affine``
+asserts ``policy_index=latent``, and under that index the TD bootstrap latent is the prior
+draw u', not the actor's: ``sample_step_inputs`` computes the actor's u^+ and then
+overwrites it. So psi is the successor measure of the constant-latent policy pi_{u'},
+which is exactly what makes GPI well-posed -- and exactly why an actor trained against it
+is not doing SAC, since the backup never contains the actor's own action. The one
+configuration in which the latent MDP is genuinely on-policy is
+
+    actor_mode=dsrl_sac policy_index=task_vector psi_form=free index_agg=max
+    actor.index_panel=0 train_actor=true acting=actor
+
+and it gives up Prop. `bilinear`. Pick one; the config space does not enforce the choice.
 """
 
 import copy
@@ -43,14 +56,23 @@ GPI_SELECT_MODES = ("argmax", "max_norm", "top_quartile_random", "small_ball",
 
 #: Latent-actor heads. "ddpg" is the NoiseConditionedActor + flow-BC recipe; the two DSRL
 #: modes share the tanh-Gaussian head.
-ACTOR_MODES = ("ddpg", "dsrl_sac", "dsrl_na")
+ACTOR_MODES = ("ddpg", "dsrl_sac", "gpi_distill")
+
+#: 2026-09-08 rename. What shipped as `dsrl_na` is NOT DSRL-NA: DSRL-NA is a dual-critic
+#: scheme that trains an ACTION-space critic Q_A on real transitions and distils it into
+#: the latent critic, exploiting the fact that many latents decode to the same action.
+#: Ours regresses the actor onto the argmax of `na_candidates` prior draws scored by the
+#: GPI rule -- candidate-argmax behaviour distillation (the SfBC/IDQL family), with no
+#: second critic and no action-space signal. Old flags.json files are mapped on read.
+ACTOR_MODE_ALIASES = {"dsrl_na": "gpi_distill"}
 
 #: Defaults for the `actor` sub-keys, applied in `create` so a partial dict -- a test
 #: passing only the widths, or a flags.json written before a key existed -- still builds.
 ACTOR_DEFAULTS = dict(index_panel=0, q_coeff=1.0, na_coeff=1.0, na_candidates=16,
                       na_states=256, na_advantage_weight=False, entropy="auto",
                       target_entropy=0.0, init_alpha=1.0, lr_alpha=3.0e-4,
-                      log_std_min=-20.0, log_std_max=2.0)
+                      log_std_min=-20.0, log_std_max=2.0,
+                      prior_init=False, prior_init_std=0.3)
 
 
 def _actor_opt(config, key):
@@ -70,7 +92,8 @@ STABILITY_DEFAULTS = dict(ortho_mode="fixed", ortho_rel_coef=1.0,
 #: reads unguarded. Backfilled with the SAME legacy values, so a flags.json predating any
 #: of them restores onto the old behaviour instead of dying at the first update or eval.
 MEASURE_DEFAULTS = dict(psi_form="free", index_agg="max", gpi_select="argmax",
-                        index_clip=None)
+                        index_clip=None, index_panel=16, expectile_mu=0.9,
+                        mask_invalid_preimages=False)
 
 #: `ortho_mode`: how the orthonormality regulariser is weighted against the TD term.
 ORTHO_MODES = ("fixed", "relative")
@@ -117,6 +140,8 @@ def fill_actor_defaults(config):
                 actor[k] = v
         if "actor_mode" not in config:
             config["actor_mode"] = "ddpg"
+        config["actor_mode"] = ACTOR_MODE_ALIASES.get(config["actor_mode"],
+                                                      config["actor_mode"])
     except (AttributeError, KeyError, TypeError):
         pass
     return config
@@ -133,6 +158,8 @@ class StepInputs:
     flow_*   the CFM draws for the latent actor's behaviour-cloning anchor
     task_w_a (B, z_dim) task vector of the ACTION branch: task_w unless the FB graft is
              on, in which case it is sampled against that branch's own basis B_a
+    u_valid  (B,) 1.0 where the Stage-B inversion converged, else 0.0; all ones unless
+             `mask_invalid_preimages`
     """
     u_data: Any
     u_next: Any
@@ -142,6 +169,7 @@ class StepInputs:
     flow_t: Any
     flow_noise: Any
     task_w_a: Any
+    u_valid: Any
 
 
 class PSMFlowAgent(flax.struct.PyTreeNode):
@@ -202,7 +230,9 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             "gpi_select != argmax requires policy_index=latent and index_agg=max: the "
             "selection ablations act on the (u, u') pair scan, which the other arms do "
             "not run.")
-        actor_mode = config.get("actor_mode", "ddpg")
+        actor_mode = ACTOR_MODE_ALIASES.get(config.get("actor_mode", "ddpg"),
+                                            config.get("actor_mode", "ddpg"))
+        config["actor_mode"] = actor_mode
         assert actor_mode in ACTOR_MODES, f"actor_mode: {'|'.join(ACTOR_MODES)}"
         assert not (actor_mode != "ddpg" and not config["train_actor"]), (
             f"actor_mode={actor_mode} trains the tanh-Gaussian latent head; it needs "
@@ -217,8 +247,8 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         assert not (panel > 0 and config.get("index_agg", "max") != "max"), (
             "actor.index_panel > 0 requires index_agg=max: under expectile the index "
             "distribution is already marginalized into q_dist and the panel is redundant.")
-        assert not (actor_mode == "dsrl_na" and panel == 0), (
-            "actor_mode=dsrl_na regresses onto max over the index panel, so panel=0 would "
+        assert not (actor_mode == "gpi_distill" and panel == 0), (
+            "actor_mode=gpi_distill regresses onto max over the index panel, so panel=0 would "
             "silently distil a ONE-index argmax while the deployed rule scans gpi_num_u; "
             "set actor.index_panel > 0.")
         psi_form = config.get("psi_form", "free")
@@ -286,7 +316,9 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             hidden_layers=config["actor"]["hidden_layers"],
             embedding_layers=config["actor"]["embedding_layers"],
             log_std_min=_actor_opt(config, "log_std_min"),
-            log_std_max=_actor_opt(config, "log_std_max"))
+            log_std_max=_actor_opt(config, "log_std_max"),
+            prior_init=bool(_actor_opt(config, "prior_init")),
+            prior_init_std=float(_actor_opt(config, "prior_init_std")))
         sac_actor = TrainState.create(
             sac_actor_def,
             sac_actor_def.init(jax.random.fold_in(rng, 112), ex_observations, ex_w)["params"],
@@ -387,9 +419,20 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         """Draw the per-update quantities of `StepInputs` from one batch."""
         c = self.config
         B, adim = batch["observations"].shape[0], c["action_dim"]
-        # u_clip clamps every latent to the typical set: the bootstrap is a tanh-bounded
-        # actor latent, so an unclipped u_data feeds the online branch unreachable inputs.
+        # u_clip clamps every latent to the typical set. Under policy_index='task_vector'
+        # the bootstrap is a tanh-bounded actor latent, so an unclipped u_data would feed
+        # the online branch inputs the target branch cannot produce. Under 'latent' the
+        # bootstrap is a prior draw and that argument does NOT apply -- the clamp is then
+        # only the typical-set convention, and it costs G(s, u_data) != a on clipped rows.
         u_data = jnp.clip(jnp.asarray(batch["noise_preimage"]), -c["u_clip"], c["u_clip"])
+        # Rows whose inversion diverged: `repair_invalid_preimages` reset them to the prior
+        # (mixture) or 0 (point) and recorded the mask, so for these u_data does NOT decode
+        # to the recorded action and the (u, a) pair the measure is fit on is a fiction.
+        # Off by default: every number before 2026-09-08 trained on them.
+        valid = batch.get("preimage_valid")
+        u_valid = (jnp.asarray(valid).astype(jnp.float32).reshape(-1)
+                   if (valid is not None and c["mask_invalid_preimages"])
+                   else jnp.ones((B,), jnp.float32))
         # Task vector w: Gaussian, mix_ratio of it replaced by phi(next_obs[perm]) (PSM's
         # sample_mixed_z). stop_gradient so sampling does not shape the basis.
         r_w, r_wmix, r_wperm, r_next, r_x0, r_t, r_noise = jax.random.split(rng, 7)
@@ -439,7 +482,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             flow_x0=jax.random.normal(r_x0, (B, adim)),
             flow_t=jax.random.uniform(r_t, (B, 1)),
             flow_noise=jax.random.normal(r_noise, (B, adim)),
-            task_w_a=task_w_a)
+            task_w_a=task_w_a, u_valid=u_valid)
 
     def _index(self, sampled):
         """Whatever occupies psi's index slot.
@@ -502,8 +545,13 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         elif c["psi_bound"] == "tanh":
             bound_frac = jnp.mean(
                 (jnp.abs(psi_raw) > c["psi_bound_scale"]).astype(jnp.float32))
+        # `mask_invalid_preimages`: drop rows whose Stage-B inversion diverged, where
+        # u_data does not decode to the recorded action. None => every row weight 1, the
+        # published loss.
+        row_w = sampled.u_valid if c["mask_invalid_preimages"] else None
         sm, sm_diag, sm_offdiag = contrastive_loss(
-            M, jax.lax.stop_gradient(target_M), c["discount"], off, off_sum)
+            M, jax.lax.stop_gradient(target_M), c["discount"], off, off_sum,
+            row_weight=row_w)
         ortho, ortho_diag, ortho_offdiag = ortho_loss(phi_next, off, off_sum)
         # `ortho_mode='relative'`: weight the geometry regulariser BY the term it holds
         # down, ortho_coef + ortho_rel_coef * stopgrad(|psm_loss|), so the two gradient
@@ -518,6 +566,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
                       "orth_loss": ortho, "orth_diag": ortho_diag, "orth_offdiag": ortho_offdiag,
                       # Stabiliser telemetry, logged in every arm so the fixed and relative
                       # runs share a CSV schema.
+                      "preimage_valid_frac": jnp.mean(sampled.u_valid),
                       "ortho_weight": jnp.asarray(ortho_weight, jnp.float32),
                       "ortho_term_abs": jnp.abs(ortho_weight * ortho),
                       "psi_absmean": jnp.mean(jnp.abs(psi_raw)),
@@ -687,7 +736,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         info = {"actor_q": Q.mean(), "actor_logp": logp.mean(), "actor_alpha": alpha,
                 "actor_entropy": -logp.mean(), "actor_u_norm": jnp.linalg.norm(u_a, axis=-1).mean()}
         loss = c["actor"]["q_coeff"] * q_term + ent_term
-        if mode == "dsrl_na":
+        if mode == "gpi_distill":
             # na_candidates psi passes per state, so the target is built on the first
             # na_states rows only.
             n = min(int(c["actor"]["na_states"]), obs.shape[0])
@@ -1202,9 +1251,16 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
                 u_star = self.config["u_clip"] * self.actor(
                     observations[None], self.task_z[None], noise)[0]
             else:
-                # DSRL deploys the stochastic policy, not its mode. `noise` is the
-                # reparameterisation draw, keeping the eval stream on the ddpg arm's seed.
-                u_star = self._sac_latent(observations[None], self.task_z[None], noise)[0][0]
+                # temperature=0 deploys the MODE, which is how SAC is normally evaluated
+                # and what `utils.evaluation` asks for; anything else deploys the
+                # stochastic policy, with `noise` as the reparameterisation draw so the
+                # eval stream stays on the ddpg arm's seed. Selected with `where` rather
+                # than a Python `if`: `sample_actions` is jitted and `temperature` is a
+                # traced argument, so branching on it raises TracerBoolConversionError.
+                mu, log_std = self.sac_actor(observations[None], self.task_z[None])
+                u_stoch, _ = tanh_gaussian_sample(mu, log_std, noise, self.config["u_clip"])
+                u_mode = self.config["u_clip"] * jnp.tanh(mu)
+                u_star = jnp.where(jnp.asarray(temperature) == 0, u_mode, u_stoch)[0]
         else:
             u_star = self.gpi_select(observations, seed=seed)
         if ac["enabled"]:
@@ -1319,9 +1375,10 @@ def get_config():
                        entropy="auto",           # auto | fixed (fixed pins alpha=init_alpha)
                        target_entropy=0.0,       # DSRL's target_ent, not -dim(A)
                        init_alpha=1.0, lr_alpha=3.0e-4,
-                       log_std_min=-20.0, log_std_max=2.0),
+                       log_std_min=-20.0, log_std_max=2.0,
+                      prior_init=False, prior_init_std=0.3),
             # Which latent actor `train_actor=true` trains and `acting=actor` deploys.
-            actor_mode="ddpg",       # ddpg | dsrl_sac | dsrl_na
+            actor_mode="ddpg",       # ddpg | dsrl_sac | gpi_distill
             acting="gpi",            # gpi (per-step latent argmax, actor-free) | actor
             # psi's index slot. "latent" is psi(s, u, u'): u' ~ p0 per row indexes the
             # policy and w reaches psi only via Q = psi^T w. "task_vector" is psi(s, w, u).
@@ -1362,6 +1419,9 @@ def get_config():
             # main.py refuses a corrected-target preimage npz with false, and every
             # published number was produced with true.
             use_point_preimage=True,
+            # Drop transitions whose Stage-B inversion diverged from the measure loss.
+            # False = train on them, which every number before 2026-09-08 did.
+            mask_invalid_preimages=False,
             u_clip=3.0,              # typical-set clamp on all latent draws
             # Tighter box for the u' draws alone (psi's index slot, the bootstrap action,
             # GPI's u' roster); None = u_clip. u_data and the candidates u stay on u_clip.
@@ -1375,7 +1435,7 @@ def get_config():
             gpi_topm=8,              # gpi_select=soft_topm: pick uniformly among the top m
             gpi_index_seed=0,        # gpi_select=fixed_index: the pinned u' draw
             # gpi_select=prior_shrunk: scale on the single prior draw. 0.8 * 2.13 (the
-            # clipped prior median at d_a=5) = 1.70, the dsrl_na norm. 1.0 is the BC control.
+            # clipped prior median at d_a=5) = 1.70, the gpi_distill norm. 1.0 is the BC control.
             gpi_prior_shrink=0.8,
             gpi_decode="onestep",    # onestep | ode
             flow_decode_steps=10,    # Euler steps for gpi_decode=ode
