@@ -3,13 +3,11 @@
 `contrastive_loss` and `ortho_loss` are the PSM/FB measure objective and its
 orthonormality regulariser (PSM Eq. 7, Table 2); `targets_uncertainty` is the ensemble
 mean and spread the pessimism penalties are built from; `project_z`, `off_diagonal_mask`
-and `polyak_update` are one-liners with a single sensible definition. `proto_sample`,
-`_HashableDict`, `_step` and `_soft` are read only by the agents under archive/.
+and `polyak_update` are one-liners with a single sensible definition. `_plain_config` flattens a ConfigDict for the jitted update's static aux.
 """
 
 import jax
 import jax.numpy as jnp
-import optax
 
 
 def contrastive_loss(M, target_M, discount, off_diag, off_diag_sum, row_weight=None):
@@ -54,13 +52,6 @@ def targets_uncertainty(preds, num_parallel):
     return mean, unc
 
 
-def proto_sample(seed_to_action, powers, obs_hash, z, max_seed):
-    """PSM Eq. 8, the codebook policy pi(a|s,z) = UniformSample(seed = z + hash(s))."""
-    seed_long = jnp.sum(z * powers, axis=1)
-    final = ((seed_long + obs_hash.reshape(-1)) % max_seed).astype(jnp.int32)
-    return seed_to_action[final].astype(jnp.float32)
-
-
 def project_z(z, norm_z):
     """Project a task vector onto the sphere of radius sqrt(d), or pass it through."""
     if not norm_z:
@@ -88,23 +79,3 @@ def _plain_config(x):
     if hasattr(x, "items"):
         return {k: _plain_config(v) for k, v in x.items()}
     return x
-
-
-class _HashableDict(dict):
-    """A dict that hashes/compares by identity so it can live in a jit static aux."""
-
-    __hash__ = object.__hash__
-
-    def __eq__(self, other):
-        return self is other
-
-
-def _step(tx, grad, params, opt_state):
-    """One optax step on a raw (params, opt_state) pair."""
-    updates, new_opt = tx.update(grad, opt_state, params)
-    return optax.apply_updates(params, updates), new_opt
-
-
-def _soft(online, target, tau):
-    """`polyak_update` under the name the archived agents import."""
-    return jax.tree_util.tree_map(lambda p, tp: p * tau + tp * (1 - tau), online, target)

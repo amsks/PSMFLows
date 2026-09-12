@@ -1,7 +1,8 @@
 # Baseline: PSM in RAW ACTION SPACE, no BC anchoring — cube-single-play
 
 **Generated** 2026-09-06 · 3 seeds × 500k offline steps × 500-episode evals every 50k.
-Ladder rows regenerate with `PSM_DATA=... .venv/bin/python scripts/baselines/psm_raw_nobc_table.py`;
+Ladder rows regenerate with `PSM_DATA=... .venv/bin/python scripts/baselines/psm_raw_nobc_table.py`
+(that script and its launcher are on the `archive` branch, not this one);
 launcher `scripts/baselines/psm_raw_nobc.sh`; report JSONs
 `$PSM_DATA/logs/eval500_<group>_<epoch>k_sd<seed>.json`.
 

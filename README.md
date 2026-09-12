@@ -119,7 +119,7 @@ head.
 agents/psmflow.py        the algorithm: construction, losses, update, acting, inference
 agents/fql.py            the behaviour flow and its inverse (stage B's core)
 utils/psm_networks.py    nn.Modules only: PhiMap, PsiMap, AffinePsiMap, the actors
-utils/psm_common.py      pure loss/ensemble/projection helpers shared with archive/
+utils/psm_common.py      pure loss/ensemble/projection helpers
 utils/flow_inversion.py  preimage validity, repair, augmented-dataset IO
 tools/                   preimage precompute, checkpoint evaluation, diagnostics, figures
 scripts/                 launchers; scripts/slurm/ for a scheduler, one seed per job
@@ -144,14 +144,18 @@ that is what the method has to beat.
 - `docs/design/` and `docs/plans/` — dated design notes and pre-registrations,
   `YYYY-MM-DD-slug.md`.
 
-## archive/
+## The `archive` branch
 
-`archive/` holds every agent, config, test, tool and plan that is not on the
-`fql` -> preimages -> `psmflow` path: the peer baselines, the raw-action measure agents and
-the settled-negative experiments. It is excluded from `ruff check .` and from pytest
-collection, nothing in the live tree imports it, and it is kept because it is the negative
-result of record. Do not add to it or extend it; see
-[`archive/README.md`](archive/README.md) for how to revive something.
+Every agent, config, test, tool and plan that is not on the `fql` -> preimages -> `psmflow`
+path lives on the `archive` branch: the peer baselines, the raw-action measure agents, the
+settled-negative experiments and the `scripts/baselines/` launchers. It is kept because it is
+the negative result of record. Nothing on this branch imports it.
+
+```bash
+git show archive:archive/README.md          # what moved and why
+git show archive:archive/agents/fb.py       # read one file
+git checkout archive -- archive/agents/fb.py   # bring one back, deliberately
+```
 
 ## Acknowledgments
 

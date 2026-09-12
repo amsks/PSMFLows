@@ -23,11 +23,12 @@ LatentFlowPSM: `psi_form=affine policy_index=latent train_actor=false acting=gpi
 `psi(s,u,u') = A(s,u)^T w(u') + beta(s,u)` (Prop. `bilinear` literally), no actor, GPI acting.
 cube @250k, 500 episodes: **0.532 / 0.620** (2 seeds) vs 0.083 free-psi, 0.230 latent actor,
 0.072 BC. Design: `docs/design/2026-09-04-affine-psi.md`. Two agents exist — `psmflow` and
-`fql` (Stage A + its inverse, and the BC control). **Everything else lives in `archive/` and
-should be ignored**: psm, affine_psm, latent_affine_psm, latentrl, fb and the off-the-shelf
-baselines, plus the tools/scripts/tests/plans tied to them or to settled-negative
-hypotheses. `archive/README.md` says what moved and why; it is excluded from ruff and
-pytest. Do not add to it, do not read it unless reviving something.
+`fql` (Stage A + its inverse, and the BC control). **Everything else lives on the `archive`
+branch and is off this branch**: psm, affine_psm, latent_affine_psm, latentrl, fb and the
+off-the-shelf baselines, plus the tools/scripts/tests/plans tied to them or to
+settled-negative hypotheses, and the `scripts/baselines/` launchers that drove them.
+`git show archive:archive/README.md` says what moved and why; `git checkout archive -- <path>`
+brings one file back. Do not revive anything without a reason.
 
 ## Three-stage pipeline
 
@@ -45,7 +46,7 @@ eval, regeneration.
 ## Commands
 
 ```bash
-# tests (CPU is fine; no CI. pyproject pins testpaths=tests and excludes archive/)
+# tests (CPU is fine; no CI. pyproject pins testpaths=tests)
 .venv/bin/python -m pytest tests/ -x -q
 .venv/bin/python -m pytest tests/test_psmflow_agent.py::test_name -x
 # tests gated on a Stage-A checkpoint skip unless PSMFLOWS_STAGE_A_CKPT points at one
@@ -102,7 +103,7 @@ dataset, and for latent-space agents loads the preimage-augmented dataset.
   argmax), `actor_mode`, `gpi_select`, `backup_explore_frac`, `action_critic.*`,
   `index_agg=expectile`. README lists every seam with its default and what it switches.
 - `utils/psm_common.py` — the pure measure helpers (`contrastive_loss`, `ortho_loss`,
-  `targets_uncertainty`, `project_z`, …), shared with the archived agents.
+  `targets_uncertainty`, `project_z`, …).
 - `utils/flow_inversion.py` — preimage validity, repair, augmented-dataset IO, mixture sampling.
 - `utils/psm_networks.py` — `nn.Module` definitions ONLY (`PhiMap`, `PsiMap`,
   `AffinePsiMap`, `FlowVectorField`, the actors); every loss lives in `agents/`.
@@ -147,7 +148,7 @@ across seeds, never a peak or a best seed. Always quote the behaviour-cloning co
 it — the frozen flow acting alone (`agent=fql agent.bc_only=true`) from the same checkpoint
 the agent decodes through — since that is what the method has to beat. The FB comparator
 rows in `docs/tables/results.md` come from eval JSONs already on disk (`make_tables.py` is
-pure JSON I/O); re-running FB means un-archiving `archive/agents/fb.py`.
+pure JSON I/O); re-running FB means restoring `agents/fb.py` from the `archive` branch.
 
 ## Working discipline (these rules exist because they were violated)
 
