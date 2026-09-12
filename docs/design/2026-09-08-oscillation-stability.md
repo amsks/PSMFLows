@@ -161,7 +161,7 @@ Recorded before any arm lands, so the verdict cannot be shopped.
    Bellman-trained selection head from `2026-09-08-measure-loss-audit.md` 8.5, not more
    hyperparameters.
 
-## 8. Verdict, filled 2026-09-08 (INTERIM -- 2 of 12 runs still training)
+## 8. Verdict, filled 2026-09-08; all 12 runs complete 2026-09-09
 
 **Every arm failed. The two that look like they worked, did not.**
 
@@ -175,7 +175,26 @@ in-loop proxy is sound):
 | `tau1e3_cube` | 0.119 | **0.193** | 0.062 | 1.62 |
 | `oc1e4_cube` | 0.296 | 0.533 | 0.213 | 1.80 |
 | `lrsf1e5_cube` | 0.104 | **0.173** | 0.068 | 1.66 |
-| `oc1e4_lrsf1e5_cube` | 0.256 | 0.240 | 0.151 | 0.94 (2 seeds, 1 partial) |
+| `oc1e4_lrsf1e5_cube` | 0.237 | 0.320 | 0.110 | 1.35 |
+
+**2026-09-09, all 12 runs complete.** The two rows that were partial are now full 3-seed,
+9-point ladders; `oc1e4_lrsf1e5` moved from 0.256 / 0.240 (2 seeds, one partial) to
+0.237 / 0.320, i.e. its swing/mean went from 0.94 to 1.35 and it joins the others in being
+*relatively* less stable than the control. Nothing else moved.
+
+**Which rows are final, and which are not.**
+
+| arm | status | why |
+|---|---|---|
+| `tau1e3_cube` | **FINAL without eval500** | its best seed (0.182) is below the control's *worst* seed (0.356). A 3.6x gap that holds seed-for-seed is not something 50-episode noise produces. |
+| `lrsf1e5_cube` | **FINAL without eval500** | same: best seed 0.127 against the control's worst 0.356, a 4.2x gap. |
+| `oc1e4_cube` | **PROVISIONAL** | 0.296 against 0.432 is inside the band the in-loop basis can resolve. |
+| `oc1e4_lrsf1e5_cube` | **PROVISIONAL** | 0.237 against 0.432, same. |
+
+500-episode evals for the two provisional arms are queued (12 jobs, 3 seeds x 2 epochs,
+`scripts/slurm/launch_stability_eval500.sh`), nice'd and dependency-chained behind the
+2026-09-08/09 campaign so they cannot delay it. **Until they land the ortho line is
+PROVISIONAL, not closed** -- see the correction below.
 
 `tau1e3` and `lrsf1e5` roughly halve the swing -- and drop the mean 4x, from 0.432 to
 0.119 and 0.104. **They do not hold a good policy steady; they sit near the floor, where a
@@ -188,7 +207,7 @@ oscillation, it just trained worse. `oc1e4` is worse on both axes.
 | prediction | outcome |
 |---|---|
 | 1. `tau` cuts swing, mean roughly unchanged | **half right** -- swing fell as predicted, the mean collapsed, which was not predicted and is what matters |
-| 2. `ortho_coef=1e4` is the high-variance bet; close the line if success does not improve when `orth_offdiag` drops | **failed on both axes -- the ortho line is CLOSED.** The r=-0.375 correlation was confounded, as flagged: it extrapolated a 1.4% observed range to a 10x coefficient change |
+| 2. `ortho_coef=1e4` is the high-variance bet; close the line if success does not improve when `orth_offdiag` drops | **failed on both axes on the in-loop basis, but the line is PROVISIONAL, not closed** (corrected 2026-09-09). Both ortho arms sit inside the band the in-loop ladders can resolve, and the pre-registration says to close the line on a *result*, not on a proxy. The r=-0.375 correlation is still confounded exactly as flagged -- it extrapolated a 1.4% observed range to a 10x coefficient change -- but that argues the arm was a long shot, not that it has been measured |
 | 3. `lr_sf=1e-5` lowers swing and mean, ladder under control | **exactly right**, including the named failure mode |
 | 4. the combination is not additive | consistent so far (2 seeds) |
 | 5. **expected failure: every arm oscillates at the control amplitude -> the instability is intrinsic to the objective** | **this is what happened** |
@@ -203,10 +222,13 @@ not more hyperparameters. See section 9.
 
 ### Caveats
 
-- **In-loop 50-episode ladders**, which swing +/-0.15. The 4x mean collapse is far outside
-  that, so the direction is not in doubt, but no number here is reportable. eval500 on each
-  checkpoint is required before any of this is quoted.
-- `oc1e4_lrsf1e5` sd1 is partial (2 points) and sd2 is still training.
+- **In-loop 50-episode ladders**, which swing +/-0.15. For `tau1e3` and `lrsf1e5` the gap
+  is 3.6-4.2x and holds seed-for-seed against the control's worst seed, so those two are
+  settled on this basis; for the two ortho arms it is not, and they are queued for eval500.
+  No number in this table is reportable as a headline until then.
+- The control's row is the in-loop ladder (0.432 / 0.353) so that it shares a basis with the
+  arms. Its eval500 ladder is 0.415 / 0.371 -- close enough that the in-loop proxy is sound
+  for the control, which is the evidence that the proxy is usable at all here.
 
 ---
 
@@ -214,8 +236,10 @@ not more hyperparameters. See section 9.
 
 The chain, stated so the reasoning can be attacked rather than re-derived:
 
-1. Slowing the optimiser does not help (section 8) -- so the instability is not in the
-   optimisation rates.
+1. Slowing the optimiser does not help (section 8, and `tau1e3` / `lrsf1e5` are settled) --
+   so the instability is not in the optimisation rates. The two ortho arms are still out at
+   eval500; if either of them clears the control this step weakens and the chain below has
+   to be re-argued.
 2. `psm_loss` does not predict success, r=+0.079 (section 3) -- so the objective being
    minimised is not the objective we care about.
 3. The critic ranks weakly (Spearman ~0.15, `2026-09-08-measure-loss-audit.md` 8.4) and it

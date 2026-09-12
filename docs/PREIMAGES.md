@@ -343,6 +343,31 @@ MUJOCO_GL=egl .venv/bin/python tools/eval_checkpoint.py agent=fql agent.bc_only=
   env_name=$ENV restore_path=$PSM_DATA/flow/$NAME restore_epoch=500000 eval_episodes=500
 ```
 
+### Continuing a run past its original budget
+
+`main.py` restores an agent through `restore_path` / `restore_epoch`, and a restore carries
+everything a continuation needs: the weights, the optimiser state, the target networks and
+the per-`TrainState` step counter. `save_agent` pickles the whole PyTreeNode, so those are
+included by construction; `tests/test_checkpoint_restore_carries.py` is the guard that stops
+that changing quietly. So training 500k more steps from a 500k checkpoint does **not**
+require a fresh long run.
+
+**One trap.** `main.py`'s own loop counter restarts at 1, so the continuation's
+`save_interval` epochs restart too and it writes `params_50000.pkl`, `params_100000.pkl` and
+so on all over again. Pointed at the original `save_dir` it **overwrites the first run's
+checkpoints**. Always give a continuation its own `run_group`:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python main.py agent=psmflow env_name=$ENV \
+  agent.flow_ckpt_path=$PSM_DATA/flow/$NAME agent.flow_ckpt_epoch=500000 \
+  agent.preimage_path=$PSM_DATA/preimages/$NAME.npz \
+  restore_path='<original run dir>' restore_epoch=500000 \
+  run_group=<original>_cont offline_steps=500000 save_dir=$PSM_DATA/exp seed=0
+```
+
+Read the continuation's checkpoints as `restore_epoch + i`: `params_250000.pkl` in a
+continuation from 500k is the 750k checkpoint.
+
 ## 5. Regenerating preimages (only if you change the flow)
 
 ```bash

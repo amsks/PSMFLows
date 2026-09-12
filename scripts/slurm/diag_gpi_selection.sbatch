@@ -33,9 +33,32 @@ set -euo pipefail
 TAG="${TAG:-$ENVKEY}"
 N_EP="${N_EP:-20}"
 N_FIXED="${N_FIXED:-256}"
-N_MC="${N_MC:-12}"
+N_MC="${N_MC:-64}"
 MC_H="${MC_H:-50}"
+# The MC ground truth uses only the FROZEN flow, the dataset and the simulator, so every
+# checkpoint's job would recompute the same numbers. ORACLE_DIR adds the third ranker (a
+# frozen FQL expert's action critic read at G(s,u)); MC_CACHE makes the first job pay for
+# the rollouts and the rest reuse them. Both optional.
+ORACLE_DIR="${ORACLE_DIR:-}"
+ORACLE_EPOCH="${ORACLE_EPOCH:-500000}"
+MC_CACHE="${MC_CACHE:-}"
+# NA_DIR: a trained DSRL-NA run whose qw/qa score the same roster as two more rankers.
+NA_DIR="${NA_DIR:-}"
+NA_EPOCH="${NA_EPOCH:-500000}"
 EXTRA="${EXTRA:-}"
+if [ -n "$ORACLE_DIR" ]; then
+  EXTRA="$EXTRA +oracle_path=$ORACLE_DIR +oracle_epoch=$ORACLE_EPOCH"
+fi
+if [ -n "$MC_CACHE" ]; then
+  EXTRA="$EXTRA +mc_cache=$MC_CACHE"
+fi
+if [ -n "$NA_DIR" ]; then
+  EXTRA="$EXTRA +na_path=$NA_DIR +na_epoch=$NA_EPOCH"
+fi
+# The smaller box every ranker is ALSO scored inside (defaults to the NA run's own u_clip).
+if [ -n "${INBOX_CLIP:-}" ]; then
+  EXTRA="$EXTRA +inbox_clip=$INBOX_CLIP"
+fi
 
 case "$ENVKEY" in
   cube)      ENV_NAME=cube-single-play-singletask-v0;                FLOW=cube-single-play ;;

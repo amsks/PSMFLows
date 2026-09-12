@@ -147,7 +147,29 @@ def main(cfg: DictConfig):
                     '(use_point_preimage=false). Those fits sit outside the prior the '
                     'latent actor samples from. Regenerate at inversion.prior_scale=1.0, '
                     'or set agent.use_point_preimage=true.')
-            elif _ps is None or float(_ps) == 0.0:
+            # `measure_u_samples > 1` with the mixture source reads the same arrays, but for
+            # a different purpose and under a different criterion, so it does NOT take the
+            # assertion above. That gate asks whether the fit sits inside the prior the
+            # latent ACTOR samples from. This path never samples the actor from the mixture:
+            # it fits the measure head at extra latents, where the only thing that matters is
+            # whether those latents decode to the transition's recorded action. That is now
+            # measured directly (tools/diag_mixture_decode.py) and the prior_scale proxy is
+            # actively misleading for it -- on cube the prior_scale=0.691 npz's samples
+            # decode WORSE (0.207) than the legacy npz's (0.167) against a point inverse at
+            # 0.089, and on pointmaze no prior_scale>0 npz exists at all. The gate here is
+            # instead that `measure_u_mixture_shrink` was chosen deliberately, which the
+            # agent's `create` asserts; this prints what the sidecar says so a run that
+            # picked the shrink on a different npz is visible in the log.
+            elif int(config.get('measure_u_samples', 1)) > 1 and (
+                    config.get('measure_u_source', 'mixture') == 'mixture'):
+                print(f'NOTE: reading the preimage MIXTURE for measure_u_samples='
+                      f'{config.get("measure_u_samples")} at shrink='
+                      f'{config.get("measure_u_mixture_shrink")}; npz prior_scale={_ps}. '
+                      'The shrink must come from tools/diag_mixture_decode.py --shrink on '
+                      'THIS npz -- see docs/design/2026-09-08-critic-signal-and-dsrl-na.md.')
+            if (_ps is None or float(_ps) == 0.0) and config.get(
+                    'use_point_preimage', False) and int(
+                    config.get('measure_u_samples', 1)) == 1:
                 # Sidecars written before 08-14 have no prior_scale key at all; absent
                 # means the legacy target, same as an explicit 0.0.
                 print(f'NOTE: preimage npz uses the legacy prior_scale={_ps} mixture, but '
@@ -220,6 +242,7 @@ def main(cfg: DictConfig):
     # Train agent.
     train_logger = CsvLogger(os.path.join(save_dir, 'train.csv'))
     eval_logger = CsvLogger(os.path.join(save_dir, 'eval.csv'))
+    na_refit_info = {}          # Arm D1b: latest `refit_na_reward` values, logged every row
     first_time = time.time()
     last_time = time.time()
 
@@ -284,6 +307,11 @@ def main(cfg: DictConfig):
         # Log metrics.
         if i % cfg.log_interval == 0:
             train_metrics = {f'training/{k}': v for k, v in update_info.items()}
+            # Arm D1b: the refit runs on its own schedule, but CsvLogger fixes the header
+            # from the FIRST row it writes, so a key present only on refit steps would
+            # never reach train.csv. Carry the latest values on every row instead. The
+            # first refit is at i == 1, before any log step, so the header always has them.
+            train_metrics.update({f'training/{k}': v for k, v in na_refit_info.items()})
             if val_dataset is not None:
                 val_batch = val_dataset.sample(config['batch_size'])
                 _, val_info = agent.total_loss(val_batch, grad_params=None)
@@ -294,6 +322,24 @@ def main(cfg: DictConfig):
             last_time = time.time()
             wandb.log(train_metrics, step=i)
             train_logger.log(train_metrics, step=i)
+
+        # Arm D1b (`dsrl_na.reward_source=phi_readout_fixed`): refit the HELD reward
+        # readout w from a fresh relabel batch, and rescale r_hat onto the real reward's
+        # scale. Driven from here rather than from inside `update` so that Q_A sees ONE
+        # reward function between refits -- refitting per 256-row batch (Arm D1) trained
+        # the critic on a reward that was redrawn every step. Two disjoint batches: one
+        # to fit on, one to score the fit on.
+        _na_cfg = config.get('dsrl_na') or {}
+        _refit = int(_na_cfg.get('reward_refit_every') or 0)
+        if (_na_cfg.get('enabled') and _na_cfg.get('reward_source') == 'phi_readout_fixed'
+                and _refit > 0 and (i == 1 or i % _refit == 0)):
+            n_relabel = min(train_dataset.size, int(cfg.get('eval_relabel_size', 10000)))
+            fit_b = train_dataset.sample(n_relabel)
+            ho_b = train_dataset.sample(n_relabel)
+            agent, na_refit_info = agent.refit_na_reward(
+                fit_b['next_observations'], fit_b['rewards'],
+                ho_b['next_observations'], ho_b['rewards'])
+            wandb.log({f'training/{k}': v for k, v in na_refit_info.items()}, step=i)
 
         # Evaluate agent.
         if cfg.eval_interval != 0 and (i == 1 or i % cfg.eval_interval == 0):

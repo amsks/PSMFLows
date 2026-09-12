@@ -229,6 +229,11 @@ class TanhGaussianLatentActor(nn.Module):
     #: run before 2026-09-08.
     prior_init: bool = False
     prior_init_std: float = 0.3
+    #: LayerNorm after every hidden ReLU of the trunk. DSRL's offline OGBench configs use
+    #: it on every hidden layer of both actor and critic; the embeddings already carry one
+    #: (`_simple_embedding`), this covers the `hidden_layers` stack after them. Default
+    #: False reproduces every dsrl_sac run before 2026-09-08.
+    layer_norm: bool = False
 
     @nn.compact
     def __call__(self, obs, z):
@@ -238,6 +243,8 @@ class TanhGaussianLatentActor(nn.Module):
         h = jnp.concatenate([s_embedding, z_embedding], -1)
         for _ in range(self.hidden_layers):
             h = nn.relu(nn.Dense(self.hidden_dim, kernel_init=_ORTH1)(h))
+            if self.layer_norm:
+                h = nn.LayerNorm(epsilon=1e-5)(h)
         if self.prior_init:
             mu = nn.Dense(self.action_dim, kernel_init=nn.initializers.zeros)(h)
             log_std = nn.Dense(

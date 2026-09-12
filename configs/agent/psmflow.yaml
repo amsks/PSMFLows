@@ -56,6 +56,10 @@ lr_sf: 1.0e-4
 lr_actor: 1.0e-4
 lr_actor_vf: 3.0e-4
 
+# Diagnostic continuation switch. false holds the full phi TrainState fixed and uses its
+# online parameters as target_phi while psi and the affine index encoder keep training.
+train_phi: true
+
 phi:
   hidden_dim: 256
   hidden_layers: 2
@@ -106,6 +110,10 @@ actor:
   log_std_max: 2.0
   prior_init: false        # start the tanh-Gaussian AT the flow prior, not outside it:
   prior_init_std: 0.3      # at u_clip=3 the default init has per-dim std 1.88 vs prior 1.0
+  layer_norm: false        # LayerNorm after every hidden ReLU of the tanh-Gaussian trunk
+                           # (dsrl_sac head only; the embeddings already carry one). DSRL
+                           # puts it on every hidden layer of actor and critic. false
+                           # reproduces every dsrl_sac run before 2026-09-08.
 # Which latent actor `train_actor: true` trains and `acting: actor` deploys.
 #   ddpg      (DEFAULT) the shipped NoiseConditionedActor + flowBC recipe:
 #             -Q/|Q| + bc_coeff * distill + the CFM velocity field.
@@ -143,6 +151,10 @@ policy_index: latent       # latent | task_vector
 # "free psi": the policy coordinate w^{u'} is ABSORBED into psi. Kept as an ablation switch;
 # it is the arm that measured cube 0.083 where `affine` measures 0.532/0.620.
 psi_form: affine           # affine | free
+# Current-action coordinate of the affine measure. `latent` is the legacy/default path.
+# `action` fits recorded dataset actions exactly and decodes every latent query through
+# the frozen Stage-A flow; it requires psi_form=affine, policy_index=latent and one sample.
+measure_action_input: latent  # latent | action
 affine:
   w_dim: 128               # d_w, the policy-coordinate dimension (default = z_dim)
   encoder_hidden: 256      # w(.) encoder width (PhiMap shape)
@@ -168,6 +180,71 @@ q_dist:
   hidden_layers: 1
   embedding_layers: 2      # carried for symmetry; unused by the plain-MLP Value head
   lr: 3.0e-4
+
+# DSRL-NA's dual critic (2026-09-08). **NOT ZERO-SHOT**: `qa` is trained by TD on the
+# task's REAL reward, so this arm is an UPPER BOUND -- it answers "can the frozen flow be
+# steered at all on this env", and its number may not be quoted beside a zero-shot row.
+#
+# The 2026-09-08 audit found that what this repo called DSRL-NA had copied DSRL's ACTOR and
+# not DSRL's CRITIC. DSRL-NA is a dual critic:
+#   qa(s, a)   scalar TD on (s, a, r, s') with bootstrap a' = G(s', pi(s')). Fitted over RAW
+#              ACTIONS, where many latents collapse onto one action.
+#   qw(s, u)   regressed onto qa(s, G(s, u)) at prior latents, `inner_steps` times per outer
+#              update. The latent actor climbs THIS and nothing else; no gradient reaches
+#              qa or the flow.
+# `actor_mode: dsrl_sac` supplies the actor, this block supplies the critic, and `create`
+# asserts you have both (plus acting=actor and actor.bc_coeff=0 -- DSRL has no BC term).
+# psi/phi keep training alongside and are simply unused by this arm, which is why it does
+# NOT conflict with psi_form=affine the way the dsrl_sac-on-psi arm did.
+dsrl_na:
+  enabled: false
+  discount: 0.99           # DSRL's gamma, not the measure's 0.98
+  tau: 0.005               # qa target Polyak rate
+  lr: 3.0e-4
+  hidden_dim: 2048         # DSRL's offline OGBench critic width
+  hidden_layers: 3
+  layer_norm: true         # on every hidden layer
+  num_ensembles: 2         # qa ensemble; the TD target and the distillation take the min
+  inner_steps: 10          # qw regression steps per outer update
+  n_latent: 1              # prior latents per state per inner step
+  # Where qa's reward comes from. Arm D1 (2026-09-09) walks the four differences between
+  # this arm and the zero-shot one, one at a time, starting with the linear readout.
+  #   real        (DEFAULT) the task's own reward. Item 2's arm.
+  #   phi_readout r_hat = phi(s')^T w with w = project(E_batch[(r + reward_shift) phi]),
+  #               i.e. the DEPLOYED zero-shot reward channel, recomputed each batch because
+  #               phi is still training. The 2026-09-09 gate measured that channel's
+  #               topline R^2 at 0.116 with 86% of its predicted reward mass on rows that
+  #               pay nothing, so this arm prices what that costs in success.
+  #               `na_rhat_corr` logs how much of the real reward survives the round trip.
+  #   synthetic_w Arm D2, the ZERO-SHOT version: r_w = phi(s')^T w at the task vector this
+  #               row drew, so no real reward enters training at any point. Requires
+  #               task_conditioned. Note it makes the measure branch load-bearing for the
+  #               first time in this family -- phi defines the reward, so training phi is no
+  #               longer inert the way it is under `real`.
+  #   phi_readout_fixed
+  #               Arm D1b (2026-09-09). The same channel, fit the way it is DEPLOYED.
+  #               phi_readout refits w on each 256-row batch, and cube's reward is paid by
+  #               2.1% of rows, so w is the mean of about five phi vectors and is redrawn
+  #               every step: measured, r_hat's std was 13.6 against the real reward's 0.15,
+  #               and D1 scored 0.021 at 500 episodes, below the BC control. Here w is the
+  #               closed form on an `eval_relabel_size` relabel batch -- the estimator
+  #               infer_z uses at eval -- refit every reward_refit_every steps and held
+  #               FIXED between, with r_hat rescaled so its std over that batch equals the
+  #               real reward's. main.py drives the refit; see `refit_na_reward`.
+  reward_source: real      # real | phi_readout | phi_readout_fixed | synthetic_w
+  # reward_source: phi_readout_fixed only. Steps between refits of the held readout w.
+  # Must be > 0: with no refit w stays at its zero init and the reward is identically 0,
+  # which create() refuses.
+  reward_refit_every: 10000
+  # Added to r before forming w. 1.0 matches `eval_reward_shift`, and it is load-bearing:
+  # on the raw -1/0 reward the topline readout R^2 is -0.20, worse than predicting the mean,
+  # because a no-intercept linear model cannot represent the offset.
+  reward_shift: 1.0        # reward_source: phi_readout only
+  # Arm D2: qa(s, a, w), qw(s, u, w) and the actor pi(u | s, w) all take the task vector, so
+  # the arm generalises over tasks instead of solving one. `Value` concatenates its two
+  # arguments, so this is literally "append w". Requires reward_source=synthetic_w, and
+  # create() refuses either half without the other.
+  task_conditioned: false
 
 # Action branch: w-conditioned successor features over EXECUTED
 # actions (psi_a shares phi and the w machinery) + an eps-bounded residual head.
@@ -225,6 +302,68 @@ use_point_preimage: true   # point-vs-mixture ablation. true is the default beca
 
 mask_invalid_preimages: false   # drop rows whose Stage-B inversion diverged from the
                            # measure loss. false = train on them (every number pre-09-08)
+
+# How many action latents u the MEASURE head is fitted at per transition (2026-09-08).
+# 1 (DEFAULT) is the published loss: psi is fitted at the single point preimage u_data, so
+# the head is a function of u trained at ONE point per state and extrapolating everywhere
+# else -- which is why the std over u of max_u' Q reads 57 against an ensemble disagreement
+# of 124 (docs/design/2026-09-08-critic-signal-and-dsrl-na.md 1).
+# > 1 adds draws from the stored EM preimage mixture, each carrying the SAME (s, s')
+# target, on the premise that many latents decode to the same recorded action.
+# CAVEAT, measured (COMPENDIUM 4.9, all three envs): the mixture is a BLURRED POINT -- its
+# width is the inversion temperature, not decoder degeneracy, and at alpha=20 a mixture
+# sample decodes 0.150 from the recorded action against the point inverse's 0.089. The
+# extra rows are a local augmentation with a known error, not extra exact preimages.
+# `u_extra_dist` logs how far the extra latents actually sit from u_data.
+measure_u_samples: 1
+# Where those extra latents come from.
+#   mixture  the stored EM preimage posterior. Needs an npz inverted at
+#            inversion.prior_scale > 0 (main.py refuses otherwise). MEASURED on cube
+#            (tools/diag_mixture_decode.py, 4096 rows, ||a|| = 0.875): a posterior SAMPLE
+#            decodes 0.205 from the recorded action against the point inverse's 0.089 --
+#            60% of the way to an uninverted prior draw. They are not other preimages of
+#            the same action, and the extra rows would carry the point's (s, s') target
+#            while decoding elsewhere.
+#   jitter   u_data + measure_u_jitter_std * eps, clipped to the box. Same probe's ladder
+#            picks the width from evidence: sigma 0.1/0.2/0.3/0.5/0.75/1.0 decode at
+#            0.090/0.096/0.103/0.121/0.154/0.190, and the point inverse's own p90 is 0.128,
+#            so up to ~0.5 the extra latents still decode to this transition's action.
+#            Works on any npz, including the one every published number used.
+# How `infer_z` reads the task vector w off a relabelling batch.
+#   closed_form  (DEFAULT, every published number) w = E_D[r phi], Cor. reward-inference
+#                literally. This is the least-squares readout ONLY when E[phi phi^T] = I,
+#                which is what the ortho term exists to enforce.
+#   whitened     solve the normal equations, w = (E[phi phi^T] + eps I)^-1 E[r phi], i.e.
+#                the best linear readout of phi. Identical to the closed form wherever the
+#                Gram is already the identity, so it is a no-op on cube by construction.
+# MEASURED 2026-09-09, tools/diag_reward_readout.py, 200k rows:
+#   env        Gram dev from I   cond    cos(closed form, least squares)  topline R^2
+#   cube             0.035        1.3            0.997                      0.116
+#   antmaze          0.423       15.4            0.893                      0.104
+#   pointmaze        2.39         2e9            0.075                      0.514
+# On pointmaze the orthonormality has collapsed (smallest Gram eigenvalue 2e-4) and the
+# deployed estimator points almost orthogonally to the best readout -- while that basis is
+# the MOST expressive of the three. affine_strict_pointmaze scores exactly 0.000.
+reward_inference: closed_form   # closed_form | whitened
+reward_inference_eps: 1.0e-3    # ridge on the Gram; whitened only
+
+measure_u_source: mixture       # mixture | jitter
+measure_u_jitter_std: 0.3       # measure_u_source: jitter only
+# Arm C: covariance scale c on the mixture draws (cov -> c^2 * cov), keeping the
+# posterior's SHAPE while pulling samples toward its mean. NO DEFAULT -- `create` refuses
+# measure_u_source=mixture without it, because there is no value that is safe on every env.
+# Pick it with `tools/diag_mixture_decode.py --shrink`: the largest c whose mean decode
+# error stays inside the point inverse's own p90. Measured on the published npz files
+# (the same ones the affine_strict runs train on):
+#   env        c    sample decode err   gate (point p90)   dist from u_data
+#   cube      0.5        0.119               0.128              1.675
+#   antmaze   1.0        0.314               0.450              1.574
+#   pointmaze 0.5        0.130               0.180              1.236
+# At a MATCHED decode error the shrunk anisotropic draw sits 1.6x (cube) / 1.9x (antmaze) /
+# 3.2x (pointmaze) further from u_data than the round `jitter` ball, which is the whole
+# reason the shape is worth keeping. Floor to know about: c -> 0 collapses onto the
+# posterior MEAN, which is itself 1.14 / 1.74 / 2.79 away from the point inverse.
+measure_u_mixture_shrink: null  # measure_u_source: mixture only. REQUIRED there.
 
 u_clip: 3.0                # typical-set clamp on latent draws
 index_clip: null           # box for the policy-INDEX draws u' only (psi's index slot, the

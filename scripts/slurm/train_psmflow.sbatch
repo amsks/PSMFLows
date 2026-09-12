@@ -105,6 +105,21 @@ echo "    preimages=$PREIMAGES"
 echo "    discount=$DISCOUNT (envkey=$ENVKEY default=$DISCOUNT_DEFAULT override='${DISCOUNT_OVERRIDE:-none}')"
 echo "    steps=$STEPS extra='$EXTRA'"
 
+# Continuing a finished run: restore its weights, optimiser state and targets, then train
+# STEPS more. RESTORE_PATH must be one run directory (main.py globs it and asserts exactly
+# one match). Read the continuation's checkpoints as RESTORE_EPOCH + i -- its own counter
+# restarts at 1 -- and give it a GROUP of its own, or it overwrites the original run's
+# params_*.pkl. docs/PREIMAGES.md, "Continuing a run past its original budget".
+RESTORE_ARG=""
+if [ -n "${RESTORE_PATH:-}" ]; then
+  [ -d "$RESTORE_PATH" ] || { echo "no such restore dir: $RESTORE_PATH" >&2; exit 1; }
+  : "${RESTORE_EPOCH:?RESTORE_EPOCH required when RESTORE_PATH is set}"
+  [ -f "$RESTORE_PATH/params_${RESTORE_EPOCH}.pkl" ] || {
+    echo "no params_${RESTORE_EPOCH}.pkl in $RESTORE_PATH" >&2; exit 1; }
+  RESTORE_ARG="restore_path=$RESTORE_PATH restore_epoch=$RESTORE_EPOCH"
+  echo "    CONTINUATION from $RESTORE_PATH @$RESTORE_EPOCH (+$STEPS steps)"
+fi
+
 srun "$PY" main.py \
     agent="$AGENT" \
     agent.flow_ckpt_path="$FLOW_DIR" agent.flow_ckpt_epoch="$EPOCH" \
@@ -113,4 +128,4 @@ srun "$PY" main.py \
     offline_steps="$STEPS" online_steps=0 \
     log_interval="$LOG_INT" eval_interval="$EVAL_INT" eval_episodes="$EVAL_EPS" \
     save_interval="$SAVE_INT" save_dir="$PSM_DATA/exp" \
-    run_group="$GROUP" seed="$SEED"
+    run_group="$GROUP" seed="$SEED" $RESTORE_ARG

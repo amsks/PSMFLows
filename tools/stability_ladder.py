@@ -33,6 +33,11 @@ import statistics as st
 ACTING_OVERRIDES = frozenset({
     "gpi_num_u", "gpi_select", "gpi_topm", "gpi_index_seed", "gpi_prior_shrink",
     "u_clip", "index_clip", "acting", "actor_mode", "index_agg", "gpi_decode",
+    # `reward_inference` changes the task vector w the policy acts on, so a whitened eval
+    # is a different POLICY on the same weights -- exactly what this set is for. Added
+    # 2026-09-09 with the seam, before the first such eval was run, because the ladder is
+    # keyed by restore_epoch alone and it would otherwise overwrite the run's own entry.
+    "reward_inference", "reward_inference_eps",
 })
 
 

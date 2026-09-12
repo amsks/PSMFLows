@@ -24,6 +24,12 @@ configuration in which the latent MDP is genuinely on-policy is
     actor.index_panel=0 train_actor=true acting=actor
 
 and it gives up Prop. `bilinear`. Pick one; the config space does not enforce the choice.
+
+That fork applies to an actor climbing PSI. ``dsrl_na.enabled`` (2026-09-08) is the other
+resolution: the actor climbs a separate reward-specific dual critic (``qa`` over actions,
+``qw`` over latents), psi is not in its gradient at all, and the two therefore compose with
+the affine defaults. It is NOT zero-shot -- it is the upper bound that says whether the
+frozen flow can be steered on an env, and its number never goes beside a zero-shot row.
 """
 
 import copy
@@ -72,7 +78,7 @@ ACTOR_DEFAULTS = dict(index_panel=0, q_coeff=1.0, na_coeff=1.0, na_candidates=16
                       na_states=256, na_advantage_weight=False, entropy="auto",
                       target_entropy=0.0, init_alpha=1.0, lr_alpha=3.0e-4,
                       log_std_min=-20.0, log_std_max=2.0,
-                      prior_init=False, prior_init_std=0.3)
+                      prior_init=False, prior_init_std=0.3, layer_norm=False)
 
 
 def _actor_opt(config, key):
@@ -81,6 +87,63 @@ def _actor_opt(config, key):
         return config["actor"][key]
     except (KeyError, AttributeError):
         return ACTOR_DEFAULTS[key]
+
+
+#: DSRL-NA keys (2026-09-08). `enabled=False` is the OFF value: the branch builds its two
+#: heads either way (the pytree must be static across the switch, as everywhere else here)
+#: but never steps them and never reaches acting, so a config predating the block restores
+#: onto exactly the behaviour it had.
+DSRL_NA_DEFAULTS = dict(enabled=False, discount=0.99, tau=0.005, lr=3.0e-4,
+                        hidden_dim=2048, hidden_layers=3, layer_norm=True,
+                        num_ensembles=2, inner_steps=10, n_latent=1,
+                        reward_source="real", reward_shift=1.0,
+                        task_conditioned=False, reward_refit_every=10000)
+
+#: Where `dsrl_qa_loss` gets its reward.
+#:   real         Item 2's arm: the task's own reward. NOT zero-shot.
+#:   phi_readout  Arm D1: r_hat = phi(s')^T w with w = project(E_batch[(r+shift) phi]), the
+#:                deployed zero-shot reward channel. Still reward-specific.
+#:   synthetic_w  Arm D2: r_w = phi(s')^T w at the SAMPLED task vector, which is what makes
+#:                the arm zero-shot -- no real reward enters training at any point.
+#:   phi_readout_fixed
+#:                Arm D1b: the same channel as `phi_readout`, fit the way the agent
+#:                deploys it. `phi_readout` refits w on each 256-row BATCH, where a
+#:                2.1%-sparse reward leaves ~5 rewarding rows, so w is the mean of about
+#:                five phi vectors and is redrawn every step -- Q_A is then trained on a
+#:                per-batch random reward, and its measured std was 13.6 against the real
+#:                reward's 0.15. Here w is the closed form on a relabel batch of
+#:                `eval_relabel_size` rows (the estimator `infer_z` uses at eval), refit
+#:                every `reward_refit_every` steps and held FIXED in between, and r_hat is
+#:                rescaled so its std over that batch equals the real reward's. Refit and
+#:                rescale are driven from main.py via `refit_na_reward`, not from inside
+#:                the jitted update.
+DSRL_NA_REWARD_SOURCES = ("real", "phi_readout", "phi_readout_fixed", "synthetic_w")
+
+
+def _na_opt(config, key):
+    """`config.dsrl_na[key]`, falling back to DSRL_NA_DEFAULTS when the config predates it."""
+    try:
+        return config["dsrl_na"][key]
+    except (KeyError, AttributeError, TypeError):
+        return DSRL_NA_DEFAULTS[key]
+
+
+def fill_dsrl_na_defaults(config):
+    """Give `config` a complete `dsrl_na` block, in place where the container allows.
+
+    Same contract as `fill_actor_defaults`: absent means OFF, so an older flags.json
+    restores onto the old behaviour rather than dying on the first read.
+    """
+    try:
+        if "dsrl_na" not in config:
+            config["dsrl_na"] = dict(DSRL_NA_DEFAULTS)
+        else:
+            for k, v in DSRL_NA_DEFAULTS.items():
+                if k not in config["dsrl_na"]:
+                    config["dsrl_na"][k] = v
+    except (AttributeError, KeyError, TypeError):
+        pass
+    return config
 
 
 #: Loss-stabiliser keys (2026-09-07). Every default is the OFF value -- the loss the
@@ -93,7 +156,17 @@ STABILITY_DEFAULTS = dict(ortho_mode="fixed", ortho_rel_coef=1.0,
 #: of them restores onto the old behaviour instead of dying at the first update or eval.
 MEASURE_DEFAULTS = dict(psi_form="free", index_agg="max", gpi_select="argmax",
                         index_clip=None, index_panel=16, expectile_mu=0.9,
-                        mask_invalid_preimages=False)
+                        mask_invalid_preimages=False, measure_u_samples=1,
+                        measure_action_input="latent",
+                        measure_u_source="mixture", measure_u_jitter_std=0.3,
+                        measure_u_mixture_shrink=None,
+                        reward_inference="closed_form", reward_inference_eps=1e-3)
+
+#: How `infer_z` turns a relabelling batch into w. See `PSMFlowAgent.infer_z`.
+REWARD_INFERENCE_MODES = ("closed_form", "whitened")
+
+#: Where `measure_u_samples > 1` gets its extra action latents.
+MEASURE_U_SOURCES = ("mixture", "jitter")
 
 #: `ortho_mode`: how the orthonormality regulariser is weighted against the TD term.
 ORTHO_MODES = ("fixed", "relative")
@@ -160,6 +233,8 @@ class StepInputs:
              on, in which case it is sampled against that branch's own basis B_a
     u_valid  (B,) 1.0 where the Stage-B inversion converged, else 0.0; all ones unless
              `mask_invalid_preimages`
+    u_extra  (n-1, B, d_a) further action latents for the SAME transition, drawn from the
+             stored EM preimage mixture; None unless `measure_u_samples` > 1
     """
     u_data: Any
     u_next: Any
@@ -170,6 +245,7 @@ class StepInputs:
     flow_noise: Any
     task_w_a: Any
     u_valid: Any
+    u_extra: Any
 
 
 class PSMFlowAgent(flax.struct.PyTreeNode):
@@ -190,6 +266,14 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
     # prior u'. On (s, w, u), not (s, u) -- w is redrawn per row, so a head without it
     # could only fit the task-marginal expectile.
     q_dist: TrainState
+    # DSRL-NA (`dsrl_na.enabled`; NOT zero-shot) -- the dual critic the 2026-09-08 audit
+    # found missing. `qa(s, a)` is a scalar TD critic on the task's REAL reward; `qw(s, u)`
+    # is fitted by regression onto qa(s, G(s, u)) at prior latents and is the only thing
+    # the latent actor climbs. `actor_mode=dsrl_sac` supplies DSRL's ACTOR; this pair
+    # supplies DSRL's CRITIC. Both are needed for an arm that is actually DSRL-NA.
+    qa: TrainState
+    target_qa: Any
+    qw: TrainState
     # Action branch (`action_critic.enabled`): successor features over EXECUTED actions,
     # psi_a(s, w, a), plus a bounded residual delta(s, w, u); a = G(s, u) + eps * delta.
     psi_a: TrainState
@@ -201,6 +285,11 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
     target_phi_a: Any
     flow_vf: Any                # FROZEN: multi-step behaviour-flow velocity field
     flow_onestep: Any           # FROZEN: one-step distilled decoder
+    # Arm D1b: the reward-readout w held FIXED between refits, and the scalar that puts
+    # r_hat on the real reward's scale. Set by `refit_na_reward`; unused by every other
+    # reward_source, and zero-initialised so a checkpoint predating them restores cleanly.
+    na_rw: Any                  # (z_dim,) reward-readout task vector
+    na_rw_scale: Any            # () scalar, std(r_true) / std(phi @ na_rw)
     task_z: Any                 # (z_dim,) eval task vector w, set by infer_eval_z
     task_z_a: Any               # (z_dim,) eval task vector of the action branch
     config: Any = nonpytree_field()
@@ -214,6 +303,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         # flags.json) must read as that key's pre-existing default. See fill_actor_defaults.
         fill_actor_defaults(config)
         fill_stability_defaults(config)
+        fill_dsrl_na_defaults(config)
         rng = jax.random.PRNGKey(seed)
         rng, rphi, rpsi, rvf, ronestep = jax.random.split(rng, 5)
         assert config.get("encoder", None) is None, "psmflow does not support visual encoders yet."
@@ -251,8 +341,71 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             "actor_mode=gpi_distill regresses onto max over the index panel, so panel=0 would "
             "silently distil a ONE-index argmax while the deployed rule scans gpi_num_u; "
             "set actor.index_panel > 0.")
+        # DSRL-NA is the ACTOR plus the CRITIC. Shipping one without the other is the
+        # 2026-09-08 mislabelling; these asserts are what stop it recurring.
+        if _na_opt(config, "enabled"):
+            assert _na_opt(config, "reward_source") in DSRL_NA_REWARD_SOURCES, (
+                f"dsrl_na.reward_source: {'|'.join(DSRL_NA_REWARD_SOURCES)}")
+            assert actor_mode == "dsrl_sac", (
+                "dsrl_na.enabled supplies DSRL's dual CRITIC; actor_mode=dsrl_sac supplies "
+                "DSRL's tanh-Gaussian ACTOR. DSRL-NA is both -- the 2026-09-08 audit found "
+                "we had shipped the actor alone and called it DSRL-NA.")
+            assert config["acting"] == "actor", (
+                "dsrl_na deploys the latent actor it trains; acting=gpi would evaluate the "
+                "actor-free argmax over psi, which this arm never fits.")
+            assert not (_na_opt(config, "reward_source") == "synthetic_w"
+                        and not _na_opt(config, "task_conditioned")), (
+                "dsrl_na.reward_source=synthetic_w draws a fresh task vector per row, so the "
+                "critics and the actor must SEE it: set dsrl_na.task_conditioned=true. "
+                "Without that the arm trains one head against a reward that changes every "
+                "batch, which is noise, not zero-shot.")
+            assert not (_na_opt(config, "reward_source") == "phi_readout_fixed"
+                        and int(_na_opt(config, "reward_refit_every")) <= 0), (
+                "dsrl_na.reward_source=phi_readout_fixed needs reward_refit_every > 0. "
+                "With no refit the held w stays at its zero init and the reward is "
+                "identically 0, which trains Q_A on nothing.")
+            assert not (_na_opt(config, "task_conditioned")
+                        and _na_opt(config, "reward_source") != "synthetic_w"), (
+                "dsrl_na.task_conditioned=true with a reward_source other than synthetic_w "
+                "conditions the critics on a w the reward does not depend on.")
+            assert float(_actor_opt(config, "bc_coeff")) == 0.0, (
+                "DSRL-NA has no behaviour-cloning term; set actor.bc_coeff=0. Leaving the "
+                "1.0 default on would anchor the actor to the flow prior and the arm would "
+                "measure the BC control.")
+            assert float(_actor_opt(config, "q_coeff")) > 0.0, (
+                "dsrl_na with actor.q_coeff=0 trains an actor that climbs nothing.")
+        assert config.get("reward_inference", "closed_form") in REWARD_INFERENCE_MODES, (
+            f"reward_inference: {'|'.join(REWARD_INFERENCE_MODES)}")
+        n_u = int(config.get("measure_u_samples", 1))
+        assert n_u >= 1, "measure_u_samples must be >= 1 (1 = the published loss)"
+        u_src = config.get("measure_u_source", "mixture")
+        assert u_src in MEASURE_U_SOURCES, f"measure_u_source: {'|'.join(MEASURE_U_SOURCES)}"
+        assert not (n_u > 1 and u_src == "jitter"
+                    and float(config.get("measure_u_jitter_std", 0.3)) <= 0.0), (
+            "measure_u_jitter_std must be > 0: at 0 the extra latents are copies of "
+            "u_data and the arm is the published loss with n times the compute.")
+        # No default for the shrink: it is the ONE knob that decides whether the extra
+        # latents decode to this transition's action at all, it differs per environment
+        # (cube 0.5, antmaze 1.0, pointmaze 0.5 on the published npz files), and there is no
+        # value that is safe everywhere. Requiring it to be stated is the gate that replaces
+        # the prior_scale proxy main.py used to apply to this path.
+        assert not (n_u > 1 and u_src == "mixture"
+                    and config.get("measure_u_mixture_shrink", None) is None), (
+            "measure_u_source=mixture needs an explicit measure_u_mixture_shrink. Pick it "
+            "per environment with tools/diag_mixture_decode.py --shrink: the largest c "
+            "whose mean decode error stays inside the point inverse's own p90.")
         psi_form = config.get("psi_form", "free")
         assert psi_form in ("free", "affine"), "psi_form: free | affine"
+        measure_action_input = config.get("measure_action_input", "latent")
+        assert measure_action_input in ("latent", "action"), (
+            "measure_action_input: latent | action")
+        assert not (measure_action_input == "action" and psi_form != "affine"), (
+            "measure_action_input=action requires psi_form=affine")
+        assert not (measure_action_input == "action" and config["policy_index"] != "latent"), (
+            "measure_action_input=action requires policy_index=latent")
+        assert not (measure_action_input == "action" and n_u != 1), (
+            "measure_action_input=action requires measure_u_samples=1: the recorded action "
+            "defines one exact transition input")
         assert not (psi_form == "affine" and config["policy_index"] != "latent"), (
             "psi_form=affine requires policy_index=latent: the affine head reads its index "
             "slot as the POLICY latent u' and encodes it into w(u'), while A and beta are "
@@ -318,7 +471,8 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             log_std_min=_actor_opt(config, "log_std_min"),
             log_std_max=_actor_opt(config, "log_std_max"),
             prior_init=bool(_actor_opt(config, "prior_init")),
-            prior_init_std=float(_actor_opt(config, "prior_init_std")))
+            prior_init_std=float(_actor_opt(config, "prior_init_std")),
+            layer_norm=bool(_actor_opt(config, "layer_norm")))
         sac_actor = TrainState.create(
             sac_actor_def,
             sac_actor_def.init(jax.random.fold_in(rng, 112), ex_observations, ex_w)["params"],
@@ -338,6 +492,29 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             q_dist_def.init(jax.random.fold_in(rng, 108), ex_observations,
                             jnp.concatenate([ex_w, ex_u], -1))["params"],
             tx=optax.adam(qd_cfg["lr"]))
+
+        # DSRL-NA's two scalar critics. Both are `Value`, the same head q_dist uses, at
+        # DSRL's offline OGBench widths (3 x 2048, LayerNorm on every hidden layer).
+        # qa reads a raw ACTION; qw reads a LATENT. Built unconditionally so the pytree is
+        # static across `dsrl_na.enabled`.
+        na_cfg = config["dsrl_na"]
+        na_dims = (na_cfg["hidden_dim"],) * na_cfg["hidden_layers"]
+        # Arm D2: both critics take the task vector alongside the action / latent, so the
+        # arm generalises over w instead of solving one task. `Value` concatenates its two
+        # arguments, so appending w to the second one is the whole change.
+        na_tc = bool(na_cfg["task_conditioned"])
+        ex_qa_in = jnp.concatenate([ex_actions, ex_w], -1) if na_tc else ex_actions
+        ex_qw_in = jnp.concatenate([ex_u, ex_w], -1) if na_tc else ex_u
+        qa_def = Value(hidden_dims=na_dims, layer_norm=na_cfg["layer_norm"],
+                       num_ensembles=na_cfg["num_ensembles"])
+        qa = TrainState.create(
+            qa_def,
+            qa_def.init(jax.random.fold_in(rng, 114), ex_observations, ex_qa_in)["params"],
+            tx=optax.adam(na_cfg["lr"]))
+        qw_def = Value(hidden_dims=na_dims, layer_norm=na_cfg["layer_norm"], num_ensembles=1)
+        qw = TrainState.create(
+            qw_def, qw_def.init(jax.random.fold_in(rng, 115), ex_observations, ex_qw_in)["params"],
+            tx=optax.adam(na_cfg["lr"]))
 
         # Frozen behaviour flow (a Stage-A FQL bc_only checkpoint). The defs are rebuilt
         # from config; their shapes must match the checkpointed run.
@@ -388,6 +565,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         config = _plain_config(config)
         # Backfill the `actor` sub-keys so the runtime never sees a partial dict; every
         # default reproduces the behaviour of a config written before that key existed.
+        config.setdefault("train_phi", True)
         config.setdefault("actor_mode", "ddpg")
         for _k, _v in ACTOR_DEFAULTS.items():
             config["actor"].setdefault(_k, _v)
@@ -395,15 +573,21 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             config.setdefault(_k, _v)
         for _k, _v in MEASURE_DEFAULTS.items():
             config.setdefault(_k, _v)
+        config.setdefault("dsrl_na", {})
+        for _k, _v in DSRL_NA_DEFAULTS.items():
+            config["dsrl_na"].setdefault(_k, _v)
         config["ob_dims"] = tuple(ex_observations.shape[1:])
         config["action_dim"] = action_dim
         return cls(rng=rng, phi=phi, psi=psi,
                    target_phi=copy.deepcopy(phi.params), target_psi=copy.deepcopy(psi.params),
                    actor=actor, actor_vf=actor_vf,
                    sac_actor=sac_actor, log_alpha=log_alpha, q_dist=q_dist,
+                   qa=qa, target_qa=copy.deepcopy(qa.params), qw=qw,
                    psi_a=psi_a, target_psi_a=copy.deepcopy(psi_a.params), residual=residual,
                    phi_a=phi_a, target_phi_a=copy.deepcopy(phi_a.params),
                    flow_vf=flow_vf, flow_onestep=flow_onestep,
+                   na_rw=jnp.zeros((z_dim,), jnp.float32),
+                   na_rw_scale=jnp.ones((), jnp.float32),
                    task_z=jnp.zeros((z_dim,), jnp.float32),
                    task_z_a=jnp.zeros((z_dim,), jnp.float32),
                    config=flax.core.FrozenDict(config),
@@ -466,6 +650,22 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             # The continuation at s' is pi_{u'}, the same index the online side carries --
             # that makes G(s', u') a p0 decode (Prop. `insample`), so explore_frac is inert.
             u_next = u_index
+        # `measure_u_samples` > 1: further action latents for the SAME (s, a, s'), drawn
+        # from the stored EM preimage posterior. The measure head is otherwise fitted at
+        # ONE u per state (u_data) and extrapolates over the whole box, which is why the
+        # signal over u is half the ensemble's own disagreement
+        # (docs/design/2026-09-08-critic-signal-and-dsrl-na.md 1).
+        u_extra = None
+        n_extra = int(c["measure_u_samples"]) - 1
+        if n_extra > 0:
+            k_x = jax.random.fold_in(rng, 116)
+            if c["measure_u_source"] == "jitter":
+                u_extra = jnp.clip(
+                    u_data[None] + c["measure_u_jitter_std"] * jax.random.normal(
+                        k_x, (n_extra, B, adim)), -c["u_clip"], c["u_clip"])
+            else:
+                u_extra = self._sample_preimage_mixture(
+                    batch, n_extra, k_x, float(c["measure_u_mixture_shrink"]))
         # FB graft: the action branch gets its own task vector, sampled against its
         # backward map B_a the way FB samples z against B.
         task_w_a = task_w
@@ -482,7 +682,59 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             flow_x0=jax.random.normal(r_x0, (B, adim)),
             flow_t=jax.random.uniform(r_t, (B, 1)),
             flow_noise=jax.random.normal(r_noise, (B, adim)),
-            task_w_a=task_w_a, u_valid=u_valid)
+            task_w_a=task_w_a, u_valid=u_valid, u_extra=u_extra)
+
+    def _sample_preimage_mixture(self, batch, n, key, scale=1.0):
+        """n draws per row from the stored EM preimage mixture. Returns (n, B, d_a).
+
+        The jax twin of `utils.flow_inversion.sample_preimage_noise`, which runs on the
+        dataset path in numpy; this one runs inside the jitted update. Same construction --
+        a categorical draw over the components, then mu + L z -- but the factor comes from
+        an eigendecomposition rather than a Cholesky with a fallback, because a traced
+        `try` cannot branch: `L = V sqrt(max(lambda, 0))` is defined for every symmetric
+        input, including the float-error-indefinite covariances the EM fit stores.
+
+        `scale` multiplies the Cholesky factor, i.e. scales each component's covariance by
+        `scale ** 2` -- Arm C. It exists because the posterior as stored decodes too far
+        from the recorded action to be usable raw, and shrinking it toward its own mean
+        recovers fidelity while keeping the covariance's SHAPE. The shape is the point: the
+        EM covariance is stretched along the directions in which the decode barely moves, so
+        at a matched decode error a shrunk anisotropic draw sits further from u_data than
+        the round `jitter` ball -- measured at 1.6x on cube, 1.9x on antmaze, 3.2x on
+        pointmaze (`tools/diag_mixture_decode.py --shrink`).
+
+        The floor to be aware of: `scale -> 0` collapses onto the posterior MEAN, not onto
+        u_data, and that mean sits 1.14 (cube) / 1.74 (antmaze) / 2.79 (pointmaze) away from
+        the point inverse. Shrinking cannot buy fidelity below the mean's own displacement,
+        which is why the sweep flattens out at small c.
+
+        CAVEAT ON WHAT THESE ARE (measured, `tools/diag_mixture_decode.py`, and sharper than
+        COMPENDIUM 4.9's reading): the posterior is not a blurred point. An UNSHRUNK cube
+        sample decodes 0.167 from the recorded action against the point inverse's 0.089 --
+        40% of the way to an uninverted prior draw. So the extra rows are only preimages of
+        the same action once `scale` has been chosen against that probe's gate; the width is
+        not a free parameter.
+        """
+        c = self.config
+        mean = jnp.asarray(batch["noise_preimage_mean"])          # (B, K, d_a)
+        cov = jnp.asarray(batch["noise_preimage_cov"])            # (B, K, d_a, d_a)
+        wts = jnp.asarray(batch["noise_preimage_weights"])        # (B, K)
+        B, K, d_a = mean.shape
+        k_c, k_z = jax.random.split(key)
+        # A collapsed EM fit can leave a row's weights summing to ~0; fall back to uniform
+        # so the row stays a valid draw instead of silently taking the last component.
+        tot = wts.sum(-1, keepdims=True)
+        wts = jnp.where(tot > 1e-12, wts, jnp.full_like(wts, 1.0 / K))
+        comp = jax.random.categorical(k_c, jnp.log(wts + 1e-12)[None], axis=-1,
+                                      shape=(n, B))               # (n, B)
+        mu = jnp.take_along_axis(mean[None], comp[..., None, None], axis=2)[:, :, 0]
+        cv = jnp.take_along_axis(cov[None], comp[..., None, None, None], axis=2)[:, :, 0]
+        cv = 0.5 * (cv + jnp.swapaxes(cv, -1, -2))
+        lam, V = jnp.linalg.eigh(cv)
+        L = V * jnp.sqrt(jnp.clip(lam, 0.0, None))[..., None, :]
+        z = jax.random.normal(k_z, (n, B, d_a))
+        u = mu + scale * jnp.einsum("nbij,nbj->nbi", L, z)
+        return jnp.clip(u, -c["u_clip"], c["u_clip"])
 
     def _index(self, sampled):
         """Whatever occupies psi's index slot.
@@ -505,13 +757,20 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         s = self.config["psi_bound_scale"]
         return s * jnp.tanh(psi_out / s)
 
-    def psi_b(self, *args, **kwargs):
-        """`self.psi(...)` with the magnitude bound applied. Every psi READ goes through it.
+    def _measure_input(self, observations, u):
+        """The measure head's current-action coordinate for a latent query ``u``."""
+        if self.config["measure_action_input"] == "action":
+            return self.decode(observations, u)
+        return u
+
+    def psi_b(self, observations, index, u, **kwargs):
+        """Bounded psi at a latent query, decoding its current-action input when requested.
 
         Only for calls that return psi itself; `method='sa_terms'` / `'encode_index'`
         return the factors A, beta, w(u'), which are not the bounded object.
         """
-        return self.bound_psi(self.psi(*args, **kwargs))
+        return self.bound_psi(self.psi(
+            observations, index, self._measure_input(observations, u), **kwargs))
 
     # ------------------------------------------------------------------ measure loss
     def measure_loss(self, batch, sampled, phi_params, psi_params):
@@ -528,9 +787,16 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
 
         index = self._index(sampled)
         phi_next = self.phi(next_obs, params=phi_params)
-        psi_raw = self.psi(obs, index, u, params=psi_params)
+        # In action mode the online transition is fitted at the recorded action exactly;
+        # every latent query (including the bootstrap below) goes through ``psi_b`` and
+        # therefore through the frozen decoder.
+        online_input = batch["actions"] if c["measure_action_input"] == "action" else u
+        psi_raw = self.psi(obs, index, online_input, params=psi_params)
         M = self.bound_psi(psi_raw) @ phi_next.T
-        target_phi_next = self.phi(next_obs, params=self.target_phi)
+        # A frozen basis has no lagging target coordinates: the online parameters are the
+        # fixed target. This also makes a restored stale target inert on the first step.
+        target_phi_params = self.target_phi if c["train_phi"] else phi_params
+        target_phi_next = self.phi(next_obs, params=target_phi_params)
         M_boot = self.psi_b(next_obs, index, u_next, params=self.target_psi) @ target_phi_next.T
         M_mean, M_unc = targets_uncertainty(M_boot, P)
         target_M = M_mean - c["pessimism_penalty"] * M_unc
@@ -552,7 +818,47 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         sm, sm_diag, sm_offdiag = contrastive_loss(
             M, jax.lax.stop_gradient(target_M), c["discount"], off, off_sum,
             row_weight=row_w)
+        # `measure_u_samples` > 1: the SAME loss at further latents for the same
+        # transition, averaged in. The TD target does not depend on the online u -- it is
+        # psibar(s', u_next, u') -- so it is computed once and shared, and every extra
+        # sample costs one online psi forward/backward and nothing else.
+        u_extra_spread = jnp.asarray(0.0)
+        u_extra_clip = jnp.asarray(0.0)
+        if sampled.u_extra is not None:
+            terms = [(sm, sm_diag, sm_offdiag)]
+            for u_k in sampled.u_extra:
+                M_k = self.psi_b(obs, index, u_k, params=psi_params) @ phi_next.T
+                terms.append(contrastive_loss(
+                    M_k, jax.lax.stop_gradient(target_M), c["discount"], off, off_sum,
+                    row_weight=row_w))
+            sm, sm_diag, sm_offdiag = (
+                sum(t[i] for t in terms) / len(terms) for i in range(3))
+            # How far the extra latents sit from the point preimage, in the u box. If this
+            # is ~0 the augmentation is doing nothing; if it is ~u_clip the extra rows are
+            # not preimages of this transition's action in any useful sense.
+            u_extra_spread = jnp.mean(jnp.linalg.norm(sampled.u_extra - u[None], axis=-1))
+            # Fraction of the extra latents' COMPONENTS sitting on the box wall. Part of the
+            # result, not just telemetry: the stored posterior mean lies outside
+            # [-u_clip, u_clip] on a real fraction of rows -- 2.79 from the point inverse on
+            # pointmaze -- so where a shrunk mixture draw actually lands is decided by the
+            # BOX there, not by the posterior. A large number means the arm is training on
+            # the wall.
+            u_extra_clip = jnp.mean(
+                (jnp.abs(sampled.u_extra) >= c["u_clip"] - 1e-6).astype(jnp.float32))
         ortho, ortho_diag, ortho_offdiag = ortho_loss(phi_next, off, off_sum)
+        # The VALIDITY CONDITION for reward inference, logged beside the loss that enforces
+        # it. Cor. `reward-inference`: w = E_D[r phi] is the least-squares projection exactly
+        # when E[phi phi^T] = I. Measured 2026-09-09 on pointmaze, `orth_loss` tracks this
+        # Gram's deviation at rank correlation 1.000 while the deviation itself swings four
+        # orders of magnitude across checkpoints -- so the loss was never blind, it was
+        # losing, and nobody was reading it as the thing that decides whether w means
+        # anything. One matrix product plus a 128x128 eigendecomposition per step, both
+        # stop-gradded: this is telemetry, not an objective.
+        pn = jax.lax.stop_gradient(phi_next)
+        gram = (pn.T @ pn) / pn.shape[0]
+        gram_ev = jnp.linalg.eigvalsh(gram)
+        gram_dev = (jnp.linalg.norm(gram - jnp.eye(gram.shape[0]))
+                    / jnp.sqrt(gram.shape[0]))
         # `ortho_mode='relative'`: weight the geometry regulariser BY the term it holds
         # down, ortho_coef + ortho_rel_coef * stopgrad(|psm_loss|), so the two gradient
         # directions scale together and ortho cannot be outgrown. The weight is
@@ -572,7 +878,13 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
                       "psi_absmean": jnp.mean(jnp.abs(psi_raw)),
                       "psi_absmax": jnp.max(jnp.abs(psi_raw)),
                       "td_target_absmean": jnp.mean(jnp.abs(target_M)),
-                      "psi_bound_frac": bound_frac}
+                      "psi_bound_frac": bound_frac,
+                      "u_extra_dist": u_extra_spread,
+                      "u_extra_clipfrac": u_extra_clip,
+                      "phi_gram_dev": gram_dev,
+                      "phi_gram_eig_min": gram_ev.min(),
+                      "phi_gram_eig_max": gram_ev.max(),
+                      "phi_gram_cond": gram_ev.max() / jnp.maximum(gram_ev.min(), 1e-12)}
 
     # ------------------------------------------------------------------ latent-actor losses
     def _psi_q_over_indices(self, obs, u, w, u_index, params=None):
@@ -583,7 +895,9 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         have no such factorisation and fall back to K full psi calls.
         """
         if self.config["psi_form"] == "affine" and self.config["psi_bound"] != "tanh":
-            A, beta = self.psi(obs, u, params=params, method="sa_terms")   # (P,B,z,d_w),(P,B,z)
+            measure_input = self._measure_input(obs, u)
+            A, beta = self.psi(
+                obs, measure_input, params=params, method="sa_terms")      # (P,B,z,d_w),(P,B,z)
             w_index = self.psi(u_index, params=params, method="encode_index")   # (K, B, d_w)
             Aw = jnp.einsum("pbzw,bz->pbw", A, w)
             beta_w = jnp.einsum("pbz,bz->pb", beta, w)
@@ -600,6 +914,11 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         """
         c = self.config
         w = sampled.task_w
+        if c["dsrl_na"]["enabled"]:
+            # DSRL-NA: the actor climbs the LATENT critic and nothing else. Q_W is already
+            # a scalar on the reward's own scale, and no gradient reaches Q_A or the flow.
+            Q = q_ens = self.qw(obs, self._na_in(u_a, self._actor_w(w)))    # (B,)
+            return Q, q_ens
         if c["index_agg"] == "expectile":
             Q = q_ens = self.q_dist(obs, jnp.concatenate([w, u_a], -1))    # (B,)
             return Q, q_ens
@@ -616,6 +935,27 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         q_mean, q_unc = targets_uncertainty(q_panel, c["num_parallel"])    # (K, B)
         Q = (q_mean - c["actor_pessimism_penalty"] * q_unc).max(0)         # (B,)
         return Q, q_panel.reshape(q_panel.shape[0], -1)
+
+    def _actor_w(self, w):
+        """The task slot the latent actor reads. Zeros under DSRL-NA.
+
+        DSRL-NA is SINGLE-TASK: Q_A is fitted on one real reward and Q_W(s, u) has no task
+        input at all, so a task-conditioned policy would be conditioning on a random vector
+        its own critic ignores -- and would then meet a specific `task_z` at eval that it
+        never saw in training. Zeroing the slot makes the head pi(u | s) exactly, without
+        changing the module's shape, so the pytree stays static across the switch.
+        """
+        na = self.config["dsrl_na"]
+        if na["enabled"] and not na["task_conditioned"]:
+            return jnp.zeros_like(w)
+        return w
+
+    def _na_in(self, x, w):
+        """The second argument of the DSRL-NA critics: (a, w) or (u, w) when task-conditioned.
+
+        `Value` concatenates its two inputs, so this is exactly "append the task vector".
+        """
+        return jnp.concatenate([x, w], -1) if self.config["dsrl_na"]["task_conditioned"] else x
 
     def _sac_latent(self, obs, w, noise, params=None):
         """Reparameterised draw from the tanh-Gaussian latent policy, and its log-density."""
@@ -708,7 +1048,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         no natural return scale does not make `target_entropy` a per-environment constant.
         """
         c = self.config
-        obs, w = batch["observations"], sampled.task_w
+        obs, w = batch["observations"], self._actor_w(sampled.task_w)
         u0, t, noise = sampled.flow_x0, sampled.flow_t, sampled.flow_noise
         u_clip, steps = c["u_clip"], c["actor"]["flow_steps"]
         mode = c["actor_mode"]
@@ -726,7 +1066,12 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
 
         u_a, logp = self._sac_latent(obs, w, noise, params=sac_params)
         Q, q_ens = self._actor_q(obs, u_a, sampled)
-        scale = jax.lax.stop_gradient(jnp.abs(q_ens).mean() + 1e-8)
+        # The normalisation exists because psi^T w has no natural return scale, which is
+        # what makes `target_entropy` otherwise a per-environment constant. Under DSRL-NA
+        # Q_W IS on the reward's scale, and DSRL/SB3 climbs it raw -- normalising there
+        # would silently rescale alpha against the entropy target.
+        scale = (jnp.asarray(1.0) if c["dsrl_na"]["enabled"]
+                 else jax.lax.stop_gradient(jnp.abs(q_ens).mean() + 1e-8))
         alpha = jax.lax.stop_gradient(jnp.exp(self.log_alpha()))
         q_term = -Q.mean() / scale
         # The entropy term sits OUTSIDE q_coeff: at q_coeff=0 it is the only thing stopping
@@ -771,7 +1116,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         UNSCALED space `tanh_gaussian_sample` computes log pi in.
         """
         c = self.config
-        obs, w = batch["observations"], sampled.task_w
+        obs, w = batch["observations"], self._actor_w(sampled.task_w)
         _, logp = self._sac_latent(obs, w, sampled.flow_noise)
         target = c["actor"]["target_entropy"]
         la = self.log_alpha(params=alpha_params)
@@ -815,6 +1160,149 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         return loss, {"q_dist_loss": loss, "q_dist_pred": pred.mean(),
                       "q_dist_target": target.mean(),
                       "q_dist_target_spread": target.std(axis=0).mean()}
+
+    # ------------------------------------------------------------------ DSRL-NA dual critic
+    def dsrl_qa_loss(self, batch, sampled, qa_params):
+        """`dsrl_na`: the ACTION-space critic. Scalar TD on the task's REAL reward.
+
+            target = r + gamma_na * mask * min_e Q_A_bar(s', G(s', u')),   u' ~ pi(. | s')
+
+        This is the ONLY place in the agent that reads `batch['rewards']`, and it is why
+        the arm is not zero-shot. It is DSRL's own critic: fitted over raw actions, where
+        many latents collapse onto the same action, which is what gives the distillation
+        below something to be a function of.
+
+        No entropy bonus in the bootstrap. Our log pi is a density over the LATENT u, not
+        over the action a, so an entropy term here would be measured in the wrong
+        coordinates; the entropy target lives with the actor and Q_W, where the policy is.
+        The bootstrap action is stop-gradded -- Q_A is a critic, not a path to the actor.
+
+        `reward_source='phi_readout'` (Arm D1) replaces r with its reconstruction through
+        the frozen basis, `r_hat = phi(s')^T w` with `w = project(E_batch[(r + shift) phi])`
+        -- the deployed zero-shot reward channel, recomputed per batch because phi is still
+        training. It is the FIRST of the four differences between this arm and the zero-shot
+        one, isolated. Two things it also changes, stated because they are unavoidable:
+        the reward becomes the SHIFTED one (the 2026-09-09 gate measured topline R^2 = -0.20
+        on the raw -1/0 reward against 0.116 on the shifted one, so the shift is what makes
+        the channel work at all), which adds a constant 1/(1-gamma) to every Q and changes
+        no policy; and `w`'s sphere projection sets r_hat's scale, which auto-alpha absorbs.
+        `na_rhat_corr` logs how much of the real reward survives the round trip.
+        """
+        c, na = self.config, self.config["dsrl_na"]
+        obs, next_obs = batch["observations"], batch["next_observations"]
+        w = self._actor_w(sampled.task_w)
+        u_next = self._deploy_latent(next_obs, w, sampled.flow_noise)
+        a_next = jax.lax.stop_gradient(self.decode(next_obs, u_next))
+        q_next = self.qa(next_obs, self._na_in(a_next, w), params=self.target_qa).min(0)
+
+        r_true = batch["rewards"]
+        info = {}
+        if na["reward_source"] == "synthetic_w":
+            # Arm D2. The reward IS the task vector read through the basis, so no real
+            # reward enters training and the arm is zero-shot by construction. w is drawn
+            # FB-style by `sample_step_inputs` (mix_ratio of phi(next_obs)[perm], the rest
+            # Gaussian, both projected to the sphere and stop-gradded), which is the same
+            # distribution the measure branch trains against.
+            ph = jax.lax.stop_gradient(self.phi(next_obs))
+            r_used = (ph * w).sum(-1)
+            dr = r_used - r_used.mean()
+            dt = (r_true + na["reward_shift"]) - (r_true + na["reward_shift"]).mean()
+            # How much the synthetic task happens to resemble the REAL one this batch. Not
+            # used for anything -- it is the sanity trace that the arm is not accidentally
+            # training on the deployed task.
+            info["na_rw_corr_to_real"] = (dr * dt).mean() / (dr.std() * dt.std() + 1e-8)
+            info["na_rw_std"] = r_used.std()
+        elif na["reward_source"] == "phi_readout_fixed":
+            # Arm D1b. w and the scale come from `refit_na_reward` on a relabel batch and
+            # are constants here, so Q_A sees ONE reward function between refits instead of
+            # a new one each step. No gradient reaches phi through the reward.
+            ph = jax.lax.stop_gradient(self.phi(next_obs))
+            r_used = (ph @ self.na_rw) * self.na_rw_scale
+            r_shift = r_true + na["reward_shift"]
+            dr, dt = r_used - r_used.mean(), r_shift - r_shift.mean()
+            info["na_rhat_corr_inbatch"] = (dr * dt).mean() / (dr.std() * dt.std() + 1e-8)
+            info["na_rhat_std"] = r_used.std()
+            info["na_reward_std"] = r_shift.std()
+            info["na_rw_norm"] = jnp.linalg.norm(self.na_rw)
+            info["na_rw_scale"] = self.na_rw_scale
+        elif na["reward_source"] == "phi_readout":
+            r_shift = r_true + na["reward_shift"]
+            ph = jax.lax.stop_gradient(self.phi(next_obs))                    # (B, z)
+            w_hat = project_z((r_shift.reshape(1, -1) @ ph).reshape(-1) / ph.shape[0],
+                              c["norm_z"])
+            r_used = ph @ w_hat
+            dr, dt = r_used - r_used.mean(), r_shift - r_shift.mean()
+            info["na_rhat_corr"] = (dr * dt).mean() / (dr.std() * dt.std() + 1e-8)
+            info["na_rhat_mean"] = r_used.mean()
+            info["na_rhat_std"] = r_used.std()
+            info["na_reward_std"] = r_shift.std()
+        else:
+            r_used = r_true
+
+        target = jax.lax.stop_gradient(
+            r_used + na["discount"] * batch["masks"] * q_next)
+        q = self.qa(obs, self._na_in(batch["actions"], w), params=qa_params)  # (E, B)
+        loss = jnp.square(q - target[None]).mean()
+        return loss, {"na_qa_loss": loss, "na_qa_mean": q.mean(),
+                      "na_qa_target": target.mean(),
+                      "na_qa_spread": (q.max(0) - q.min(0)).mean(), **info}
+
+    def dsrl_qw_loss(self, batch, qw_params, key, w=None):
+        """`dsrl_na`: the LATENT critic, regressed onto Q_A at the decode of prior latents.
+
+            L = E_{s ~ D, u ~ p0} [ (Q_W(s, u) - stopgrad min_e Q_A(s, G(s, u)))^2 ]
+
+        The point of the distillation: the actor then climbs a function of u that was never
+        itself argmaxed over a learned function of u -- Q_W inherits Q_A's ordering by
+        regression, on the prior's own support. No gradient reaches Q_A or the flow.
+        """
+        c = self.config
+        na = c["dsrl_na"]
+        obs = batch["observations"]
+        B, d_a, n = obs.shape[0], c["action_dim"], int(na["n_latent"])
+        u = jnp.clip(jax.random.normal(key, (n, B, d_a)), -c["u_clip"], c["u_clip"])
+        obs_r = jnp.broadcast_to(obs[None], (n, *obs.shape)).reshape(n * B, -1)
+        u_r = u.reshape(n * B, d_a)
+        a = jax.lax.stop_gradient(self.decode(obs_r, u_r))
+        if w is None:
+            w = jnp.zeros((B, c["z_dim"]), obs.dtype)
+        w_r = jnp.broadcast_to(w[None], (n, *w.shape)).reshape(n * B, -1)
+        target = jax.lax.stop_gradient(self.qa(obs_r, self._na_in(a, w_r)).min(0))
+        pred = self.qw(obs_r, self._na_in(u_r, w_r), params=qw_params)       # (n*B,)
+        loss = jnp.square(pred - target).mean()
+        return loss, {"na_qw_loss": loss, "na_qw_pred": pred.mean(),
+                      "na_qw_target": target.mean()}
+
+    def na_spread(self, batch, key, wv=None):
+        """`dsrl_na`: how much Q_W actually varies over u at a FIXED state.
+
+        This is the quantity the whole campaign is about. psi^T w reads 57 here against an
+        ensemble disagreement of 124 (`docs/design/2026-09-08-critic-signal-and-dsrl-na.md`
+        1), i.e. the actor's gradient is smaller than the critics' argument. If Q_W is flat
+        too, DSRL-NA has the same problem and the frozen flow is the binding constraint.
+        Reported relative to |Q| so it is comparable across steps, and beside qa's own
+        ensemble disagreement, which is the noise it has to beat.
+        """
+        c = self.config
+        n = min(64, batch["observations"].shape[0])
+        obs = batch["observations"][:n]
+        cand = 16
+        u = jnp.clip(jax.random.normal(key, (cand, n, c["action_dim"])),
+                     -c["u_clip"], c["u_clip"])
+        w = (jnp.zeros((n, c["z_dim"]), obs.dtype) if wv is None else wv[:n])
+        Q = jax.vmap(lambda u_k: self.qw(obs, self._na_in(u_k, w)))(u)       # (cand, n)
+        obs_r = jnp.broadcast_to(obs[None], (cand, n, obs.shape[-1])).reshape(-1, obs.shape[-1])
+        w_r = jnp.broadcast_to(w[None], (cand, *w.shape)).reshape(cand * n, -1)
+        a = self.decode(obs_r, u.reshape(-1, c["action_dim"]))
+        qa_ens = self.qa(obs_r, self._na_in(a, w_r))                         # (E, cand*n)
+        scale = jnp.abs(Q).mean() + 1e-8
+        return {"na_qw_spread_over_u": Q.std(0).mean(),
+                "na_qw_spread_over_u_rel": Q.std(0).mean() / scale,
+                "na_qw_range_over_u_rel": (Q.max(0) - Q.min(0)).mean() / scale,
+                "na_qa_disagreement": (qa_ens.max(0) - qa_ens.min(0)).mean(),
+                # > 1 means the signal over u is larger than the critics' own argument.
+                "na_signal_over_disagreement": Q.std(0).mean()
+                / ((qa_ens.max(0) - qa_ens.min(0)).mean() + 1e-8)}
 
     # ------------------------------------------------------------------ action branch
     def execute(self, observations, w, u, residual_params=None):
@@ -1002,16 +1490,51 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
     def apply_update(self, batch, sampled):
         """One gradient step of every enabled branch, at the pre-update psi (PSM's convention)."""
         tau = self.config["tau"]
-        (_, info), (g_phi, g_psi) = jax.value_and_grad(self.measure_loss, argnums=(2, 3), has_aux=True)(
-            batch, sampled, self.phi.params, self.psi.params)
-        phi = self.phi.apply_gradients(grads=g_phi)
+        if self.config["train_phi"]:
+            (_, info), (g_phi, g_psi) = jax.value_and_grad(
+                self.measure_loss, argnums=(2, 3), has_aux=True)(
+                    batch, sampled, self.phi.params, self.psi.params)
+            phi = self.phi.apply_gradients(grads=g_phi)
+            target_phi = polyak_update(phi.params, self.target_phi, tau)
+        else:
+            # Differentiate only psi: phi's params, Adam moments and step remain bitwise
+            # unchanged, and the fixed online basis is also the exact target basis.
+            (_, info), g_psi = jax.value_and_grad(
+                self.measure_loss, argnums=3, has_aux=True)(
+                    batch, sampled, self.phi.params, self.psi.params)
+            phi = self.phi
+            target_phi = phi.params
         psi = self.psi.apply_gradients(grads=g_psi)
-        target_phi = polyak_update(phi.params, self.target_phi, tau)
         target_psi = polyak_update(psi.params, self.target_psi, tau)
         new = self.replace(phi=phi, psi=psi, target_phi=target_phi, target_psi=target_psi)
         # Under the task-vector index the backup bootstraps the actor's latent at s'.
         # Under policy_index='latent' it uses u', so train_actor=false drops the actor.
         a_info = {}
+        # Kept separate: the actor branch below ASSIGNS a_info from its own loss rather
+        # than merging into it, so writing the critic diagnostics there would lose them.
+        na_info = {}
+        if self.config["dsrl_na"]["enabled"]:
+            # Critics first, as in SAC. The actor branch below reads the PRE-update qw, the
+            # same one-step lag `flow_actor_loss` has against psi -- negligible against the
+            # `inner_steps` regression steps qw takes here.
+            na = self.config["dsrl_na"]
+            (_, qa_info), g_qa = jax.value_and_grad(
+                self.dsrl_qa_loss, argnums=2, has_aux=True)(batch, sampled, new.qa.params)
+            qa = new.qa.apply_gradients(grads=g_qa)
+            new = new.replace(qa=qa,
+                              target_qa=polyak_update(qa.params, new.target_qa, na["tau"]))
+            # DSRL refits Q_W several times per outer step: it is chasing a target that
+            # moves only as fast as Q_A, and the regression is cheap.
+            w_na = self._actor_w(sampled.task_w)
+            qw, key = new.qw, jax.random.fold_in(self.rng, 114)
+            for _i in range(int(na["inner_steps"])):
+                (_, qw_info), g_qw = jax.value_and_grad(
+                    self.dsrl_qw_loss, argnums=1, has_aux=True)(
+                    batch, qw.params, jax.random.fold_in(key, _i), w_na)
+                qw = qw.apply_gradients(grads=g_qw)
+            new = new.replace(qw=qw)
+            na_info = {**qa_info, **qw_info,
+                       **new.na_spread(batch, jax.random.fold_in(self.rng, 115), w_na)}
         if self.config["train_actor"]:
             if self.config["actor_mode"] == "ddpg":
                 (_, a_info), (g_a, g_vf) = jax.value_and_grad(
@@ -1067,7 +1590,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             s_info = new.action_critic_spread(batch, sampled,
                                               jax.random.fold_in(self.rng, 103))
             a_info = {**a_info, **ac_info, **r_info, **s_info}
-        return new, {**info, **a_info}
+        return new, {**info, **a_info, **na_info}
 
     @jax.jit
     def update(self, batch):
@@ -1121,6 +1644,22 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             ic = self._index_clip()
             u_cand = jnp.clip(jax.random.normal(r_u, (K, d_a)), -c["u_clip"], c["u_clip"])
             u_index = jnp.clip(jax.random.normal(r_up, (K, d_a)), -ic, ic)
+            if (c["measure_action_input"] == "action"
+                    and c["psi_form"] == "affine" and c["psi_bound"] != "tanh"):
+                # Exact affine factorisation: decode and build A(s,a), beta(s,a) once for
+                # each of the K current-action candidates, and encode each policy index
+                # once. Flatten action-major/index-minor to preserve the explicit K*K
+                # scan's ensemble reduction and first-argmax tie order.
+                obs_k = jnp.broadcast_to(observations, (K, *observations.shape))
+                w_k = jnp.broadcast_to(self.task_z, (K, *self.task_z.shape))
+                # Singleton current-action axis: einsum broadcasts it over K actions,
+                # while w_enc itself sees only the K distinct policy indices.
+                index_panel = u_index[:, None, :]
+                q_panel = self._psi_q_over_indices(obs_k, u_cand, w_k, index_panel)
+                q_ens = jnp.swapaxes(q_panel, 1, 2).reshape(c["num_parallel"], K * K)
+                q_mean, q_unc = targets_uncertainty(q_ens, c["num_parallel"])
+                Q = q_mean - c["actor_pessimism_penalty"] * q_unc
+                return u_cand[jnp.argmax(Q) // K]
             u_pairs = jnp.repeat(u_cand, K, axis=0)         # (K*K, d_a), i-major
             index_pairs = jnp.tile(u_index, (K, 1))         # (K*K, d_a)
             obs = jnp.broadcast_to(observations, (K * K, *observations.shape))
@@ -1257,7 +1796,8 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
                 # eval stream stays on the ddpg arm's seed. Selected with `where` rather
                 # than a Python `if`: `sample_actions` is jitted and `temperature` is a
                 # traced argument, so branching on it raises TracerBoolConversionError.
-                mu, log_std = self.sac_actor(observations[None], self.task_z[None])
+                w_act = self._actor_w(self.task_z)
+                mu, log_std = self.sac_actor(observations[None], w_act[None])
                 u_stoch, _ = tanh_gaussian_sample(mu, log_std, noise, self.config["u_clip"])
                 u_mode = self.config["u_clip"] * jnp.tanh(mu)
                 u_star = jnp.where(jnp.asarray(temperature) == 0, u_mode, u_stoch)[0]
@@ -1267,11 +1807,71 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             return self.execute(observations[None], self._acting_w_a()[None], u_star[None])[0]
         return self.decode(observations[None], u_star[None])[0]
 
+    def task_vector_report(self, next_observations, w_eval, key=None):
+        """Is the INFERRED eval task vector inside the distribution the arm trained on?
+
+        Arm D2 trains on `w` drawn FB-style: `mix_ratio` of them are `project(phi(s'))` for
+        an `s'` in the batch, the rest `project(N(0, I))`. At eval the deployed `w` comes
+        from `infer_z`, which is neither -- it is a reward-weighted average of `phi`. If that
+        vector sits outside the training mixture, the arm is being asked to generalise
+        somewhere it never saw, and a collapse is a coverage failure rather than a critic
+        failure. This is the check that separates those two.
+
+        Cosines, not a density: both components are projected onto the sphere of radius
+        sqrt(z_dim), so a density in R^z is not the right object and a proper one on the
+        sphere would need a normalising constant nobody here would read. Against the null --
+        two random unit vectors in z dimensions have cosine ~ N(0, 1/z), i.e. sd 0.088 at
+        z=128 -- a cosine is directly interpretable.
+        """
+        c = self.config
+        key = self.rng if key is None else key
+        phi_b = project_z(self.phi(next_observations), c["norm_z"])           # (N, z)
+        w = w_eval / (jnp.linalg.norm(w_eval) + 1e-12)
+        cos_phi = phi_b @ w / (jnp.linalg.norm(phi_b, axis=-1) + 1e-12)
+        g = project_z(jax.random.normal(key, phi_b.shape), c["norm_z"])
+        cos_gauss = g @ w / (jnp.linalg.norm(g, axis=-1) + 1e-12)
+        null_sd = 1.0 / jnp.sqrt(c["z_dim"])
+        return {"w_cos_phi_max": cos_phi.max(),          # nearest training phi(s') draw
+                "w_cos_phi_mean": cos_phi.mean(),
+                "w_cos_phi_p99": jnp.quantile(cos_phi, 0.99),
+                "w_nn_dist_phi": jnp.linalg.norm(
+                    phi_b - w_eval[None], axis=-1).min(),
+                "w_cos_gauss_max": cos_gauss.max(),      # the other mixture component
+                "w_null_sd": null_sd,                    # cosine sd of two random unit vectors
+                # > ~3 means the eval w points where SOME training draw pointed; ~1 means it
+                # is no closer to the training mixture than chance.
+                "w_cos_phi_max_over_null": cos_phi.max() / null_sd,
+                "w_cos_gauss_max_over_null": cos_gauss.max() / null_sd}
+
     # ------------------------------------------------------------------ reward inference
     def infer_z(self, next_observations, rewards):
-        """w = E_D[r(x) phi(x)] (Cor. `reward-inference`), projected onto the sphere."""
+        """w from a relabelling batch, projected onto the sphere.
+
+        `reward_inference='closed_form'` (DEFAULT, every published number) is
+        Cor. `reward-inference` literally: w = E_D[r(x) phi(x)].
+
+        That expression is the least-squares readout ONLY when E[phi phi^T] = I, which is
+        what the ortho term exists to enforce. Measured 2026-09-09
+        (`tools/diag_reward_readout.py`), it holds on cube and fails elsewhere:
+
+            env        Gram dev from I   cond      cos(closed form, least squares)
+            cube             0.035        1.3               0.997
+            antmaze          0.423       15.4               0.893
+            pointmaze        2.39         2e9               0.075
+
+        On pointmaze the Gram has collapsed (smallest eigenvalue 2e-4) and the deployed
+        estimator points almost ORTHOGONALLY to the best linear readout -- while the basis
+        itself is the most expressive of the three (topline R^2 0.514 against cube's 0.116).
+        `whitened` solves the normal equations instead, w = (E[phi phi^T] + eps I)^-1 E[r phi],
+        which is that best linear readout. It is the same object wherever the Gram is
+        already the identity, so it changes nothing on cube by construction.
+        """
         phi = self.phi(next_observations)
         z = (rewards.reshape(1, -1) @ phi).reshape(-1) / phi.shape[0]
+        if self.config["reward_inference"] == "whitened":
+            gram = (phi.T @ phi) / phi.shape[0]
+            eps = self.config["reward_inference_eps"]
+            z = jnp.linalg.solve(gram + eps * jnp.eye(gram.shape[0]), z)
         return project_z(z, self.config["norm_z"])
 
     def infer_z_a(self, next_observations, rewards):
@@ -1282,6 +1882,46 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         b = self.phi_a(next_observations)
         z = (rewards.reshape(1, -1) @ b).reshape(-1) / b.shape[0]
         return project_z(z, self.config["norm_z"])
+
+    def refit_na_reward(self, next_observations, rewards, ho_next_observations=None,
+                        ho_rewards=None):
+        """Arm D1b: refit the HELD reward-readout w, and the scale that matches the reward.
+
+        `w` is the closed form `project(E[(r + shift) phi(s')])` on a relabel batch -- the
+        same estimator `infer_z` uses at eval -- so the value is trained on the reward
+        channel the agent actually deploys, rather than on a fresh 256-row estimate every
+        step. The scale is `std(r + shift) / std(phi w)` over that batch: the sphere
+        projection fixes `||w||`, which left r_hat's std at 13.6 against the reward's 0.15
+        in Arm D1, and a critic trained at that scale is not comparable to one trained on
+        the real reward.
+
+        Pass a SECOND, disjoint batch to get `na_rhat_corr_heldout`. The in-batch
+        correlation is upward-biased: `w` is fit on the same rows it is then scored
+        against, and on cube a 256-row batch holds ~5 rewarding rows against a 128-dim
+        basis. The held-out number is the one to read.
+
+        Returns `(agent, info)`. Call it from the training loop, not from inside `update`.
+        """
+        c = self.config
+        shift = float(_na_opt(c, "reward_shift"))
+        r_shift = rewards + shift
+        ph = self.phi(next_observations)
+        w = project_z((r_shift.reshape(1, -1) @ ph).reshape(-1) / ph.shape[0], c["norm_z"])
+        r_hat = ph @ w
+        scale = r_shift.std() / (r_hat.std() + 1e-8)
+        dr, dt = r_hat - r_hat.mean(), r_shift - r_shift.mean()
+        info = {"na_rhat_corr_infit": float((dr * dt).mean() / (dr.std() * dt.std() + 1e-8)),
+                "na_rw_norm": float(jnp.linalg.norm(w)),
+                "na_rw_scale": float(scale),
+                "na_rhat_std_prescale": float(r_hat.std()),
+                "na_reward_std": float(r_shift.std())}
+        if ho_next_observations is not None and ho_rewards is not None:
+            ho_r = ho_rewards + shift
+            ho_hat = self.phi(ho_next_observations) @ w
+            a_, b_ = ho_hat - ho_hat.mean(), ho_r - ho_r.mean()
+            info["na_rhat_corr_heldout"] = float(
+                (a_ * b_).mean() / (a_.std() * b_.std() + 1e-8))
+        return self.replace(na_rw=w, na_rw_scale=scale), info
 
     def infer_eval_z(self, next_observations, rewards):
         """Copy of this agent with `task_z` set from a relabelling batch.
@@ -1354,6 +1994,9 @@ def get_config():
             lr_sf=1.0e-4,
             lr_actor=1.0e-4,
             lr_actor_vf=3.0e-4,
+            # Diagnostic continuation switch. False freezes phi's complete TrainState;
+            # psi (including the affine policy-index encoder) continues training.
+            train_phi=True,
             phi=dict(hidden_dim=256, hidden_layers=2),
             sf=dict(hidden_dim=1024, hidden_layers=1, embedding_layers=2),
             mix_ratio=0.5,           # P(w drawn as phi(next_obs[perm])) vs a random unit z
@@ -1376,7 +2019,10 @@ def get_config():
                        target_entropy=0.0,       # DSRL's target_ent, not -dim(A)
                        init_alpha=1.0, lr_alpha=3.0e-4,
                        log_std_min=-20.0, log_std_max=2.0,
-                      prior_init=False, prior_init_std=0.3),
+                       prior_init=False, prior_init_std=0.3,
+                       # LayerNorm on the tanh-Gaussian trunk's hidden stack; DSRL puts it
+                       # on every hidden layer of actor and critic alike.
+                       layer_norm=False),
             # Which latent actor `train_actor=true` trains and `acting=actor` deploys.
             actor_mode="ddpg",       # ddpg | dsrl_sac | gpi_distill
             acting="gpi",            # gpi (per-step latent argmax, actor-free) | actor
@@ -1386,6 +2032,10 @@ def get_config():
             # "affine" is Prop. `bilinear` literally, psi = A(s,u)^T w(u') + beta(s,u); it
             # needs policy_index="latent". "free" absorbs w(u') into psi (Rem. `tradeoff`).
             psi_form="affine",            # affine | free
+            # Current-action input of the affine measure head. ``latent`` reproduces every
+            # existing run; ``action`` trains on recorded actions and decodes all latent
+            # queries through the frozen flow.
+            measure_action_input="latent",  # latent | action
             affine=dict(w_dim=128, encoder_hidden=256, encoder_layers=2, norm_w=True),
             # How psi's index slot is aggregated. "max" is the argmax over the panel;
             # "expectile" distills an upper expectile into q_dist, taking no sample argmax.
@@ -1398,6 +2048,20 @@ def get_config():
             # Train the amortized latent actor. False drops the actor/CFM branch; needs
             # acting=gpi and policy_index="latent", where the backup does not read it.
             train_actor=False,
+            # DSRL-NA's dual critic (2026-09-08). NOT ZERO-SHOT: qa is fitted on the
+            # task's real reward. Requires actor_mode=dsrl_sac, acting=actor, bc_coeff=0.
+            dsrl_na=dict(enabled=False, discount=0.99, tau=0.005, lr=3.0e-4,
+                         hidden_dim=2048, hidden_layers=3, layer_norm=True,
+                         num_ensembles=2, inner_steps=10, n_latent=1,
+                         # real (Item 2) | phi_readout (Arm D1) |
+                         # phi_readout_fixed (Arm D1b) | synthetic_w (Arm D2).
+                         reward_source="real", reward_shift=1.0,
+                         # Arm D1b only: how often main.py refits the held reward-readout
+                         # w from a fresh relabel batch. Ignored by every other source.
+                         reward_refit_every=10000,
+                         # Arm D2: critics and actor take w, so the arm generalises over
+                         # tasks instead of solving one. Requires synthetic_w.
+                         task_conditioned=False),
             # Action branch: successor features over executed actions plus an eps-bounded
             # residual. `pessimism` is a [0,1] blend weight, not a spread multiplier.
             action_critic=dict(enabled=False, discount=0.99, tau=0.005, pessimism=0.0,
@@ -1422,6 +2086,28 @@ def get_config():
             # Drop transitions whose Stage-B inversion diverged from the measure loss.
             # False = train on them, which every number before 2026-09-08 did.
             mask_invalid_preimages=False,
+            # How many action latents the MEASURE head is fitted at per transition. 1 is
+            # the published loss (the single point preimage). > 1 adds latents carrying the
+            # SAME (s, s') target, from `measure_u_source`:
+            #   mixture  the stored EM preimage posterior. Needs an npz inverted at
+            #            inversion.prior_scale > 0 (main.py enforces it), and MEASURED on
+            #            cube it decodes 0.205 from the recorded action against the point
+            #            inverse's 0.089 -- 60% of the way to an uninverted prior draw
+            #            (tools/diag_mixture_decode.py). Those are not other preimages.
+            #   jitter   u_data + measure_u_jitter_std * eps. The width is picked from the
+            #            same probe's ladder: sigma=0.3 decodes at 0.103, inside the point
+            #            inverse's own p90 of 0.128, i.e. still the same action.
+            measure_u_samples=1,
+            measure_u_source="mixture",     # mixture | jitter
+            measure_u_jitter_std=0.3,
+            # How `infer_z` reads w off a relabelling batch. "closed_form" is E[r phi],
+            # every published number; "whitened" solves the normal equations, which is the
+            # same thing wherever E[phi phi^T] = I and is not on antmaze or pointmaze.
+            reward_inference="closed_form",   # closed_form | whitened
+            reward_inference_eps=1e-3,        # ridge on the Gram, whitened only
+            # Arm C. Covariance scale c on the mixture draws (cov -> c^2 * cov). NO
+            # default: per-env, and picked from tools/diag_mixture_decode.py --shrink.
+            measure_u_mixture_shrink=ml_collections.config_dict.placeholder(float),
             u_clip=3.0,              # typical-set clamp on all latent draws
             # Tighter box for the u' draws alone (psi's index slot, the bootstrap action,
             # GPI's u' roster); None = u_clip. u_data and the candidates u stay on u_clip.

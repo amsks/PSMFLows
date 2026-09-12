@@ -117,17 +117,26 @@ def _with_skills(obs, skills):
     return jnp.concatenate([obs, skills], axis=-1)
 
 
-def sample_preimage_noise(means, covs, weights, rng=None):
+def sample_preimage_noise(means, covs, weights, rng=None, scale=1.0):
     """Sample one preimage-noise vector per transition from its EM Gaussian mixture.
 
     For each row the component is drawn from the categorical mixture `weights`, then the noise is
-    drawn from that component's Gaussian as `mu + L z` with `L = cholesky(cov)` and `z ~ N(0, I)`.
+    drawn from that component's Gaussian as `mu + scale * L z` with `L = cholesky(cov)` and
+    `z ~ N(0, I)`.
+
+    `scale` < 1 SHRINKS every component toward its own mean without changing its shape, which
+    is the point: the EM covariance is stretched along the directions in which the decode
+    barely moves, so a shrunk anisotropic draw covers more of the preimage set than a round
+    ball at the same decode error. Measured per environment by
+    `tools/diag_mixture_decode.py --shrink`. 1.0 is the posterior as stored, and is what
+    every caller before 2026-09-08 used.
 
     Args:
         means: (B, K, A) component means.
         covs: (B, K, A, A) component covariances.
         weights: (B, K) mixture weights (rows should sum to 1).
         rng: Optional `np.random.Generator`; defaults to the global `np.random` state.
+        scale: Multiplier on the Cholesky factor, i.e. covariance scaled by `scale ** 2`.
 
     Returns:
         noise: (B, A) float32 array, one sampled latent noise per transition.
@@ -162,7 +171,7 @@ def sample_preimage_noise(means, covs, weights, rng=None):
         w_eig, V = np.linalg.eigh(chosen_cov)
         L = V * np.sqrt(np.clip(w_eig, 0.0, None))[:, None, :]
     z = rand.standard_normal((B, A))
-    noise = chosen_mean + np.einsum('bij,bj->bi', L, z)
+    noise = chosen_mean + scale * np.einsum('bij,bj->bi', L, z)
     return noise.astype(np.float32)
 
 

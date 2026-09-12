@@ -444,10 +444,38 @@ ranking signal.
 - **D1 — the critic cannot rank policies.** Ten cube policies spanning 0.068–0.320 measured
   success, all scored by one frozen representation: **Spearman 0.10** (permutation p=0.78).
   Predicted values span −1816 to −1832, a **0.9% spread**, while success varies 4.7×.
-- **D2 — inference is fine, the basis is weak.** Closed-form `w = E[rφ]` gets R² **0.129**
-  against a ridge topline of **0.127** on the same features — the estimator extracts
-  everything `φ` contains. But the topline is low: the best linear read-out of `φ` explains
-  ~13% of reward variance. Antmaze identical (0.135/0.134), so no cube/antmaze asymmetry.
+- **D2 — inference is fine, the basis is weak. CUBE-ONLY; see the 2026-09-09 correction
+  below.** Closed-form `w = E[rφ]` gets R² **0.129** against a ridge topline of **0.127** on
+  the same features — the estimator extracts everything `φ` contains. But the topline is low:
+  the best linear read-out of `φ` explains ~13% of reward variance. Antmaze identical
+  (0.135/0.134), so no cube/antmaze asymmetry.
+
+  > **Correction, 2026-09-09 (`tools/diag_reward_readout.py`, 200k rows, the affine_strict
+  > ladders).** "The estimator extracts everything φ contains" is true on cube and **false on
+  > pointmaze**. `w = E[rφ]` is the least-squares readout only when `E[φφᵀ] = I`, which the
+  > ortho term enforces on cube and does not elsewhere:
+  >
+  > | env | topline R² | closed-form R² | cos(closed form, LS) | Gram dev from I | cond |
+  > |---|---|---|---|---|---|
+  > | cube | 0.115 | 0.114 | **0.997** | 0.035 | 1.3 |
+  > | antmaze | 0.104 | 0.083 | 0.893 | 0.423 | 15.4 |
+  > | pointmaze | **0.514** | 0.149 | **0.075** | 2.39 | **2e9** |
+  >
+  > On pointmaze the basis is the MOST expressive of the three and the deployed estimator is
+  > nearly orthogonal to the best readout, because the Gram has collapsed (smallest
+  > eigenvalue 2e-4). `affine_strict_pointmaze` scores exactly **0.000** on every seed and
+  > checkpoint. `reward_inference=whitened` (default off, a no-op wherever the Gram is I)
+  > solves the normal equations instead. **That eval-only test came back NEGATIVE and the
+  > causal claim is REFUTED (2026-09-09):** pointmaze stays at exactly 0.000 on all three
+  > seeds, and whitening *hurts* antmaze (sd2 0.428 → 0.062). Held out on a 50/50 row split
+  > pointmaze's topline falls 0.584 → 0.395 with ‖w‖ 40–70× the other envs, so it was partly
+  > overfitting an ill-conditioned Gram — the "most expressive basis" claim survives weakened
+  > (0.395 still beats cube's 0.104), the causal one does not. The measured Gram collapse,
+  > and `orth_loss` tracking it at rank correlation 1.000, both stand; what fails is the
+  > inference that this is *why* pointmaze scores zero. So the D2 reading
+  > holds for cube and the antmaze number above was never re-checked against its own Gram —
+  > it is not evidence of "no asymmetry" outside cube. The cube conclusion is unchanged.
+  > Full record: `docs/design/2026-09-08-critic-signal-and-dsrl-na.md` §4.3.
 - **D3 — Q is flat.** Over 512 prior draws at 64 states, relative Q spread is **0.011 of
   |Q|**; around the actor's own latent, 0.0038. **The actor sits at the 44th percentile of
   the prior-Q distribution** (median 38th) — below the middle. Actor gradient is
@@ -579,6 +607,27 @@ read** — a Rung-1 leftover that doubled per-step mixture sampling on the train
 ---
 
 ## 6. Hypotheses: settled and live
+
+### Environment status
+
+**POINTMAZE IS SUBSTRATE-CAPPED (2026-09-09).** The BC control on
+`pointmaze-medium-navigate` — the frozen Stage-A flow acting alone on a fresh prior latent
+each step — scores **0 / 100 episodes**, Wilson 95% upper bound **0.037**
+(`tools/diag_action_coherence.py`, report `diag_pointmaze_zero.json`). The flow cannot do the
+task at all, so **no Stage-C number on this environment means anything** and it must not be
+used to judge the method. This is why `affine_strict_pointmaze` reads exactly 0.000
+everywhere and why whitening the reward inference moved it by zero episodes: there was
+nothing to move. Arm C's three pointmaze seeds were cancelled mid-training on this basis.
+
+**Stage A re-examination is PARKED as a separate item**, with one oddity flagged for whoever
+picks it up: a behaviour-cloned flow scoring *exactly* zero on a medium point-maze is
+surprising on its face — the task is the easiest of the three — so a checkpoint-selection or
+eval-goal mismatch is at least as likely as a capacity limit, and should be ruled out before
+anything is retrained.
+
+(cube and antmaze are unaffected: their BC controls are 0.072 and non-zero respectively, and both Stage-C lines stand.)
+
+---
 
 ### Settled negative (do not re-run)
 | hypothesis | verdict | evidence |

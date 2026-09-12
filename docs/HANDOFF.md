@@ -18,11 +18,563 @@ hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RES
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
 Branch: `feat/inversion-integration` · Machine: `kisski` (GWDG, SLURM/H100) · prior: `midi-01` (UT CS)
-Date: **2026-09-08** (latest) · prior: 2026-09-07, 2026-09-06, 2026-09-05, 2026-09-04, 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+Date: **2026-09-11** (latest) · prior: 2026-09-10, 2026-09-09, 2026-09-08, 2026-09-07, 2026-09-06, 2026-09-05, 2026-09-04, 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+
+---
+
+## 2026-09-11 — exact-action affine PSM: final 500k results, AntMaze collapses
+
+All six runs and aggregate job2493461 completed0:0. All30 task reports were revalidated:
+exact500k checkpoints,500episodes/task, five tasks per training seed, matching saved
+configurations, seeds0/1/2. The fixed endpoint results are:
+
+| Environment | seed0 five-task mean | seed1 | seed2 | Mean ±95% t halfwidth |
+|---|---:|---:|---:|---:|
+| cube |41.84%|60.16%|29.76%|**43.92% ±38.02 percentage points**|
+| antmaze |0.72%|1.76%|0.76%|**1.08% ±1.46 percentage points**|
+
+These are across-training-seed Student-t intervals,df2, after averaging tasks within
+each seed; they are not episode-level intervals. The symmetric AntMaze interval extends
+below zero and is left untruncated in the artifact. The recipe misses the requested70%
+target and does not outperform all TD-JEPA comparator means. Cube's point estimate is
+above the historical strict affine25.33%, but uncertainty is too wide for a reliable
+improvement claim. Its same-flow five-task BC control is11.08% (one shared frozen flow,
+500episodes/task). The matched AntMaze BC control job2493549 also completed0:0:
+task scores are **5.6%,17.4%,2.6%,0.6%,10.0%**, a five-task mean of **7.24%**
+(one shared frozen flow; these are episode estimates, not an across-training-seed CI).
+
+The AntMaze collapse is confirmed at500episodes on the same task and worker protocol:
+task1 moves from **.844/.564/.752** at50k (mean.720) to **.036/.004/.038** at500k
+(mean.026). Early50k was chosen retrospectively for diagnosis; it cannot replace the
+registered500k endpoint. Reports and aggregates:
+`outputs/affine_action_20260911/reports/{cube,antmaze}_aggregate.json` and
+`antmaze_50k_task1_diagnostic_summary.json`.
+
+The paired freeze-phi diagnostic is implemented and its 200-step GPU smoke job
+**2494102** completed0:0. Both arms reached absolute step50200 with finite losses,
+exact frozen-phi/optimizer preservation, synchronized target-phi, advancing control phi,
+unchanged flow weights, and matched RNG streams. This is only a wiring check (2 episodes).
+The predeclared 450k continuation, job **2494139**, is running from the seed0 50k
+checkpoint; it shares each batch between continue-phi and freeze-phi arms and counts
+50k source +450k new updates as500k total. See [the protocol](design/2026-09-11-freeze-phi-diagnostic.md)
+and `outputs/freeze_phi_20260911/`.
+
+The pilot's provisional in-loop task1 readout is mixed: at absolute100k, frozen/control
+were **70%/36%** on50 episodes; at absolute150k **10%/18%**; and at absolute200k
+**10%/12%**. These are noisy diagnostics, not endpoint evidence, and the continuation
+remains in progress.
+
+**Next-step decision after interim AntMaze collapse:** verify the saved50k checkpoints
+with 500 episodes, then conditionally run a matched continue-versus-freeze-phi pilot.
+The early .76/.56/.66 and later350k .06/.02/.14 are only task1 in-loop50-episode scores.
+The subsequent500-episode50k check confirmed **.844/.564/.752**, mean **.7200 ± .3545**
+(three-training-seed Student-t95% halfwidth,df2), on task1 only. This is a retrospective
+diagnostic and does not meet the500k/five-task benchmark protocol. Evaluation jobs
+2493462/2493463/2493464 (seeds0/1/2) completed0:0; settings and the full calculation are
+recorded in `outputs/affine_action_20260911/early_eval_manifest.json` and
+`reports/antmaze_50k_task1_diagnostic_summary.json`. The freeze implementation and smoke
+are complete; production pilot job2494139 is still running. Both branches synchronize
+target/online phi before the fork and use the same data/RNG sequence for450k further
+updates (50k source +450k continuation =500k total). This isolates ongoing feature
+learning before introducing a HILP/RLDP objective. [Diagnostic design](2026-09-11-freeze-phi-diagnostic.md).
+
+The user requested at least 70% success with
+three-seed intervals and superiority to FB/RLDP/HILP as reported by TD-JEPA. Its state-based
+OGBench table uses five-task averages, 1M updates and ten seeds (printed uncertainties are
+SE): cube HILP **74.20 ± 3.53**, FB 49.60 ± 3.83, RLDP 19.80 ± 2.41; antmaze HILP
+**83.60 ± 2.63**, FB 73.00 ± 2.72, RLDP 74.60 ± 4.15. Thus 70% alone does not beat all
+comparators. [Primary paper](https://arxiv.org/html/2510.00739). The phrase “with steering”
+was not a named variant in the official paper/repo; clarification remains pending.
+
+The controlled change is `measure_action_input=action` (default remains `latent`):
+`F(s,a,c)=A(s,a)c+beta(s,a)` trains at recorded dataset actions; latent queries use
+`F(s,G(s,u),w_enc(u'))`. Bootstrap and acting use the same frozen decoder. This removes
+approximate-preimage/decoder-coordinate inconsistency while keeping the affine policy
+index, current losses, gamma, reward-free training and flow GPI. Affine GPI now factors
+its K-by-K scoring panel in this branch; tests check explicit-pair equivalence and ties.
+
+Search/math audit: the marginal in-sample C=1 argument does not prove joint
+`(state, action, policy-index)` coverage or projected-TD stability. Arbitrary affine-coordinate
+LP optimization is not justified by a feasible occupancy set in the current implementation.
+Strong reward-trained DSRL steering also does not prove good constant-index continuation
+values. Reference RLDP/HILP supply possible reward-free basis objectives if this arm fails;
+basis training must count within the 500k budget. Details and sources:
+[design](design/2026-09-11-affine-action-conditioning.md).
+
+Validation: 9 action/parity tests, 11 config tests, 12 legacy affine tests, 18 core tests
+passed (2 checkpoint-dependent skips); 5 reporting tests passed. Independent review checked
+the action paths, decoder gradients/frozen weights, factorization, snapshot and reporting.
+GPU jobs **2493453** (cube) and **2493454** (antmaze) each completed 200 steps with exit
+0:0. Saved flags match the manifest; losses are finite. These are execution checks.
+
+Artifacts: `outputs/affine_action_20260911/`. `code/source_manifest.json` hashes 159 source
+files from the dirty tree; the job verifies hashes and imports that snapshot.
+`experiment_manifest.json` includes full resolved agent configurations from both smokes.
+Cube gamma .98, antmaze .99; seeds 0/1/2; frozen Stage-A epoch500k shared across seeds;
+Stage-A training cost remains separate from the 500k Stage-C budget.
+
+| Environment | seed 0 | seed 1 | seed 2 |
+|---|---:|---:|---:|
+| cube | 2493455 | 2493456 | 2493457 |
+| antmaze | 2493458 | 2493459 | 2493460 |
+
+Each job trains to exactly 500k and then evaluates all five tasks, 500 episodes each,
+with four workers and eval seed0. Job **2493461** depends on all six succeeding and writes
+`reports/{cube,antmaze}_aggregate.json` using `tools/report_seed_comparison.py`.
+The tool checks restored flags, distinct training runs, matching configs, complete task
+matrices and episode/epoch provenance; it first averages tasks within each training seed,
+then reports mean ± Student-t 95% CI across three seeds (df=2). No best checkpoint selection.
+
+Re-audited historical cube control at exactly 500k: five-task means per seed
+**.156/.308/.296**, overall **.2533 ± .2099** (three-seed t95 halfwidth), from
+`$PSM_DATA/logs/eval500_affine500k_strict_cube[_task{1,3,4,5}]_sd{0,1,2}.json` (unqualified
+names are task2). No complete strict antmaze five-task matrix was found; its task1 result
+must not be substituted for a benchmark mean. Old runs differ in some subsequently added
+default config keys, so the new strict raw-config reporter is not silently relaxed for them.
+
+Resume by inspecting `jobs.json`, Slurm state, saved `train.csv` and aggregate reports.
+Do not relaunch completed work. Do not run raw-`psi` calls in `diag_gpi_selection`,
+`diag_actor_grad_terms` or `diag_latent_ranking_oracle` on the action branch without adapting
+them to the decoded-query helper. The target is still unproven while jobs run.
 
 ---
 
 <!-- _class: lead -->
+
+## 2026-09-10 — five pre-registrations scored, four failed, and antmaze is steerable
+
+All 500 episodes, `stability_ladder.ladder_from_eval500` off the run's own reports.
+
+---
+
+### 1. Antmaze CAN be steered. **0.967** through the frozen flow.
+
+`dsrlna_antmaze`, DSRL-NA with the task's real reward, gamma 0.99, Item 2 recipe otherwise
+unchanged. Six cells:
+
+| seed | 250k | 500k |
+|---|---|---|
+| sd0 | 0.938 | 0.982 |
+| sd1 | 0.972 | 0.978 |
+| sd2 | 0.956 | 0.976 |
+
+Pooled **0.967**, flat, against BC **0.072** and the zero-shot antmaze control's **0.294**.
+NOT zero-shot and not quotable beside a zero-shot row. What it settles: antmaze is not
+substrate-capped the way pointmaze is, and its zero-shot failure is the value, exactly as on
+cube (0.910). Two environments now say the same thing.
+
+---
+
+### 2. Four pre-registrations, scored
+
+| arm | pre-registered line | result | verdict |
+|---|---|---|---|
+| **D1b** (readout as reward, fit as deployed) | near 0.9 exonerates the readout; well below 0.415 makes it the wall | **0.008 / 0.010 / 0.014** | the readout is the wall |
+| **Arm C + gradient actor** | above 0.14 means the value has slope; near 0.14 means it does not | **0.000 x3** | no usable slope |
+| **Arm C 1M continuation** | no seed falls back below its 500k value by more than 0.08 | sd0 0.792 → 0.654 → **0.612**; sd1 0.804 → 0.758 → 0.846; sd2 0.322 → 0.086 → **0.012** | **FAILED** |
+| **Arm C dose response** | monotone in c if the shape is the mechanism | c=0.3 **0.472**, c=0.5 **0.515**, c=0.7 **0.409**, control **0.426** | non-monotone, all inside the control's band |
+
+**Arm C is demoted.** Yesterday's entry (6e) recorded a monotone 9/9 rise and said the
+continuation would decide it. It decided against: seed 0 falls 0.18 and seed 2 collapses by
+0.31 over the next 500k, both far outside the ladder's own 0.083 step. The rise was a slow
+transient. Add that Arm C does not replicate on antmaze (0.285 against the control's 0.266 on
+matched cells, peaking at 100k-250k and collapsing to 0.02-0.08 by 500k), and that the dose
+response is flat in `c`, and what is left is one favourable window on one environment.
+**Arm C is not a fix; it is back to being a stability question.**
+
+---
+
+### 3. The pattern worth carrying: optimising the fitted reward is what fails
+
+| arm | how hard it optimises the fitted reward | 500-ep |
+|---|---|---|
+| Arm C + gradient actor | gradient ascent on `psi^T w` | **0.000** |
+| D2 (synthetic w) | TD + actor on `phi^T w` | **0.004** |
+| D1b (readout as reward) | TD + actor on `phi^T w_hat` | **0.011** |
+| BC control | not at all | 0.072 |
+| 09-08 faithful DSRL arm | actor on `psi^T w` | 0.136 / 0.141 |
+| affine strict, best-of-64 GPI | argmax over 64 prior draws | 0.380 |
+| Arm C, best-of-64 GPI | argmax over 64 prior draws | 0.503 |
+| DSRL-NA, REAL reward | TD + actor on the true reward | 0.910 (cube) / 0.967 (antmaze) |
+
+Three of the four arms that optimise the fitted reward hard land **below** the
+behaviour-cloning control; the fourth lands at about twice it and a third of the argmax.
+The ordering runs the wrong way for an optimisation problem and the right way for a
+**task-inference** problem: the harder an arm pushes on `w^T phi`, the worse it does, and the
+same machinery pushed on the TRUE reward reaches 0.91-0.97. The proposed reading is that
+best-of-64 survives because it barely optimises. That is a hypothesis about a pattern, not a
+measurement — `tools/diag_fitted_vs_true_return.py` is what tests it, by scoring the true and
+the fitted discounted return under one rollout.
+
+---
+
+### 4. Two more proxies that do not predict success
+
+Both were reached for as cheap stand-ins for a 500-episode eval. Neither survives.
+
+- **`na_signal_over_disagreement`** — the std of the latent critic over `u` divided by the
+  action critic's ensemble disagreement. Antmaze DSRL-NA reads **0.39-0.62** and scores
+  **0.967**; cube DSRL-NA reads **0.94-2.23** and scores 0.910; D1b reads **0.44-1.15** and
+  scores **0.011**. Three-to-one spread in the metric, no relation to the outcome.
+- **top-8 ordering agreement with an expert critic** — retired 2026-09-09; see the design
+  doc's RETIRED block. Predicts nothing about which checkpoint succeeds (rho +0.371, p 0.24
+  at n=12, against +0.721 at the n=10 it was adopted on).
+
+With reward-reconstruction quality (09-09 6b) and roster-ranking quality (09-09 3b), that is
+**four** proxies for "is this critic good" that fail to predict the policy. Only the
+500-episode ladder has ever tracked the outcome. Stop building diagnostics that predict
+success and build ones that explain a mechanism.
+
+---
+
+---
+
+<!-- _class: lead -->
+
+## 2026-09-09 — the reward readout is the wall, and the ortho loss was telling us
+
+Design doc: `docs/design/2026-09-08-critic-signal-and-dsrl-na.md`. Everything below is
+CPU-measured or in-loop unless it says 500 episodes; the 500-episode evals are queued.
+
+---
+
+### 1. The one-step ground truth was invalid, and the Item 1 conclusion is WITHDRAWN
+
+The rewritten GPI-selection probe (success ONSETS, 256 states, discounted at the training
+gamma, three continuations) carried a check on the ground truth itself: rank the candidates
+by distance to a frozen FQL expert's action. E1 says executing that candidate at EVERY step
+scores 0.934, so it must rank a one-step return.
+
+**It ranks worse than random** — regret 8.74 against a random pick's 8.58, rho +0.022. And
+not for want of a good candidate: at K=64 the closest sits **0.049** from the expert's action
+against a roster mean of 0.174 (mean ||a|| = 1.231).
+
+So "the signal exists and both critics miss it" is withdrawn. What replaces it is sharper:
+**one near-expert action followed by 49 steps of behaviour cloning is indistinguishable from
+one random in-support action followed by the same 49 steps.** The value of acting well on
+cube is not located in any single step — which sits exactly between the two anchors, 0.934
+aiming every step and 0.072 never aiming.
+
+---
+
+### 2. STEP A — ordering agreement, and a diagnostic that needs no simulator
+
+If a rollout cannot score a ranker, score the ranker against a ranker. Per state, over the
+same roster: does the checkpoint order candidates the way a frozen expert's critic does, and
+does agreeing predict that checkpoint's 500-episode success?
+
+| statistic | rho vs success (n=10) | exact p |
+|---|---|---|
+| **top-8 overlap with the expert CRITIC** | **+0.721** | **0.024** |
+| top-8 overlap with expert DISTANCE | +0.382 | 0.279 |
+| full-ordering rho, either reference | +0.56 / +0.58 | ~0.09 |
+
+Two seeds move in opposite directions and agreement follows each. **Adopted as the Arm B /
+Arm C readout beside ladder swing**; the full-ordering Spearman is suggestive only. Agreeing
+with a VALUE ordering predicts success; agreeing with an IMITATION ordering does not.
+
+Note the scale: the same critic reads 0.16-0.27 against the expert's ordering where it read
+0.04 against rollout returns. The return was the insensitive instrument.
+
+---
+
+### 3. Item 2 — a real DSRL-NA arm. The frozen flow is NOT the constraint on cube.
+
+The repo's "DSRL-NA" had copied DSRL's actor and none of its critic. Added the missing half
+(`dsrl_na`, default off): `qa(s,a)` by TD on the real reward, distilled into `qw(s,u)` at
+prior draws, actor climbs `qw` only.
+
+**In-loop 50-episode, NOT reportable; eval500 queued (2492559-64):** 0.80-1.00 across eleven
+checkpoints and three seeds, from 50k steps on. Against BC 0.072, actor-free GPI 0.415, the
+09-08 "faithful DSRL" arm 0.136/0.141, per-task FQL 0.949. The pre-registered bar was 0.5 by
+250k.
+
+Three readings. (i) A reward-specific critic steers this exact frozen decoder to near the
+per-task reference, so the flow/inversion is not the binding constraint on cube and the
+zero-shot representation is the whole gap. (ii) **The arm is FLAT** — 0.80-1.00 across the
+ladder against the zero-shot arm's 0.086 <-> 0.704 traverse within one seed. The oscillation
+is a property of the zero-shot measure, not of the substrate. (iii) Its internal
+signal-to-noise over `u` runs 1.4-2.0 where the zero-shot measure reads 57/124 = 0.46.
+
+---
+
+### 3b. 500-episode confirmation, and the roster verdict (CONDITIONAL)
+
+**Item 2 at 500 episodes: pooled 0.910** (sd0 0.902/0.842, sd1 0.946/0.868, sd2 0.966/0.936
+at 250k/500k, n=6) against BC 0.072, actor-free GPI 0.415, the 09-08 faithful-DSRL arm
+0.136/0.141, per-task FQL 0.949. **96% of the per-task reference through the same frozen
+flow**, and flat: 0.842-0.966 where the zero-shot arm traverses 0.086-0.704 inside one seed.
+
+**A critic scoring 0.910 ranks the roster no better than one scoring 0.415.** Same 256-onset
+roster as section 1:
+
+| ranker | rho `onestep_bc` | regret | its deployed success |
+|---|---|---|---|
+| `psi^T w` | +0.065 | 7.88 | 0.415 |
+| `Q_A(s, G(s,u))` | **+0.062** | 6.49 | **0.910** |
+| `Q_W(s, u)` | **+0.062** | 6.67 | **0.910** |
+| random | — | 8.58 | 0.072 |
+
+So roster-ranking ability does not determine success. **But the verdict is conditional and
+the condition is the critic, not the deployment.** The 09-08 `dsrlfaithful` arm deployed the
+same way — latent actor, no roster argmax — climbing the MEASURE readout, and scored
+0.136/0.141. Same deployment, a sixth of the number. What separates them is a Bellman critic
+on the real reward. So: **actor deployment wins WHEN the critic behind it is a Bellman one;
+roster argmax is the wrong deployment either way, but replacing it buys nothing on its own.**
+Whether a *zero-shot* Bellman critic keeps the property is what D2 decides; D1 prices the
+readout.
+
+No contradiction with section 2: Step A measured ordering agreement *within* the
+roster-argmax family, where it does track success (rho +0.72). This arm does not deploy that
+way.
+
+**Cube whitened eval500** (pre-registered: no change expected, Gram deviation 0.035):
+healthy sd0@350k **0.704 -> 0.698**, intervals overlapping, no change. Dead sd0@500k
+**0.086 [0.064,0.114] -> 0.160 [0.130,0.195]**, non-overlapping: **+0.074, real but small —
+12% of the way back to the healthy checkpoint.** Reading: a piece of the cube oscillation is
+the estimator and the bulk of it is not; the dead checkpoint stays dead. `orth_offdiag`'s
+r = -0.375 gets a **partial** cause on cube, not its whole cause. (The maze whitened evals,
+where the Gram actually collapses, are still running.)
+
+---
+
+### 4. The GATE — the reward is only weakly readable from phi, and from anything else
+
+`tools/diag_reward_readout.py`, 200k rows, 12 checkpoints. Pre-registered: R2 > 0.5 viable,
+< 0.2 capped.
+
+| statistic | value |
+|---|---|
+| topline R2 (least squares, shifted reward) | **0.116** |
+| closed form `w = E[r phi]`, rescaled | 0.116 |
+| cos(closed form, least-squares optimum) | **0.997** |
+| topline R2 on the RAW unshifted reward | **-0.20** |
+
+**CAPPED against the pre-registered 0.2 line — but that line had no baseline, and with one
+the reading changes.** Same 200k rows, same shifted reward: raw observations (28-d) 0.049,
+untrained random tanh features at phi's width (128-d) 0.065, random Fourier 512-d 0.096,
+random Fourier 2048-d 0.169 in-sample / 0.107 held out. Trained phi reads 0.116, about 2x a
+matched random basis and level with a 2048-d nonlinear one. So "phi cannot express the
+reward" is withdrawn; what holds is that no linear basis of this size expresses a reward
+2.1% of rows pay, and the agent optimises the reward projected onto phi's span. Whether that
+blurred goal suffices is what Arm D1b measures.
+(`psm-data/logs/diag_reward_baseline_cube.json`.) It reproduces COMPENDIUM 4.7's D2 (0.129)
+independently. Four things R2
+alone does not say: the ESTIMATOR is not the problem on cube (cos 0.997, within 0.003 of the
+topline); the cap is **flat across the ladder** (0.107-0.120 while success swings eight-fold
+— it is a constant ceiling, NOT the oscillation); **86.5% of the predicted reward mass sits
+on rows that pay nothing** (rewarding rows are 2.1% of the data and the readout predicts
+0.128 on them against a target of 1.0); and `eval_reward_shift=1.0` is load-bearing, since
+a no-intercept readout of the raw -1/0 reward does worse than predicting the mean.
+
+---
+
+### 5. The gate extension — the cap is not one thing, and pointmaze is a different failure
+
+**The ortho coefficient moves the cap the WRONG WAY**: 0.116 at `ortho_coef=1e3` against
+0.091 at 1e4. Not the lever.
+
+| env | topline R2 | deployed R2 | cos(deployed, optimal) | Gram dev from I | cond |
+|---|---|---|---|---|---|
+| cube | 0.115 | 0.114 | **0.997** | 0.035 | 1.3 |
+| antmaze | 0.104 | 0.083 | 0.893 | 0.423 | 15.4 |
+| **pointmaze** | **0.514** | 0.149 | **0.075** | 2.39 | **2e9** |
+
+Pointmaze's basis is the MOST expressive of the three and its deployed estimator points
+almost ORTHOGONALLY to the best readout. `affine_strict_pointmaze` scores exactly **0.000**
+on every seed and checkpoint.
+
+---
+
+### 6. The mechanism, and the two consequences worth carrying
+
+30 pointmaze checkpoints, measured Gram beside the `orth_loss` the run logged at that step:
+
+| relationship | Spearman |
+|---|---|
+| `orth_loss` vs Gram deviation from I | **+1.000** |
+| Gram condition vs **deployed** R2 | -0.829 |
+| Gram condition vs **topline** R2 | +0.400 |
+
+Deployed R2 swings 17x (0.017-0.305) while the topline holds 0.25-0.60; the Gram condition
+number swings **four orders of magnitude**, non-monotonically — the same signature as cube's
+success ladder under the same loss.
+
+**Both pre-registered branches are wrong.** The regulariser is not blind (rank correlation
+1.000) and the collapse is not constant-from-the-start. The ortho term is simply **losing,
+intermittently**, and when it loses the reward inference stops working while the basis
+underneath stays fine.
+
+> **Consequence 1.** This gives the 09-08 stability campaign's strongest correlate a
+> mechanism. `orth_offdiag` was the best single predictor of cube success (r = -0.375) and
+> nobody could say why. It is measuring whether `w = E[r phi]` is still the right estimator
+> at all.
+>
+> **Consequence 2.** The write-up already stated the condition. Cor. `reward-inference` says
+> `w = E_D[r phi]` is the least-squares projection EXACTLY when `E[phi phi^T] = I`, and in
+> its own words that is "why the orthonormality loss is part of the specification and not a
+> stability regulariser". Stated, never checked.
+
+---
+
+### 6b. The whitened estimator: hypothesis REFUTED by its own test
+
+The Gram-collapse story predicted that whitening the reward inference would rescue
+pointmaze. Pre-registered: any non-zero pointmaze eval500 is decisive, above 0.2 means the
+estimator was the whole failure. Eval-only, 500 episodes, same checkpoints:
+
+| env | checkpoint | closed form | whitened | delta |
+|---|---|---|---|---|
+| **pointmaze** | sd0/1/2 @500k | 0.000 | **0.000** | **+0.000** |
+| antmaze | sd0 @500k | 0.078 | 0.010 | -0.068 |
+| antmaze | sd1 @500k | 0.004 | 0.042 | +0.038 |
+| antmaze | sd2 @500k | **0.428** | **0.062** | **-0.366** |
+| cube | sd0 @350k healthy | 0.704 | 0.698 | -0.006 |
+| cube | sd0 @500k dead | 0.086 | 0.160 | +0.074 |
+
+**Pointmaze does not move at all. The estimator was not the pointmaze failure.** Whitening
+also HURTS antmaze, worst on the seed that worked (0.428 -> 0.062). And the topline that
+motivated the hypothesis was partly overfitting: held out on a 50/50 row split, pointmaze
+falls 0.584 -> 0.395 with `||w||` 40-70x the other envs (unregularised least squares on a
+Gram whose smallest eigenvalue is 2e-4). The "most expressive basis" claim survives weakened
+-- 0.395 still beats cube's 0.104 and still clears 0.2 -- but the 0.514 headline was inflated.
+
+**The useful part.** On antmaze the whitened `w` reconstructs the reward equally well
+(held-out R2 0.102 either way) and produces a much worse policy. So **reward-reconstruction
+quality does not determine policy quality** -- the second instance today of that shape, after
+section 3b's finding that roster-ranking quality does not either. Two natural proxies for
+"is this critic good", both failing to predict the outcome.
+
+What survives from section 6 unchanged: the Gram does collapse, `orth_loss` tracks it at rank
+correlation 1.000, and the write-up stated the precondition without anyone checking it. What
+does not survive is the causal claim that this is why pointmaze fails.
+
+---
+
+### 6c. Pointmaze: the substrate, not the agent
+
+**POINTMAZE IS SUBSTRATE-CAPPED (2026-09-09).** The BC control on
+`pointmaze-medium-navigate` — the frozen Stage-A flow acting alone on a fresh prior latent
+each step — scores **0 / 100 episodes**, Wilson 95% upper bound **0.037**
+(`tools/diag_action_coherence.py`, report `diag_pointmaze_zero.json`). The flow cannot do the
+task at all, so **no Stage-C number on this environment means anything** and it must not be
+used to judge the method. This is why `affine_strict_pointmaze` reads exactly 0.000
+everywhere and why whitening the reward inference moved it by zero episodes: there was
+nothing to move. Arm C's three pointmaze seeds were cancelled mid-training on this basis.
+
+**Stage A re-examination is PARKED as a separate item**, with one oddity flagged for whoever
+picks it up: a behaviour-cloned flow scoring *exactly* zero on a medium point-maze is
+surprising on its face — the task is the easiest of the three — so a checkpoint-selection or
+eval-goal mismatch is at least as likely as a capacity limit, and should be ruled out before
+anything is retrained.
+
+---
+
+### 6e. ARM C — the first arm that raises the mean AND halves the swing
+
+`armc_cube`: the measure head fitted at **4 latents per transition instead of 1**, the extra
+three drawn from the stored EM posterior with each component's covariance scaled by
+`c = 0.5`, carrying the same `(s, s')` target. Arm B is the same seam with the extra latents
+from a **round ball**, and Arm B is null — so the pre-registered claim that the SHAPE is what
+matters is the one that survived. 500 episodes, `stability_ladder.py`, 250k–500k:
+
+| seed | 250k | 350k | 450k | 500k |
+|---|---|---|---|---|
+| sd0 | 0.386 | 0.454 | 0.624 | **0.792** |
+| sd1 | 0.662 | 0.706 | 0.758 | **0.804** |
+| sd2 | 0.124 | 0.180 | 0.228 | 0.322 |
+
+| arm | mean | mean adjacent step | source |
+|---|---|---|---|
+| **Arm C** | **0.503** | **0.083** | 12 cells |
+| control, same 4 cells | 0.442 | 0.181 | 12 cells |
+| control, all cells | 0.426 | 0.163 | 18 cells |
+| Arm B jitter 0.3 | 0.462 | 0.250 | 6 cells |
+| Arm B jitter 0.5 | 0.334 | 0.141 | 6 cells |
+
+**Monotone 9 of 9.** Every seed rises at every step; the control over the same cells goes
+down as often as up (sd0: 0.532 → 0.704 → 0.272 → 0.086). Under a coin-flip null on the
+direction of each step, 9/9 is p = 0.002 one-sided.
+
+**This is n = 3 seeds on one environment and is NOT yet a stability claim.** The ladder is
+rising, not settled, so the swing number is partly just the rise. What decides it is the 1M
+continuation: if a seed falls back below its 500k value by more than the swing, the rise was
+a slow transient and the arm returns to being a stability question. Report:
+`psm-data/logs/stability_armc_vs_control.json`.
+
+> **ANSWERED 2026-09-10, AGAINST THIS ARM.** The continuation ran and the pre-registration
+> failed. sd0 0.792 -> 0.654 -> 0.612 (down 0.18), sd2 0.322 -> 0.086 -> 0.012 (collapsed),
+> sd1 held at 0.846. The rise WAS a slow transient. Arm C also does not replicate on antmaze
+> (0.285 vs the control's 0.266 on matched cells) and its dose response is flat in `c`
+> (0.472 / 0.515 / 0.409 at c = 0.3 / 0.5 / 0.7 against the control's 0.426). **Read the
+> 2026-09-10 entry, not this one, for the standing verdict.** The table above is the
+> 250k-500k window and is real; it is just not the whole ladder.
+
+Note for the continuation: `restore_agent` DOES carry the optimiser state, the target
+networks and the per-`TrainState` step counter — verified leaf-by-leaf in
+`tests/test_checkpoint_restore_carries.py` — so no fresh 1M run is needed. But `main.py`'s
+outer counter restarts at 1, so a continuation writing to the same `save_dir` would
+**overwrite the first run's checkpoints**. Use a new `run_group`.
+
+---
+
+### 6d. Two launch traps, both caught by a 200-step smoke (2026-09-09)
+
+Recorded because each would have wasted a full run and neither is visible from the code you
+are editing.
+
+- **`configs/agent/psmflow.yaml` is a second source of truth from `get_config()`.** A key
+  added only to `get_config` makes every unit test pass and then dies on the cluster in 20
+  seconds: `Could not override 'agent.dsrl_na.reward_refit_every' ... not in struct`. Hydra
+  builds the override schema from the yaml. Add new agent keys to BOTH.
+- **`CsvLogger` fixes its header from the first row it writes** (`utils/log_utils.py:41`),
+  and later rows are filled with `header.get(k, '')`. A metric logged only on its own
+  schedule — a periodic refit, say — never reaches `train.csv` at all, only wandb. Carry
+  the latest values onto every logged row instead, and make sure the first one precedes the
+  first log step.
+
+---
+
+### 7. Code changes (all default-off; no published number moves)
+
+- `dsrl_na` block: `qa`/`qw` scalar critics, `dsrl_qa_loss`, `dsrl_qw_loss`, `na_spread`,
+  `_actor_w`, `_actor_q` dispatch, `create` guards. `reward_source` = `real` (Item 2) |
+  `phi_readout` (Arm D1) | `synthetic_w` (Arm D2); `task_conditioned` for D2.
+- `reward_inference` = `closed_form` (default, every published number) | `whitened`, which
+  solves the normal equations and is a **no-op wherever the Gram is I, hence on cube by
+  construction**. Added to `stability_ladder.ACTING_OVERRIDES` before the first such eval,
+  since it changes the policy's `w` and would otherwise overwrite a run's own ladder entry.
+- `measure_u_samples` / `measure_u_source` (`mixture` | `jitter`) / `measure_u_jitter_std` /
+  `measure_u_mixture_shrink`; `u_extra_dist` and `u_extra_clipfrac` logged.
+- **`phi_gram_dev`, `phi_gram_cond`, `phi_gram_eig_min/max` are now standard in-loop
+  metrics**, so every future ladder carries the validity condition beside success.
+- `actor.layer_norm` on the tanh-Gaussian trunk. `sample_preimage_noise(..., scale=)`.
+- New tools: `diag_mixture_decode.py`, `diag_ranker_agreement.py`, `diag_reward_readout.py`,
+  `diag_commitment_horizon.py`; `diag_gpi_selection.py` rewritten (onsets, three
+  continuations, four rankers, in-box columns, `table` subcommand).
+- **Arm D1b** (`dsrl_na.reward_source=phi_readout_fixed`, 2026-09-09): the readout channel
+  fit the way it is DEPLOYED, since D1's per-256-row refit made `r_hat`'s std 13.6 against
+  the reward's 0.15 and trained `Q_A` on a reward redrawn every step. `w` is the closed form
+  on a 10k relabel batch, refit every `dsrl_na.reward_refit_every` steps and held fixed
+  between; `r_hat` is rescaled to the real reward's std; `na_rhat_corr_heldout` is measured
+  on a disjoint 10k batch. New agent fields `na_rw` / `na_rw_scale`, zero-initialised so
+  older checkpoints restore clean; the refit runs in `main.py`, outside the jitted update.
+- Tests: `tests/test_psmflow_dsrl_na.py`, 44 cases.
+
+---
+
+### 8. RUNNING
+
+Arm B (jitter, 2 doses x 3 seeds, cube), Arm C (shrunken mixture, 3 envs x 3 seeds), D1
+(`phi_readout`, 3 seeds cube), the DSRL-NA eval500s, the whitened eval500s on
+pointmaze/antmaze/cube, the Item 2 roster diagnostic, the commitment-horizon sweep, and
+eval500 for the two ortho stability arms whose verdict was provisional.
+
+**Arm A (ensemble mean at acting) was DROPPED before launch**: a frozen FQL expert's critic,
+trained by a real max-backup on real rewards, ranks the same roster no better than the
+measure, so this is not a noise problem that averaging fixes.
+
+---
 
 ## 2026-09-08 — the measure-loss verdict, the K sweep, and the first faithful DSRL arm
 
