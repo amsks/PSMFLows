@@ -1,0 +1,485 @@
+agent_name: f_psmflow
+batch_size: 1024
+z_dim: 128
+num_parallel: 2
+discount: 0.98
+tau: 0.01
+ortho_coef: 1000.0        # reference PSM sweep winner
+
+# --- measure-loss stabilisers (2026-09-07). BOTH DEFAULT OFF: `ortho_mode: fixed` and
+# `psi_bound: none` reproduce, expression for expression, the loss every published number
+# was produced with, so no checkpoint and no eval500 number moves because these exist.
+# docs/design/2026-09-07-antmaze-g995-collapse.md measured the failure they answer: on
+# antmaze at discount 0.995 the contrastive term `psm_loss` grows one decade per 31k steps
+# (three seeds, agreeing to three significant figures), outgrows `ortho_coef*|orth_loss|`
+# = 6.4e4 at 115-125k, and phi then collapses toward rank one -- 500-ep success 0.52@100k
+# -> 0.01@300k. At discount 0.99 the same divergence runs ~4x slower.
+#   fixed     (DEFAULT) the ortho term is weighted by ortho_coef alone, so a diverging TD
+#             term eventually dwarfs it and phi is free to buy TD loss with collapse.
+#   relative  weight = ortho_coef + ortho_rel_coef * stopgrad(|psm_loss|). Both gradient
+#             contributions then scale together and the ratio that decides whether phi may
+#             collapse is invariant to the absolute level of the TD term. The weight is
+#             stop-gradded and ortho does not depend on psi, so this changes phi's gradient
+#             direction and nothing else.
+ortho_mode: fixed          # fixed | relative
+# At the healthy g99 baseline (|orth_loss| = 64) ortho_rel_coef = 1.0 holds the ortho term
+# at 64x psm_loss; the measured healthy ratio band is ~2-100 (cube 1.8-43, antmaze g99
+# ~100, antmaze g995 ~25 before it diverged), so 1.0 sits mid-band.
+ortho_rel_coef: 1.0        # ortho_mode: relative only
+# Where the magnitude ceiling on the measure is imposed. phi is projected to the sphere of
+# radius sqrt(z_dim) and w(u') is unit-norm, so A(s,u) and beta(s,u) are the ONLY free
+# magnitude in the model, and psi_q_spread is what runs 7 -> 2e8.
+#   none         (DEFAULT) unbounded, as published.
+#   tanh         bounded REPARAMETERISATION of the head: psi = S*tanh((A^T w + beta)/S).
+#                Elementwise, monotone, identity to first order at |psi| << S, so psi keeps
+#                the affine head's sign structure and its ordering in the policy slot.
+#   clip_target  the same admissible set imposed on the TD bootstrap instead: target_M
+#                clipped to +-(S * z_dim), the Cauchy-Schwarz image of the psi ball
+#                (|psi^T phi| <= (S sqrt(z))(sqrt(z))). Forward pass untouched.
+psi_bound: none            # none | tanh | clip_target
+# S, the per-component ceiling on psi -- derived, not swept: under the orthonormality the
+# ortho term enforces, E[phi phi^T] = I, so psi_i = E[sum_t gamma^t phi_i(x_t)] with phi_i
+# of unit RMS and |psi_i| <= 1/(1-gamma) = 200 at gamma 0.995 (100 at 0.99). Healthy runs
+# read |Q| ~ 1e3 against this bound's worst case ~2.5e4, so it does not bind on a healthy
+# trajectory; the diverged runs read |Q| ~ 1e9.
+psi_bound_scale: 200.0     # psi_bound != none only
+# 0.5 with num_parallel=2 is EXACT min-Q in the TD target (mean - |q1-q2|/2 = min).
+# Added 08-05: the actor-coupled backup (unlike the old fixed-index one) is an
+# improvement loop, and without target pessimism actor_q oscillated 450<->6500 on
+# pointmaze. PSM ships 0.0 here but its phi is anchored by the proto branch.
+pessimism_penalty: 0.5
+actor_pessimism_penalty: 0.5
+norm_z: true
+
+lr_phi: 1.0e-5
+lr_sf: 1.0e-4
+lr_actor: 1.0e-4
+lr_actor_vf: 3.0e-4
+
+# Diagnostic continuation switch. false holds the full phi TrainState fixed and uses its
+# online parameters as target_phi while psi and the affine index encoder keep training.
+train_phi: true
+# Take phi's parameters from ANOTHER run's params_<phi_restore_epoch>.pkl (2026-09-15,
+# Fix 1): the checkpoint's online phi goes into phi and target_phi, its optimiser state is
+# not carried, nothing else is read from it. Pair with train_phi=false to train a scalar
+# critic on phi(s')^T w with a finished measure run's basis held fixed. Same glob
+# convention as restore_path (exactly one run directory). null = phi starts at its init.
+phi_restore_path: null
+phi_restore_epoch: null
+
+phi:
+  hidden_dim: 256
+  hidden_layers: 2
+sf:
+  hidden_dim: 1024
+  hidden_layers: 1
+  embedding_layers: 2
+
+mix_ratio: 0.5             # P(w from phi(next_obs[perm])) vs random unit z (PSM's sample_mixed_z)
+
+# Amortized LATENT actor (flowBC recipe over latents). OFF by default: the primary agent
+# is the paper-strict one (`train_actor: false`, `acting: gpi`), which has
+# no actor at all -- the backup bootstraps a p0 index draw, not an actor latent. The block
+# below is still live under `train_actor: true` (DSRL-style arm, and the substrate for the
+# planned DSRL-NA distillation of the GPI argmax). The actor emits u in [-u_clip, u_clip];
+# the deployed action is the frozen flow's decode of that u.
+actor:
+  hidden_dim: 512
+  hidden_layers: 2
+  embedding_layers: 2
+  vf_hidden_dim: 512
+  vf_hidden_layers: 4
+  flow_steps: 10           # Euler steps for the latent-BC ODE distillation target
+  bc_coeff: 1.0            # distillation weight (reference cube value is 3.0)
+  # How many prior policy indices u' the ACTOR's Q is aggregated over.
+  # 0 (DEFAULT) = psi at the ONE u' this batch element drew. That gradient was measured
+  # (docs/design/2026-09-06-dsrl-actor-audit.md) at cosine -0.49 / -0.20 against the gradient
+  # of the panel max -- i.e. the actor was climbing an objective ANTI-correlated with the
+  # one gpi_select maximises, which is why the latent-actor arm is flat (cube 0.162/0.130
+  # against the actor-free arm's 0.415 late mean on the SAME critic). K > 0 makes the
+  # actor climb max_k psi(s, u, u'_k)^T w, the acting rule's own objective. Under
+  # psi_form=affine this costs one einsum, not K towers (A(s,u) does not see u').
+  # Requires policy_index=latent and index_agg=max.
+  index_panel: 0
+  # --- actor_mode != ddpg only (the DSRL arms) ---
+  q_coeff: 1.0             # weight on the (alpha*log pi - Q) term; 0.0 = pure distillation
+  na_coeff: 1.0            # weight on the GPI-argmax regression (gpi_distill)
+  na_candidates: 16        # prior action latents scored per state to form that argmax
+  na_states: 256           # batch rows the NA target is built on (cost = na_states x
+                           # na_candidates psi forward passes per step)
+  na_advantage_weight: false   # weight each state's regression by its Q advantage
+  entropy: auto            # auto (tune alpha to target_entropy) | fixed (alpha=init_alpha)
+  target_entropy: 0.0      # DSRL's `target_ent`, NOT -dim(A); stated in the squashed,
+                           # unscaled space tanh_gaussian_sample computes log pi in
+  init_alpha: 1.0
+  lr_alpha: 3.0e-4
+  log_std_min: -20.0       # SB3's clamp, ported verbatim
+  log_std_max: 2.0
+  prior_init: false        # start the tanh-Gaussian AT the flow prior, not outside it:
+  prior_init_std: 0.3      # at u_clip=3 the default init has per-dim std 1.88 vs prior 1.0
+  layer_norm: false        # LayerNorm after every hidden ReLU of the tanh-Gaussian trunk
+                           # (dsrl_sac head only; the embeddings already carry one). DSRL
+                           # puts it on every hidden layer of actor and critic. false
+                           # reproduces every dsrl_sac run before 2026-09-08.
+# Which latent actor `train_actor: true` trains and `acting: actor` deploys.
+#   ddpg      (DEFAULT) the shipped NoiseConditionedActor + flowBC recipe:
+#             -Q/|Q| + bc_coeff * distill + the CFM velocity field.
+#   dsrl_sac  DSRL's actor ported to latents: a tanh-Gaussian pi(u | s, w) over the box
+#             [-u_clip, u_clip], reparameterised, with SAC's entropy term and an
+#             auto-tuned alpha (sb3_dsrl/stable_baselines3/sac/sac.py:279-294).
+#   gpi_distill  candidate-argmax behaviour distillation. NOT DSRL-NA (which is a dual
+#             critic distilling an ACTION-space Q into the latent one); renamed 2026-09-08.
+#             second critic (psi already IS a critic over latents): a regression onto
+#             argmax over na_candidates prior draws of the panel-max GPI score. Every
+#             target is a p0 draw, which is the support device that replaces bc_coeff.
+# See docs/design/2026-09-06-dsrl-actor-audit.md.
+actor_mode: ddpg           # ddpg | dsrl_sac | gpi_distill  (dsrl_na = old alias)
+acting: gpi                # gpi | actor. DEFAULT gpi: the write-up's Sec. PSMFlows agent
+                           # acts by a per-step argmax over (u_i, u'_j) pairs and has no
+                           # actor at all. `actor` selects the amortized latent actor above
+                           # (DSRL-style); it is a non-default switch, kept for the planned
+                           # DSRL-NA distillation of the GPI argmax into an amortized head.
+# acting=fixed_coeff (2026-09-15, EVAL ONLY): PSM's test-time policy (arXiv 2411.19418
+# Eq. 10). The affine head is read at ONE coefficient c in R^{w_dim} in place of w(u'),
+# psi = A(s,u)^T c + beta(s,u), and each step is the argmax over gpi_num_u prior draws u of
+# [mean - kappa*unc] psi^T w. `c` comes from this npz (tools/infer_policy_lagrangian.py),
+# fitted per (checkpoint, task); null leaves every other acting mode untouched.
+fixed_index_coeff_path: null
+
+# psi's index slot. `latent` (DEFAULT) is the write-up's psi(s, u, u') — a fresh u' ~ p0 per
+# batch element indexes the policy, the backup continues that SAME u' at s' (so the bootstrap
+# action is a p0 decode, which is Prop. insample's hypothesis and makes backup_explore_frac
+# inert), and w reaches psi only through the readout Q = psi^T w. Under `latent` acting must
+# be gpi, which then searches (u_i, u'_j) pairs per Alg. "Rung 1".
+# `task_vector` is the older shipped agent: psi(s, w, u), policy identity carried in w.
+policy_index: latent       # latent | task_vector
+# How psi is parameterised in its policy slot. `affine` (DEFAULT) restores
+# Prop. bilinear literally,
+#     psi(s, u, u') = A(s,u)^T w(u') + beta(s,u),
+# with w(.) a learned encoder from the policy latent u' to R^{w_dim} (the paper asserts
+# w^{u'} exists but gives no formula; the encoder is our design choice -- see
+# docs/design/2026-09-04-affine-psi.md). Requires policy_index=latent: the index slot must
+# carry u', because A and beta are by assumption independent of the policy index.
+# `free` is the older shipped network psi(s, u, u'), i.e. the write-up's Rem. tradeoff row
+# "free psi": the policy coordinate w^{u'} is ABSORBED into psi. Kept as an ablation switch;
+# it is the arm that measured cube 0.083 where `affine` measures 0.532/0.620.
+psi_form: affine           # affine | free
+# Current-action coordinate of the affine measure. `latent` is the legacy/default path.
+# `action` fits recorded dataset actions exactly and decodes every latent query through
+# the frozen Stage-A flow; it requires psi_form=affine, policy_index=latent and one sample.
+measure_action_input: latent  # latent | action
+affine:
+  w_dim: 128               # d_w, the policy-coordinate dimension (default = z_dim)
+  encoder_hidden: 256      # w(.) encoder width (PhiMap shape)
+  encoder_layers: 2
+  norm_w: true             # w(u') on the UNIT sphere: pins the (cA, w/c) scale degeneracy
+# --- Fix 2 (2026-09-15), both OFF by default: 0.0 / false reproduce the published loss and
+# head expression for expression. docs/design/2026-09-14-flow-psm-dsrl-paper-versions.md,
+# "Fixes launched 2026-09-15", has the diagnostic they answer (the measure fits its own
+# Bellman equation to 4% of spread yet its readout psi^T w is ~uncorrelated with a scalar
+# TD critic on the same reward, and its within-state spread over u sits below its residual).
+# Scalar grounding: weight on the readout's PROJECTED Bellman loss, added to the measure
+# loss with gradient to psi only (phi stop-gradded in the reward term):
+#     ( psi(s,u,z)^T z - gamma [mean - kappa unc](psibar(s',u+,z)^T z) - sg(phi(s'))^T z )^2
+#       / Var_batch[ sg(phi(s')^T z) ]
+# z = the row's sampled task vector, u+ the bootstrap latent the measure loss uses. The
+# ICLR draft's scalar Bellman equation along w and Meta Motivo's `q_loss` on F^T z. The
+# variance normalisation makes coef = 1 "the same weight as a unit-variance TD loss".
+psm_scalar_coef: 0.0
+# Dueling affine head: psi(s,u,z) = V(s,z) + Adv(s,u,z) - mean_k Adv(s,u_k,z) over
+# psi_dueling_samples clipped prior latents u_k ~ N(0, I), the two towers sharing w(z)
+# (V: beta_V(s) + A_V(s)^T w(z); Adv: the existing A(s,u), beta(s,u)). A and beta stay
+# independent of z. Requires psi_form=affine.
+psi_dueling: false
+psi_dueling_samples: 8
+# Train the amortized latent actor. false (DEFAULT) drops the actor/CFM branch entirely; the
+# write-up's Sec. PSMFlows has no actor. Only valid with acting=gpi.
+train_actor: false
+
+# S2 (InFOM-inspired implicit GPI). `max` is the shipped argmax over the index panel.
+# `expectile` distills an upper expectile of psi(s, u', u)^T w over u' ~ p0 into a scalar
+# head q_dist(s, u) and uses that for both acting and the actor gradient, so no argmax over
+# samples of a learned function is ever taken -- E4a measured that argmax as the thing that
+# kills ranking even for a critic proven to rank. Requires policy_index: latent.
+# NOT a port of InFOM: InFOM has no z-conditioned -> z-free distillation, marginalizes by
+# averaging over num_flow_goals, and draws ONE latent per update. index_panel: 1 is the
+# setting closest to it; the plan's default of 16 is this repo's lower-variance choice.
+index_agg: max             # max | expectile
+expectile_mu: 0.9          # upper expectile; -> 1 approaches max over the index
+index_panel: 16            # u' draws per state forming the target distribution
+q_dist:
+  hidden_dim: 512
+  hidden_layers: 1
+  embedding_layers: 2      # carried for symmetry; unused by the plain-MLP Value head
+  lr: 3.0e-4
+
+# DSRL-NA's dual critic (2026-09-08). **NOT ZERO-SHOT**: `qa` is trained by TD on the
+# task's REAL reward, so this arm is an UPPER BOUND -- it answers "can the frozen flow be
+# steered at all on this env", and its number may not be quoted beside a zero-shot row.
+#
+# The 2026-09-08 audit found that what this repo called DSRL-NA had copied DSRL's ACTOR and
+# not DSRL's CRITIC. DSRL-NA is a dual critic:
+#   qa(s, a)   scalar TD on (s, a, r, s') with bootstrap a' = G(s', pi(s')). Fitted over RAW
+#              ACTIONS, where many latents collapse onto one action.
+#   qw(s, u)   regressed onto qa(s, G(s, u)) at prior latents, `inner_steps` times per outer
+#              update. The latent actor climbs THIS and nothing else; no gradient reaches
+#              qa or the flow.
+# `actor_mode: dsrl_sac` supplies the actor, this block supplies the critic, and `create`
+# asserts you have both (plus acting=actor and actor.bc_coeff=0 -- DSRL has no BC term).
+# psi/phi keep training alongside and are simply unused by this arm, which is why it does
+# NOT conflict with psi_form=affine the way the dsrl_sac-on-psi arm did.
+dsrl_na:
+  enabled: false
+  discount: 0.99           # DSRL's gamma, not the measure's 0.98
+  tau: 0.005               # qa target Polyak rate
+  lr: 3.0e-4
+  hidden_dim: 2048         # DSRL's offline OGBench critic width
+  hidden_layers: 3
+  layer_norm: true         # on every hidden layer
+  num_ensembles: 2         # qa ensemble; the TD target and the distillation take the min
+  inner_steps: 10          # qw regression steps per outer update
+  n_latent: 1              # prior latents per state per inner step
+  # Where qa's reward comes from. Arm D1 (2026-09-09) walks the four differences between
+  # this arm and the zero-shot one, one at a time, starting with the linear readout.
+  #   real        (DEFAULT) the task's own reward. Item 2's arm.
+  #   phi_readout r_hat = phi(s')^T w with w = project(E_batch[(r + reward_shift) phi]),
+  #               i.e. the DEPLOYED zero-shot reward channel, recomputed each batch because
+  #               phi is still training. The 2026-09-09 gate measured that channel's
+  #               topline R^2 at 0.116 with 86% of its predicted reward mass on rows that
+  #               pay nothing, so this arm prices what that costs in success.
+  #               `na_rhat_corr` logs how much of the real reward survives the round trip.
+  #   synthetic_w Arm D2, the ZERO-SHOT version: r_w = phi(s')^T w at the task vector this
+  #               row drew, so no real reward enters training at any point. Requires
+  #               task_conditioned. Note it makes the measure branch load-bearing for the
+  #               first time in this family -- phi defines the reward, so training phi is no
+  #               longer inert the way it is under `real`.
+  #   phi_readout_fixed
+  #               Arm D1b (2026-09-09). The same channel, fit the way it is DEPLOYED.
+  #               phi_readout refits w on each 256-row batch, and cube's reward is paid by
+  #               2.1% of rows, so w is the mean of about five phi vectors and is redrawn
+  #               every step: measured, r_hat's std was 13.6 against the real reward's 0.15,
+  #               and D1 scored 0.021 at 500 episodes, below the BC control. Here w is the
+  #               closed form on an `eval_relabel_size` relabel batch -- the estimator
+  #               infer_z uses at eval -- refit every reward_refit_every steps and held
+  #               FIXED between, with r_hat rescaled so its std over that batch equals the
+  #               real reward's. main.py drives the refit; see `refit_na_reward`.
+  reward_source: real      # real | phi_readout | phi_readout_fixed | synthetic_w
+  # reward_source: phi_readout_fixed only. Steps between refits of the held readout w.
+  # Must be > 0: with no refit w stays at its zero init and the reward is identically 0,
+  # which create() refuses.
+  reward_refit_every: 10000
+  # Added to r before forming w. 1.0 matches `eval_reward_shift`, and it is load-bearing:
+  # on the raw -1/0 reward the topline readout R^2 is -0.20, worse than predicting the mean,
+  # because a no-intercept linear model cannot represent the offset.
+  reward_shift: 1.0        # reward_source: phi_readout only
+  # Arm D2: qa(s, a, w), qw(s, u, w) and the actor pi(u | s, w) all take the task vector, so
+  # the arm generalises over tasks instead of solving one. `Value` concatenates its two
+  # arguments, so this is literally "append w". Requires reward_source=synthetic_w, and
+  # create() refuses either half without the other.
+  task_conditioned: false
+  # Fix 1 (2026-09-15). true: qa's TD target uses mask = 1 on every row, the CONTINUING
+  # formulation. A synthetic reward phi(s')^T w differs from any reward the task actually
+  # pays by a per-w constant offset, and a constant offset changes no policy only when no
+  # episode terminates: with the dataset masks on, the 09-14 raw-r_hat arm (mean reward
+  # +3.95, mask 0 at success) valued staying alive above finishing and scored 0.010.
+  # false = the dataset masks, every DSRL-NA number before this date.
+  ignore_masks: false
+  # Multiplier on the synthetic reward phi(s')^T w (reward_source: synthetic_w only). The
+  # raw readout has std ~10 over the dataset against the real -1/0 reward's ~0.14, and the
+  # critic widths, tau and alpha were tuned at the latter scale. 1.0 = the raw readout.
+  reward_scale: 1.0
+
+# Reference PSM critic (2026-09-14): the proto successor-measure stage of arXiv 2411.19418
+# on latent inputs, with the existing psi as PSM's separate reward-conditioned SF head.
+# OFF by default, and `enabled: false` leaves the agent bit-for-bit as before: the proto
+# tower is built (static pytree) but never sampled for, stepped or read. ON:
+#   proto_psi(s, z_bin, u)   a second PsiMap whose index slot is a binary code z_bin of
+#                            width max_log_seed. Its TD target continues the FIXED
+#                            pseudo-random LATENT policy keyed on (dataset row, z_bin):
+#                              seed    = (z_bin . powers + row) mod (2^max_log_seed + 20000)
+#                              u_proto = clip(N(0, I) at fold_in(PRNGKey(proto_seed), seed), +-u_clip)
+#                            -- the reference ProtoBehaviorSampler arithmetic with its
+#                            uniform action table replaced by a prior latent, so every
+#                            bootstrap G(s', u_proto) stays a flow decode. This stage trains
+#                            phi (with the ortho term) and proto_psi; both have targets.
+#   psi(s, w, u)             becomes the SF head: fitted on phi STOP-GRADDED, its target
+#                            measure read at the ONLINE phi the proto stage just stepped
+#                            (reference _update_sf), bootstrap latent = the actor's at s'.
+#                            No ortho term (the reference multiplies its copy by 0).
+# Update order: proto (phi + proto_psi) -> SF (psi) -> actor; polyak after each stage.
+# Requires policy_index=task_vector and train_actor=true. main.py switches on
+# dataset.return_index so batch['index'] carries the row the proto policy is keyed on.
+# utils/psm_proto.py holds the arithmetic; tests/test_psmflow_psm_ref.py pins it.
+proto:
+  enabled: false
+  max_log_seed: 16         # width of the binary proto code (reference: 16)
+  proto_seed: 0            # PRNGKey of the proto latent family. NOT the run seed: the
+                           # reference's action table is a constant of the code, identical
+                           # in every run, so the policy family must not vary with the seed
+  lr: 1.0e-4               # proto_psi's Adam rate (reference: lr_sf)
+  ortho_coef: null         # ortho weight in the proto stage; null = the agent's ortho_coef
+
+# Action branch: w-conditioned successor features over EXECUTED
+# actions (psi_a shares phi and the w machinery) + an eps-bounded residual head.
+# pessimism 0.0 on this branch by design: the collapse forensics showed exact-min
+# pessimism drives the value collapse under a residual.
+action_critic:
+  enabled: false
+  discount: 0.99
+  tau: 0.005
+  # Scalar-Q pessimism: BLEND WEIGHT in [0, 1] between the target ensemble's mean and its
+  # least-task-valued member. (Before 08-14 this multiplied a PER-FEATURE spread, which is
+  # sign-indefinite in Q-space -- it raised Q wherever w was negative. Do not read old
+  # sweep values of this knob as pessimism levels; there were none, it has only ever run
+  # at 0.0.)
+  pessimism: 0.0
+  lr: 3.0e-4
+  hidden_dim: 512
+  hidden_layers: 1
+  embedding_layers: 2
+  spread_candidates: 16    # candidates per state for the in-loop Q_a spread metric
+  eval_rank_k: 0           # >0: EVAL-ONLY lambda-rank acting -- rank k decoded candidates
+                           # by Q_a and execute the argmax, with no residual. Training is
+                           # unaffected; used to separate ranking from pushing.
+  # P2 FB graft: psi_a stops sharing the measure's basis. It gets its OWN backward map
+  # B_a trained by the FB measure loss (contrastive + ortho, no pessimism, b_tau on the
+  # target), and w_a is inferred from B_a. psi/phi/w and the latent actor are untouched;
+  # only delta and Q_a move to (psi_a, w_a). Off = the shared-basis action critic.
+  fb_graft: false
+  ortho_coef: 1000.0       # FB's cube value for the B_a orthonormality term
+  b_tau: 0.005             # FB's b_target_tau for B_a's target
+residual_eps: 0.05         # hard per-dim budget on |a_exec - decode|
+residual:
+  hidden_dim: 256
+  hidden_layers: 2
+  embedding_layers: 2
+
+# Fraction of TD bootstrap latents drawn from p0 instead of the actor. 0.0 = the backup as
+# published (it only ever evaluates the actor's own latent). Raising it makes psi see the
+# wider family: the fix direction for the flat-Q finding in logs/d3_q_landscape_cube.json.
+backup_explore_frac: 0.0
+
+# What fills the backup's ACTION slot at s' (2026-09-16). `index` (DEFAULT) is the backup as
+# published: u' itself under policy_index=latent, the actor's latent under task_vector.
+# `gpi_argmax` (task_vector only) is EMaQ's max-over-behaviour-samples backup: argmax over
+# bootstrap_candidates clipped prior draws of [mean - pessimism_penalty*unc]
+# psi_target(s', w, u_m)^T w, so psi(s, w, u) is the successor measure of "take u, then act
+# by GPI-under-w" -- the policy that is actually deployed. Cost: bootstrap_candidates psi
+# forwards per batch row.
+bootstrap: index            # index | gpi_argmax
+bootstrap_candidates: 8
+
+# FROZEN behavior flow — must match the Stage-A `agent=fql agent.bc_only=true` run.
+flow:
+  hidden_dims: [512, 512, 512, 512]
+  value_hidden_dims: [512, 512, 512, 512]
+  layer_norm: false
+  critic_layer_norm: true
+flow_ckpt_path: null       # REQUIRED for real runs (dir glob, restore_agent convention)
+flow_ckpt_epoch: null
+allow_untrained_flow: false
+preimage_path: null        # REQUIRED: tools/precompute_preimages.py output npz
+use_point_preimage: true   # point-vs-mixture ablation. true is the default because
+                           # main.py REFUSES a modern (corrected-target) preimage npz with
+                           # false, and every published number was produced with true.
+
+mask_invalid_preimages: false   # drop rows whose Stage-B inversion diverged from the
+                           # measure loss. false = train on them (every number pre-09-08)
+
+# How many action latents u the MEASURE head is fitted at per transition (2026-09-08).
+# 1 (DEFAULT) is the published loss: psi is fitted at the single point preimage u_data, so
+# the head is a function of u trained at ONE point per state and extrapolating everywhere
+# else -- which is why the std over u of max_u' Q reads 57 against an ensemble disagreement
+# of 124 (docs/design/2026-09-08-critic-signal-and-dsrl-na.md 1).
+# > 1 adds draws from the stored EM preimage mixture, each carrying the SAME (s, s')
+# target, on the premise that many latents decode to the same recorded action.
+# CAVEAT, measured (COMPENDIUM 4.9, all three envs): the mixture is a BLURRED POINT -- its
+# width is the inversion temperature, not decoder degeneracy, and at alpha=20 a mixture
+# sample decodes 0.150 from the recorded action against the point inverse's 0.089. The
+# extra rows are a local augmentation with a known error, not extra exact preimages.
+# `u_extra_dist` logs how far the extra latents actually sit from u_data.
+measure_u_samples: 1
+# Where those extra latents come from.
+#   mixture  the stored EM preimage posterior. Needs an npz inverted at
+#            inversion.prior_scale > 0 (main.py refuses otherwise). MEASURED on cube
+#            (tools/diag_mixture_decode.py, 4096 rows, ||a|| = 0.875): a posterior SAMPLE
+#            decodes 0.205 from the recorded action against the point inverse's 0.089 --
+#            60% of the way to an uninverted prior draw. They are not other preimages of
+#            the same action, and the extra rows would carry the point's (s, s') target
+#            while decoding elsewhere.
+#   jitter   u_data + measure_u_jitter_std * eps, clipped to the box. Same probe's ladder
+#            picks the width from evidence: sigma 0.1/0.2/0.3/0.5/0.75/1.0 decode at
+#            0.090/0.096/0.103/0.121/0.154/0.190, and the point inverse's own p90 is 0.128,
+#            so up to ~0.5 the extra latents still decode to this transition's action.
+#            Works on any npz, including the one every published number used.
+# How `infer_z` reads the task vector w off a relabelling batch.
+#   closed_form  (DEFAULT, every published number) w = E_D[r phi], Cor. reward-inference
+#                literally. This is the least-squares readout ONLY when E[phi phi^T] = I,
+#                which is what the ortho term exists to enforce.
+#   whitened     solve the normal equations, w = (E[phi phi^T] + eps I)^-1 E[r phi], i.e.
+#                the best linear readout of phi. Identical to the closed form wherever the
+#                Gram is already the identity, so it is a no-op on cube by construction.
+# MEASURED 2026-09-09, tools/diag_reward_readout.py, 200k rows:
+#   env        Gram dev from I   cond    cos(closed form, least squares)  topline R^2
+#   cube             0.035        1.3            0.997                      0.116
+#   antmaze          0.423       15.4            0.893                      0.104
+#   pointmaze        2.39         2e9            0.075                      0.514
+# On pointmaze the orthonormality has collapsed (smallest Gram eigenvalue 2e-4) and the
+# deployed estimator points almost orthogonally to the best readout -- while that basis is
+# the MOST expressive of the three. affine_strict_pointmaze scores exactly 0.000.
+reward_inference: closed_form   # closed_form | whitened
+reward_inference_eps: 1.0e-3    # ridge on the Gram; whitened only
+
+measure_u_source: mixture       # mixture | jitter
+measure_u_jitter_std: 0.3       # measure_u_source: jitter only
+# Arm C: covariance scale c on the mixture draws (cov -> c^2 * cov), keeping the
+# posterior's SHAPE while pulling samples toward its mean. NO DEFAULT -- `create` refuses
+# measure_u_source=mixture without it, because there is no value that is safe on every env.
+# Pick it with `tools/diag_mixture_decode.py --shrink`: the largest c whose mean decode
+# error stays inside the point inverse's own p90. Measured on the published npz files
+# (the same ones the affine_strict runs train on):
+#   env        c    sample decode err   gate (point p90)   dist from u_data
+#   cube      0.5        0.119               0.128              1.675
+#   antmaze   1.0        0.314               0.450              1.574
+#   pointmaze 0.5        0.130               0.180              1.236
+# At a MATCHED decode error the shrunk anisotropic draw sits 1.6x (cube) / 1.9x (antmaze) /
+# 3.2x (pointmaze) further from u_data than the round `jitter` ball, which is the whole
+# reason the shape is worth keeping. Floor to know about: c -> 0 collapses onto the
+# posterior MEAN, which is itself 1.14 / 1.74 / 2.79 away from the point inverse.
+measure_u_mixture_shrink: null  # measure_u_source: mixture only. REQUIRED there.
+
+u_clip: 3.0                # typical-set clamp on latent draws
+index_clip: null           # box for the policy-INDEX draws u' only (psi's index slot, the
+                           # bootstrap action under policy_index=latent, GPI's u'); null = u_clip
+
+gpi_num_u: 64
+# Which of the gpi_num_u prior draws acting hands to the frozen flow. `argmax` (DEFAULT) is
+# the shipped rule -- max over the (u_i, u'_j) pair scan -- and the ONLY value training
+# ever uses; the rest are eval-time ablations of the selection itself.
+# docs/design/2026-09-05-gpi-selection-diag.md measured the argmax to be (i) biased
+# to large-norm latents at every checkpoint (selected |u| 2.8 vs the roster's 2.13) and
+# (ii) re-randomised between checkpoints (per-u rho 0.21-0.36), i.e. mostly a max over K
+# draws rather than a critic. They require policy_index=latent and index_agg=max.
+#   max_norm             CRITIC-FREE control: pick the largest ||u|| of the K draws
+#   top_quartile_random  CRITIC-FREE control: uniform among the top norm quartile
+#   small_ball           argmax over candidates rejected above the prior median ||u||
+#   soft_topm            uniform among the top gpi_topm candidates by GPI score
+#   mean                 argmax of the ensemble MEAN (pessimism term dropped)
+#   fixed_index          u' pinned to one draw for the whole eval; only u varies per step
+gpi_select: argmax         # argmax | max_norm | top_quartile_random | small_ball
+                           # | soft_topm | mean | fixed_index
+#   prior_shrunk         CRITIC-FREE control: ONE prior draw scaled by gpi_prior_shrink,
+#                        psi and task_z untouched. Added 2026-09-07 to test whether the
+#                        DSRL-NA actor's value is its SUPPORT (latents held just inside the
+#                        prior shell, u_norm 1.72 vs the prior median 2.13) rather than the
+#                        GPI argmax it distills, which its regression only explains to ~6%.
+gpi_topm: 8                # gpi_select=soft_topm only
+gpi_index_seed: 0          # gpi_select=fixed_index only: which prior draw u' is pinned to
+gpi_prior_shrink: 0.8      # gpi_select=prior_shrunk only. 0.8 * 2.13 = 1.70 ~ the dsrl_na
+                           # actor's operating norm; 1.0 reproduces the BC control exactly.
+gpi_decode: onestep        # onestep | ode
+flow_decode_steps: 10
+
+ob_dims: null
+action_dim: null
+encoder: null
