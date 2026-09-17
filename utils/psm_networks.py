@@ -310,21 +310,74 @@ class _AffinePsiTower(nn.Module):
         self.a_out = nn.Dense(self.output_dim * self.w_dim, kernel_init=_ORTH1)
         self.beta_out = nn.Dense(self.output_dim, kernel_init=_ORTH1)
 
-    def __call__(self, obs, action):
+    def trunk(self, obs, action):
+        """The (s,u) features the two heads read, R^hidden_dim."""
         se = nn.relu(self.embed_sa_3(jnp.tanh(self.embed_sa_ln(
             self.embed_sa_0(jnp.concatenate([obs, action], -1))))))
-        x = nn.relu(self.fs_0(se))
+        return nn.relu(self.fs_0(se))
+
+    def heads(self, x):
+        """(A, beta) from trunk features. Both heads are affine maps of `x`."""
         A = self.a_out(x).reshape(*x.shape[:-1], self.output_dim, self.w_dim)
         return A, self.beta_out(x)
+
+    def __call__(self, obs, action):
+        return self.heads(self.trunk(obs, action))
+
+
+class _DuelingAffinePsiTower(nn.Module):
+    """`psi_dueling` (2026-09-15): one (non-ensembled) tower emitting the effective (A, beta) of
+
+        psi(s, u, z) = V(s, z) + Adv(s, u, z) - mean_k Adv(s, u_k, z),   u_k ~ p0 clipped,
+
+    with V(s, z) = beta_V(s) + A_V(s)^T w(z) (a state-only `_AffinePsiTower`, action slot
+    empty) and Adv the existing (s,u) tower A(s,u), beta(s,u). Both share w(z), which lives
+    in `AffinePsiMap`, so the sum is again affine in w(z):
+
+        A_eff(s,u)   = A_V(s) + A(s,u) - mean_k A(s,u_k)
+        beta_eff(s,u) = beta_V(s) + beta(s,u) - mean_k beta(s,u_k).
+
+    `a_out` / `beta_out` are affine maps of the trunk features, so mean_k over the K prior
+    latents is taken on the features and the wide A head runs once for the baseline.
+    Neither tower sees the policy index (Assumption `affine` is kept).
+    """
+
+    hidden_dim: int
+    output_dim: int
+    w_dim: int
+    embedding_layers: int = 2
+    hidden_layers: int = 1
+
+    def setup(self):
+        kw = {"hidden_dim": self.hidden_dim, "output_dim": self.output_dim, "w_dim": self.w_dim,
+              "embedding_layers": self.embedding_layers, "hidden_layers": self.hidden_layers}
+        self.adv = _AffinePsiTower(**kw)
+        self.val = _AffinePsiTower(**kw)
+
+    def value_terms(self, obs):
+        """(A_V(s), beta_V(s)): the state-value tower, read with an empty action slot."""
+        return self.val(obs, obs[..., :0])
+
+    def __call__(self, obs, action, u_prior):
+        A, beta = self.adv(obs, action)
+        A_v, beta_v = self.value_terms(obs)
+        K, B = u_prior.shape[0], obs.shape[0]
+        obs_k = jnp.broadcast_to(obs[None], (K, *obs.shape)).reshape(K * B, -1)
+        u_k = jnp.broadcast_to(u_prior[:, None, :], (K, B, u_prior.shape[-1])).reshape(K * B, -1)
+        x_mean = self.adv.trunk(obs_k, u_k).reshape(K, B, -1).mean(0)
+        A_m, beta_m = self.adv.heads(x_mean)
+        return A_v + A - A_m, beta_v + beta - beta_m
 
 
 class AffinePsiMap(nn.Module):
     """psi(s, u, u') = A(s,u)^T w(u') + beta(s,u), Prop. `bilinear` made explicit.
 
     A drop-in for `PsiMap`: the same `(obs, index, u)` signature and the same
-    [num_parallel, B, output_dim] return. The `index` slot must carry the policy latent u'
-    (`policy_index=latent`); the point of the head is that the policy enters psi only
-    through the finite coordinate w^{u'}, which a z_dim task vector there would contradict.
+    [num_parallel, B, output_dim] return. The `index` slot carries the policy latent u'
+    under `policy_index=latent` (w(u'), Prop. `bilinear`) or the z_dim task vector under
+    `policy_index=task_vector` (the Section 10 agent); `w_enc`'s input width is inferred
+    at init from whichever is passed. Either way the policy enters psi only through the
+    finite coordinate w(.), and A, beta never see the index.
 
     Assumption `affine` asserts that w^{u'} exists but gives no formula, so the encoder
     u' -> w(u') is a design choice: an MLP with PhiMap's shape, shared across the ensemble
@@ -336,6 +389,11 @@ class AffinePsiMap(nn.Module):
     fixing ||w|| = 1 pins it while keeping psi's scale independent of w_dim, so the head
     is comparable to the free PsiMap at the same hidden_dim and a collapsed encoder shows
     up as small pairwise distance at fixed radius rather than as a shrinking norm.
+
+    `dueling` (2026-09-15) swaps the (s,u) tower for `_DuelingAffinePsiTower`: psi becomes
+    V(s,z) + Adv(s,u,z) - mean_k Adv(s,u_k,z) over a panel `u_prior` (K, d_a) of clipped
+    prior latents that every call must then pass. Off, the head is the one above, byte for
+    byte.
     """
 
     output_dim: int
@@ -347,15 +405,19 @@ class AffinePsiMap(nn.Module):
     encoder_hidden: int = 256
     encoder_layers: int = 2
     norm_w: bool = True
+    dueling: bool = False
 
     def setup(self):
         self.w_enc = PhiMap(z_dim=self.w_dim, hidden_dim=self.encoder_hidden,
                             hidden_layers=self.encoder_layers, norm=False)
-        self.tower = ensemblize(_AffinePsiTower, self.num_parallel, in_axes=None)(
-            hidden_dim=self.hidden_dim, output_dim=self.output_dim, w_dim=self.w_dim,
-            embedding_layers=self.embedding_layers, hidden_layers=self.hidden_layers,
-            name="tower",
-        )
+        tower_kw = {"hidden_dim": self.hidden_dim, "output_dim": self.output_dim,
+                    "w_dim": self.w_dim, "embedding_layers": self.embedding_layers,
+                    "hidden_layers": self.hidden_layers, "name": "tower"}
+        if self.dueling:
+            self.tower = ensemblize(_DuelingAffinePsiTower, self.num_parallel, in_axes=None,
+                                    methods=("__call__", "value_terms"))(**tower_kw)
+        else:
+            self.tower = ensemblize(_AffinePsiTower, self.num_parallel, in_axes=None)(**tower_kw)
 
     def encode_index(self, index):
         """w(u') in R^{w_dim}. Exposed so the agent can log encoder collapse directly."""
@@ -364,16 +426,112 @@ class AffinePsiMap(nn.Module):
             w = w / jnp.maximum(jnp.linalg.norm(w, axis=-1, keepdims=True), 1e-12)
         return w
 
-    def sa_terms(self, obs, u):
+    def sa_terms(self, obs, u, u_prior=None):
         """A(s,u) in R^{P x B x z x d_w} and beta(s,u) in R^{P x B x z}.
 
         Takes no policy index: that is Assumption `affine`, and it is what the affineness
-        test checks against.
+        test checks against. Under `dueling` these are the EFFECTIVE factors (V + Adv -
+        baseline) and `u_prior` (K, d_a) is required.
         """
-        return self.tower(obs, u)
+        if not self.dueling:
+            return self.tower(obs, u)
+        assert u_prior is not None, "psi_dueling: every psi call must pass the prior panel u_prior"
+        return self.tower(obs, u, u_prior)
 
-    def __call__(self, obs, index, u):
+    def value_terms(self, obs):
+        """`dueling` only: (A_V(s), beta_V(s)) in R^{P x B x z x d_w}, R^{P x B x z}."""
+        assert self.dueling, "value_terms exists only under psi_dueling"
+        return self.tower.value_terms(obs)
+
+    def __call__(self, obs, index, u, u_prior=None):
         w = self.encode_index(index)
-        A, beta = self.sa_terms(obs, u)              # (P, B, z, w_dim), (P, B, z)
+        A, beta = self.sa_terms(obs, u, u_prior)     # (P, B, z, w_dim), (P, B, z)
         w = jnp.broadcast_to(w, (*A.shape[:-2], self.w_dim))
         return jnp.einsum("...zw,...w->...z", A, w) + beta
+
+
+# ---------------------------------------------------------------------------
+# psmgoal (2026-09-17): goal-indexed affine measure over the triple (s, u, s+).
+#   M(s,u,s+) = phi(s,u,s+)^T w*(g) + b(s,u,s+),   w*(g) = h(g) / ||h(g)||,
+# with phi, b general networks on the concatenated triple (shared trunk, two heads,
+# ensembled), h a goal encoder on S+, and l(s,u,s+) >= 0 a per-triple multiplier.
+# docs/design/2026-09-17-psmgoal.md. No A/beta split and no state basis anywhere.
+# ---------------------------------------------------------------------------
+
+def _triple_trunk(obs, u, s_plus, hidden_dim, hidden_layers):
+    """PhiMap's stack on the concatenated triple: Dense, LayerNorm, tanh, [Dense, relu]*(L-1)."""
+    x = jnp.concatenate([obs, u, s_plus], -1)
+    x = nn.Dense(hidden_dim, kernel_init=_ORTH1)(x)
+    x = nn.LayerNorm(epsilon=1e-5)(x)
+    x = jnp.tanh(x)
+    for _ in range(hidden_layers - 1):
+        x = nn.Dense(hidden_dim, kernel_init=_ORTH1)(x)
+        x = nn.relu(x)
+    return x
+
+
+class _TripleTower(nn.Module):
+    """One (non-ensembled) measure tower: trunk on [s, u, s+], heads phi (z_dim) and b (1).
+
+    Scale anchor (2026-09-17): phi is projected onto the sphere of radius sqrt(z_dim) and b
+    is bounded to (-z_dim, z_dim) by z_dim * tanh(b / z_dim). A general function of the
+    triple sets every s+ column independently, so unlike psi^T f(s+) nothing couples the
+    positive column to the negatives and the contrastive term -2 M(s,u,s') is unbounded
+    below without this; the first launch ran the measure at the positive to 3e5 by 10k steps.
+    With ||w*(g)|| = sqrt(z_dim) the measure satisfies |M| <= 2 z_dim.
+    """
+
+    z_dim: int
+    hidden_dim: int
+    hidden_layers: int = 2
+
+    @nn.compact
+    def __call__(self, obs, u, s_plus):
+        x = _triple_trunk(obs, u, s_plus, self.hidden_dim, self.hidden_layers)
+        phi = psm_norm(nn.Dense(self.z_dim, kernel_init=_ORTH1, name="phi_out")(x))
+        b = nn.Dense(1, kernel_init=_ORTH1, name="b_out")(x)[..., 0]
+        b = self.z_dim * jnp.tanh(b / self.z_dim)
+        return phi, b
+
+
+class TripleMeasure(nn.Module):
+    """(phi(s,u,s+), b(s,u,s+)) -> ([P, B, z_dim], [P, B]), P-fold ensemble of `_TripleTower`."""
+
+    z_dim: int
+    hidden_dim: int
+    hidden_layers: int = 2
+    num_parallel: int = 2
+
+    @nn.compact
+    def __call__(self, obs, u, s_plus):
+        tower = ensemblize(_TripleTower, self.num_parallel, in_axes=None)(
+            z_dim=self.z_dim, hidden_dim=self.hidden_dim, hidden_layers=self.hidden_layers,
+            name="tower")
+        return tower(obs, u, s_plus)
+
+
+class GoalCoefficient(nn.Module):
+    """w*(g) = sqrt(z_dim) * h(g) / ||h(g)||: PhiMap's MLP on the goal state, then the sphere of
+    radius sqrt(z_dim) (the same radius as phi and as the task vector elsewhere in the repo)."""
+
+    z_dim: int
+    hidden_dim: int = 256
+    hidden_layers: int = 2
+
+    @nn.compact
+    def __call__(self, g):
+        h = PhiMap(z_dim=self.z_dim, hidden_dim=self.hidden_dim,
+                   hidden_layers=self.hidden_layers, norm=False, name="h")(g)
+        return psm_norm(h)
+
+
+class TripleMultiplier(nn.Module):
+    """l(s,u,s+) >= 0: the trunk of `_TripleTower` with a softplus scalar head."""
+
+    hidden_dim: int = 256
+    hidden_layers: int = 2
+
+    @nn.compact
+    def __call__(self, obs, u, s_plus):
+        x = _triple_trunk(obs, u, s_plus, self.hidden_dim, self.hidden_layers)
+        return nn.softplus(nn.Dense(1, kernel_init=_ORTH1, name="l_out")(x)[..., 0])

@@ -31,6 +31,22 @@ def contrastive_loss(M, target_M, discount, off_diag, off_diag_sum, row_weight=N
     return offdiag + diag, diag, offdiag
 
 
+def contrastive_loss_rect(M, target_M, discount):
+    """`contrastive_loss` on a rectangular (P, N, C+1) matrix: column 0 of every row is that
+    row's own positive (its s'), columns 1..C are negatives (other rows' next states).
+
+    Same two terms as the square form -- 0.5 * mean over the N*C negative entries of
+    diff^2, minus mean over the N positives of diff times num_parallel -- so with C+1 == N
+    and row i's columns [i, every other row] it reproduces `contrastive_loss` exactly.
+    `target_M` is (N, C+1) or (P, N, C+1).
+    """
+    diff = M - discount * target_M
+    n_neg = M.shape[1] * (M.shape[2] - 1)
+    offdiag = 0.5 * jnp.sum(diff[..., 1:] ** 2) / n_neg
+    diag = -jnp.mean(diff[..., 0]) * M.shape[0]
+    return offdiag + diag, diag, offdiag
+
+
 def ortho_loss(phi, off_diag, off_diag_sum):
     """Orthonormality regulariser: enforces E_rho[phi phi^T] = I.
 

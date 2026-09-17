@@ -12,8 +12,8 @@ ablation, and the two loss stabilisers (``ortho_mode``, ``psi_bound``) default O
 the stabilisers -- read it before touching the losses. File order: construction, losses,
 update, acting, inference.
 
-DESIGN FORK -- the affine head and a faithful DSRL arm do NOT compose. ``psi_form=affine``
-asserts ``policy_index=latent``, and under that index the TD bootstrap latent is the prior
+DESIGN FORK -- the affine head under the default index and a faithful DSRL arm do NOT
+compose. Under ``policy_index=latent`` the TD bootstrap latent is the prior
 draw u', not the actor's: ``sample_step_inputs`` computes the actor's u^+ and then
 overwrites it. So psi is the successor measure of the constant-latent policy pi_{u'},
 which is exactly what makes GPI well-posed -- and exactly why an actor trained against it
@@ -23,13 +23,22 @@ configuration in which the latent MDP is genuinely on-policy is
     actor_mode=dsrl_sac policy_index=task_vector psi_form=free index_agg=max
     actor.index_panel=0 train_actor=true acting=actor
 
-and it gives up Prop. `bilinear`. Pick one; the config space does not enforce the choice.
+and, with ``psi_form=free``, gives up Prop. `bilinear`. Since 2026-09-14 ``psi_form=affine``
+also accepts ``policy_index=task_vector`` (w_enc then encodes the task vector), which is the
+Section 10 agent on the affine head. Pick one; the config space does not enforce the choice.
 
 That fork applies to an actor climbing PSI. ``dsrl_na.enabled`` (2026-09-08) is the other
 resolution: the actor climbs a separate reward-specific dual critic (``qa`` over actions,
 ``qw`` over latents), psi is not in its gradient at all, and the two therefore compose with
 the affine defaults. It is NOT zero-shot -- it is the upper bound that says whether the
 frozen flow can be steered on an env, and its number never goes beside a zero-shot row.
+
+``proto.enabled`` (2026-09-14) swaps the critic for the REFERENCE PSM one, on latent inputs:
+a proto stage trains phi together with a second tower ``proto_psi(s, z_bin, u)`` on the
+measures of a fixed pseudo-random latent-policy family (``utils.psm_proto``), and the
+existing psi becomes PSM's separate reward-conditioned SF head, fitted on that phi with phi
+stop-gradded and its target read at the online phi. Off, the agent is bit-for-bit the one
+above (``tests/test_psmflow_psm_ref.py``).
 """
 
 import copy
@@ -39,6 +48,7 @@ from typing import Any
 import flax
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 
 from utils.flax_utils import TrainState, nonpytree_field
@@ -51,6 +61,7 @@ from utils.psm_networks import (
     AffinePsiMap, FlowVectorField, LogAlpha, NoiseConditionedActor, PhiMap, PsiMap,
     TanhGaussianLatentActor, tanh_gaussian_sample,
 )
+from utils.psm_proto import proto_latents, proto_seed_ints, sample_z_bin
 
 # gpi_select="small_ball" oversample factor: keeps the accepted pool >= K after
 # the median-norm cut.
@@ -97,7 +108,10 @@ DSRL_NA_DEFAULTS = dict(enabled=False, discount=0.99, tau=0.005, lr=3.0e-4,
                         hidden_dim=2048, hidden_layers=3, layer_norm=True,
                         num_ensembles=2, inner_steps=10, n_latent=1,
                         reward_source="real", reward_shift=1.0,
-                        task_conditioned=False, reward_refit_every=10000)
+                        task_conditioned=False, reward_refit_every=10000,
+                        # 2026-09-15 (Fix 1): continuing-formulation TD target (mask=1
+                        # everywhere) and a scale on the synthetic reward phi(s')^T w.
+                        ignore_masks=False, reward_scale=1.0)
 
 #: Where `dsrl_qa_loss` gets its reward.
 #:   real         Item 2's arm: the task's own reward. NOT zero-shot.
@@ -146,6 +160,40 @@ def fill_dsrl_na_defaults(config):
     return config
 
 
+#: Reference PSM proto stage keys (2026-09-14). `enabled=False` is the OFF value: the proto
+#: tower is built either way (the pytree must be static across the switch) but never
+#: sampled for, stepped or read, so a config predating the block restores onto exactly the
+#: behaviour it had. `ortho_coef=None` means "the agent's own ortho_coef".
+PROTO_DEFAULTS = {"enabled": False, "max_log_seed": 16, "proto_seed": 0, "lr": 1.0e-4,
+                  "ortho_coef": None}
+
+
+def _proto_opt(config, key):
+    """`config.proto[key]`, falling back to PROTO_DEFAULTS when the config predates it."""
+    try:
+        return config["proto"][key]
+    except (KeyError, AttributeError, TypeError):
+        return PROTO_DEFAULTS[key]
+
+
+def fill_proto_defaults(config):
+    """Give `config` a complete `proto` block, in place where the container allows.
+
+    Same contract as `fill_dsrl_na_defaults`: absent means OFF, so an older flags.json
+    restores onto the old behaviour rather than dying on the first read.
+    """
+    try:
+        if "proto" not in config:
+            config["proto"] = dict(PROTO_DEFAULTS)
+        else:
+            for k, v in PROTO_DEFAULTS.items():
+                if k not in config["proto"]:
+                    config["proto"][k] = v
+    except (AttributeError, KeyError, TypeError):
+        pass
+    return config
+
+
 #: Loss-stabiliser keys (2026-09-07). Every default is the OFF value -- the loss the
 #: published numbers used. `fill_stability_defaults` backfills an older flags.json.
 STABILITY_DEFAULTS = dict(ortho_mode="fixed", ortho_rel_coef=1.0,
@@ -160,7 +208,28 @@ MEASURE_DEFAULTS = dict(psi_form="free", index_agg="max", gpi_select="argmax",
                         measure_action_input="latent",
                         measure_u_source="mixture", measure_u_jitter_std=0.3,
                         measure_u_mixture_shrink=None,
-                        reward_inference="closed_form", reward_inference_eps=1e-3)
+                        reward_inference="closed_form", reward_inference_eps=1e-3,
+                        # 2026-09-15 (Fix 2): scalar grounding of the readout psi^T w and
+                        # the dueling affine head. Both OFF values reproduce the loss and
+                        # the head every number before this date was produced with.
+                        psm_scalar_coef=0.0, psi_dueling=False, psi_dueling_samples=8,
+                        # 2026-09-15 (PSM Eq. 10): `acting=fixed_coeff` reads the affine
+                        # head at ONE policy coefficient c loaded from this npz instead of
+                        # the per-step u' panel. None = the seam is inert.
+                        fixed_index_coeff_path=None,
+                        # 2026-09-16: EMaQ-style backup. `index` reproduces every earlier
+                        # arm bit-for-bit (u_next = u' under latent, the actor's latent
+                        # under task_vector).
+                        bootstrap="index", bootstrap_candidates=8)
+
+#: `bootstrap`: what fills the backup's action slot at s'. `gpi_argmax` (task_vector only)
+#: is argmax over `bootstrap_candidates` clipped prior draws of the pessimistic
+#: psi_target(s', w, u_m)^T w -- EMaQ's max-over-behaviour-samples backup, so psi(s, w, u)
+#: is the successor measure of "take u, then act by GPI-under-w", i.e. of the deployed policy.
+BOOTSTRAP_MODES = ("index", "gpi_argmax")
+
+#: `acting`: how `sample_actions` picks the latent it decodes.
+ACTING_MODES = ("gpi", "actor", "fixed_coeff")
 
 #: How `infer_z` turns a relabelling batch into w. See `PSMFlowAgent.infer_z`.
 REWARD_INFERENCE_MODES = ("closed_form", "whitened")
@@ -235,6 +304,12 @@ class StepInputs:
              `mask_invalid_preimages`
     u_extra  (n-1, B, d_a) further action latents for the SAME transition, drawn from the
              stored EM preimage mixture; None unless `measure_u_samples` > 1
+    z_bin    (B, max_log_seed) binary proto code; None unless `proto.enabled`
+    u_proto  (B, d_a) the fixed pseudo-random latent policy pi_{z_bin}'s draw at this row,
+             the proto stage's continuation at s'; None unless `proto.enabled`
+    u_duel   (K, d_a) the clipped prior panel the dueling head's advantage baseline is
+             averaged over, shared by every psi call of this update; None unless
+             `psi_dueling`
     """
     u_data: Any
     u_next: Any
@@ -246,6 +321,10 @@ class StepInputs:
     task_w_a: Any
     u_valid: Any
     u_extra: Any
+    z_bin: Any = None
+    u_proto: Any = None
+    u_duel: Any = None
+    u_adv: Any = None       # bootstrap=gpi_argmax: Q(u*) - mean_m Q(u_m) at s', for telemetry
 
 
 class PSMFlowAgent(flax.struct.PyTreeNode):
@@ -256,6 +335,12 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
     psi: TrainState             # successor features psi(s, index, u), P-fold ensemble
     target_phi: Any
     target_psi: Any
+    # Reference PSM proto stage (`proto.enabled`): the codebook tower proto_psi(s, z_bin, u),
+    # trained WITH phi on the measures of a fixed pseudo-random latent-policy family; psi
+    # above is then PSM's SF head on that basis. Built unconditionally so the pytree is
+    # static across the switch; a checkpoint predating it keeps the fresh params.
+    proto_psi: TrainState
+    target_proto_psi: Any
     actor: TrainState           # amortized latent actor pi_eta(s, w, eps) -> u
     actor_vf: TrainState        # v_xi: CFM velocity field over preimage latents
     # DSRL latent actor (`actor_mode` != 'ddpg'). Always created so the pytree stays
@@ -292,6 +377,10 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
     na_rw_scale: Any            # () scalar, std(r_true) / std(phi @ na_rw)
     task_z: Any                 # (z_dim,) eval task vector w, set by infer_eval_z
     task_z_a: Any               # (z_dim,) eval task vector of the action branch
+    # `acting=fixed_coeff` (2026-09-15, PSM Eq. 10): ONE policy coefficient c in R^{w_dim}
+    # that replaces w(u') in psi = A(s,u)^T c + beta(s,u) at every step. Loaded from
+    # `fixed_index_coeff_path` in `create`; zeros (and unread) under every other `acting`.
+    fixed_coeff: Any
     config: Any = nonpytree_field()
     flow_vf_def: Any = nonpytree_field(default=None)
     flow_onestep_def: Any = nonpytree_field(default=None)
@@ -304,6 +393,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         fill_actor_defaults(config)
         fill_stability_defaults(config)
         fill_dsrl_na_defaults(config)
+        fill_proto_defaults(config)
         rng = jax.random.PRNGKey(seed)
         rng, rphi, rpsi, rvf, ronestep = jax.random.split(rng, 5)
         assert config.get("encoder", None) is None, "psmflow does not support visual encoders yet."
@@ -314,6 +404,21 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             "slot carries w, so there is no index distribution to take an expectile over.")
         gpi_select = config.get("gpi_select", "argmax")
         assert gpi_select in GPI_SELECT_MODES, f"gpi_select: {'|'.join(GPI_SELECT_MODES)}"
+        assert config["acting"] in ACTING_MODES, f"acting: {'|'.join(ACTING_MODES)}"
+        bootstrap = config.get("bootstrap", "index")
+        assert bootstrap in BOOTSTRAP_MODES, f"bootstrap: {'|'.join(BOOTSTRAP_MODES)}"
+        assert not (bootstrap == "gpi_argmax" and config["policy_index"] != "task_vector"), (
+            "bootstrap=gpi_argmax defines the continuation policy as GPI under the task vector "
+            "w, so psi's index slot must carry w: it needs policy_index=task_vector")
+        coeff_path = config.get("fixed_index_coeff_path", None)
+        assert not (config["acting"] == "fixed_coeff" and not coeff_path), (
+            "acting=fixed_coeff needs fixed_index_coeff_path (an npz with `c` of shape "
+            "(w_dim,), written by tools/infer_policy_lagrangian.py)")
+        assert not (config["acting"] == "fixed_coeff"
+                    and (config.get("psi_form", "free") != "affine"
+                         or config["policy_index"] != "latent")), (
+            "acting=fixed_coeff reads psi = A(s,u)^T c + beta(s,u) at a fixed c, which "
+            "exists only under psi_form=affine with policy_index=latent")
         assert not (gpi_select != "argmax"
                     and (config["policy_index"] != "latent"
                          or config.get("index_agg", "max") != "max")), (
@@ -374,6 +479,22 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
                 "measure the BC control.")
             assert float(_actor_opt(config, "q_coeff")) > 0.0, (
                 "dsrl_na with actor.q_coeff=0 trains an actor that climbs nothing.")
+        if _proto_opt(config, "enabled"):
+            # The reference critic is proto stage + a w-indexed SF head whose bootstrap is
+            # the learned policy's own latent at s'. Under policy_index=latent the SF slot
+            # carries u' and the bootstrap is a prior draw, which is a different object.
+            assert config["policy_index"] == "task_vector", (
+                "proto.enabled fits psi as PSM's SF head psi(s, w, u); it needs "
+                "policy_index=task_vector (the index slot carries the task vector).")
+            assert config["train_actor"], (
+                "proto.enabled bootstraps the SF head at the actor's latent u+ = pi(s', w); "
+                "it needs train_actor=true (and acting=actor to deploy it).")
+            assert config.get("train_phi", True), (
+                "proto.enabled: the proto stage is what trains phi; train_phi=false would "
+                "leave the basis at its init and the SF head fitting nothing.")
+            assert 1 <= int(_proto_opt(config, "max_log_seed")) <= 30, (
+                "proto.max_log_seed must be in [1, 30]: the code is drawn as an int32 in "
+                "[0, 2**max_log_seed) and unpacked bitwise.")
         assert config.get("reward_inference", "closed_form") in REWARD_INFERENCE_MODES, (
             f"reward_inference: {'|'.join(REWARD_INFERENCE_MODES)}")
         n_u = int(config.get("measure_u_samples", 1))
@@ -401,16 +522,33 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             "measure_action_input: latent | action")
         assert not (measure_action_input == "action" and psi_form != "affine"), (
             "measure_action_input=action requires psi_form=affine")
-        assert not (measure_action_input == "action" and config["policy_index"] != "latent"), (
-            "measure_action_input=action requires policy_index=latent")
+        # measure_action_input=action composes with both indices (2026-09-15, Fix 3; the
+        # 09-11 arm ran it under `latent` only). The online row is fitted at the recorded
+        # action a_i either way; the bootstrap decodes the index-appropriate latent at s'
+        # through the frozen flow -- the same u' under `latent`, the actor's
+        # u+ = _deploy_latent(s', task_w) under `task_vector` -- and every other psi query
+        # (`_actor_q`, `gpi_select`, the panels) goes through `psi_b` -> `_measure_input`,
+        # so the actor's Q is psi(s, G(s, u_actor), w)^T w with gradient through the decoder.
         assert not (measure_action_input == "action" and n_u != 1), (
             "measure_action_input=action requires measure_u_samples=1: the recorded action "
             "defines one exact transition input")
-        assert not (psi_form == "affine" and config["policy_index"] != "latent"), (
-            "psi_form=affine requires policy_index=latent: the affine head reads its index "
-            "slot as the POLICY latent u' and encodes it into w(u'), while A and beta are "
-            "by Assumption `affine` independent of the policy index. A z_dim task vector "
-            "in that slot would make A(s,u), beta(s,u) functions of the task.")
+        psi_dueling = bool(config.get("psi_dueling", False))
+        assert not (psi_dueling and psi_form != "affine"), (
+            "psi_dueling is a decomposition of the AFFINE head (V(s,z) + Adv(s,u,z) - "
+            "baseline); it requires psi_form=affine")
+        assert not (psi_dueling and measure_action_input == "action"), (
+            "psi_dueling averages the advantage tower over PRIOR LATENTS in its action slot; "
+            "under measure_action_input=action that slot carries decoded actions, so the "
+            "baseline would mix coordinates. Not supported together.")
+        assert not (psi_dueling and int(config.get("psi_dueling_samples", 8)) < 1), (
+            "psi_dueling_samples must be >= 1: it is the number of prior latents the "
+            "advantage baseline is averaged over")
+        assert float(config.get("psm_scalar_coef", 0.0)) >= 0.0, "psm_scalar_coef must be >= 0"
+        # psi_form=affine composes with both indices (2026-09-14). policy_index=latent: the
+        # index slot carries u' and w_enc encodes it into w(u') (Prop. `bilinear`).
+        # policy_index=task_vector: the slot carries the z_dim task vector and w_enc encodes
+        # THAT (the Section 10 agent on the affine head); w_enc's input width is inferred at
+        # init from `ex_index` below. A(s,u) and beta(s,u) never see the index either way.
         ortho_mode = _stab_opt(config, "ortho_mode")
         assert ortho_mode in ORTHO_MODES, f"ortho_mode: {'|'.join(ORTHO_MODES)}"
         assert float(_stab_opt(config, "ortho_rel_coef")) >= 0.0, "ortho_rel_coef must be >= 0"
@@ -433,7 +571,8 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
                                    embedding_layers=config["sf"]["embedding_layers"],
                                    hidden_layers=config["sf"]["hidden_layers"],
                                    w_dim=af["w_dim"], encoder_hidden=af["encoder_hidden"],
-                                   encoder_layers=af["encoder_layers"], norm_w=af["norm_w"])
+                                   encoder_layers=af["encoder_layers"], norm_w=af["norm_w"],
+                                   dueling=psi_dueling)
         else:
             psi_def = PsiMap(output_dim=z_dim, hidden_dim=config["sf"]["hidden_dim"],
                              num_parallel=config["num_parallel"],
@@ -441,11 +580,23 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
                              hidden_layers=config["sf"]["hidden_layers"])
         phi = TrainState.create(phi_def, phi_def.init(rphi, ex_observations)["params"],
                                 tx=optax.adam(config["lr_phi"]))
+        # `phi_restore_path` (2026-09-15, Fix 1): phi's parameters from ANOTHER run's
+        # params_<phi_restore_epoch>.pkl, so a scalar critic can be trained on phi(s')^T w
+        # with the basis of a finished measure run (held fixed by train_phi=false). The
+        # checkpoint's ONLINE phi goes into phi and, through the deepcopy below, target_phi;
+        # its optimiser state is not carried. Nothing else is read from that checkpoint.
+        if config.get("phi_restore_path", None):
+            phi = phi.replace(params=_load_phi_params(
+                config["phi_restore_path"], config.get("phi_restore_epoch", None), phi.params))
         # psi's index slot: the policy latent u' (d_a wide) under policy_index='latent',
         # the task vector w (z_dim wide) otherwise. The action slot is the latent either way.
         ex_index = ex_u if config["policy_index"] == "latent" else ex_w
-        psi = TrainState.create(psi_def, psi_def.init(rpsi, ex_observations, ex_index, ex_u)["params"],
-                                tx=optax.adam(config["lr_sf"]))
+        # The dueling head reads a (K, d_a) prior panel on every call, init included.
+        ex_duel = ({"u_prior": jnp.zeros((int(config.get("psi_dueling_samples", 8)), action_dim))}
+                   if psi_dueling else {})
+        psi = TrainState.create(
+            psi_def, psi_def.init(rpsi, ex_observations, ex_index, ex_u, **ex_duel)["params"],
+            tx=optax.adam(config["lr_sf"]))
 
         rng, ractor, ravf = jax.random.split(rng, 3)
         actor_def = NoiseConditionedActor(
@@ -562,6 +713,19 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             phi_a_def.init(jax.random.fold_in(rng, 105), ex_observations)["params"],
             tx=optax.adam(ac_cfg["lr"]))
 
+        # Reference PSM proto tower: the same free PsiMap shape as the SF head, index slot
+        # max_log_seed wide (the binary code), action slot the latent. fold_in, not split,
+        # so the keys above and the agent rng are exactly what they were without it.
+        proto_def = PsiMap(output_dim=z_dim, hidden_dim=config["sf"]["hidden_dim"],
+                           num_parallel=config["num_parallel"],
+                           embedding_layers=config["sf"]["embedding_layers"],
+                           hidden_layers=config["sf"]["hidden_layers"])
+        ex_zbin = jnp.zeros((ex_observations.shape[0], int(_proto_opt(config, "max_log_seed"))))
+        proto_psi = TrainState.create(
+            proto_def,
+            proto_def.init(jax.random.fold_in(rng, 118), ex_observations, ex_zbin, ex_u)["params"],
+            tx=optax.adam(float(_proto_opt(config, "lr"))))
+
         config = _plain_config(config)
         # Backfill the `actor` sub-keys so the runtime never sees a partial dict; every
         # default reproduces the behaviour of a config written before that key existed.
@@ -576,10 +740,20 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         config.setdefault("dsrl_na", {})
         for _k, _v in DSRL_NA_DEFAULTS.items():
             config["dsrl_na"].setdefault(_k, _v)
+        config.setdefault("proto", {})
+        for _k, _v in PROTO_DEFAULTS.items():
+            config["proto"].setdefault(_k, _v)
         config["ob_dims"] = tuple(ex_observations.shape[1:])
         config["action_dim"] = action_dim
+        # Width of the affine head's coefficient; a free psi has no such slot and never
+        # reads the field, so it is zero-width there.
+        w_dim_fc = int((config.get("affine") or {}).get("w_dim", 0)) if psi_form == "affine" else 0
+        fixed_coeff = jnp.zeros((w_dim_fc,), jnp.float32)
+        if config["acting"] == "fixed_coeff":
+            fixed_coeff = jnp.asarray(load_fixed_index_coeff(coeff_path, w_dim_fc), jnp.float32)
         return cls(rng=rng, phi=phi, psi=psi,
                    target_phi=copy.deepcopy(phi.params), target_psi=copy.deepcopy(psi.params),
+                   proto_psi=proto_psi, target_proto_psi=copy.deepcopy(proto_psi.params),
                    actor=actor, actor_vf=actor_vf,
                    sac_actor=sac_actor, log_alpha=log_alpha, q_dist=q_dist,
                    qa=qa, target_qa=copy.deepcopy(qa.params), qw=qw,
@@ -590,6 +764,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
                    na_rw_scale=jnp.ones((), jnp.float32),
                    task_z=jnp.zeros((z_dim,), jnp.float32),
                    task_z_a=jnp.zeros((z_dim,), jnp.float32),
+                   fixed_coeff=fixed_coeff,
                    config=flax.core.FrozenDict(config),
                    flow_vf_def=vf_def, flow_onestep_def=onestep_def)
 
@@ -646,6 +821,14 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
                                -c["u_clip"], c["u_clip"])
             explore_mask = (jax.random.uniform(r_emask, (B,)) < c["backup_explore_frac"])[:, None]
             u_next = jnp.where(explore_mask, u_prior, u_next)
+        u_adv = None
+        if c["policy_index"] == "task_vector" and c["bootstrap"] == "gpi_argmax":
+            # EMaQ-style backup: the continuation at s' is GPI under this row's w, scored
+            # with the target psi over bootstrap_candidates prior draws (key folded out of
+            # rng, so every draw above is untouched under bootstrap=index).
+            u_next, u_adv = self._gpi_argmax_latent(
+                batch["next_observations"], task_w, jax.random.fold_in(rng, 108),
+                int(c["bootstrap_candidates"]), params=self.target_psi)
         if c["policy_index"] == "latent":
             # The continuation at s' is pi_{u'}, the same index the online side carries --
             # that makes G(s', u') a p0 decode (Prop. `insample`), so explore_frac is inert.
@@ -677,12 +860,51 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
                     jax.random.permutation(r_waperm, B)], c["norm_z"])
             w_a_mask = (jax.random.uniform(r_wamix, (B,)) < c["mix_ratio"])[:, None]
             task_w_a = jnp.where(w_a_mask, w_a_goal, w_a_gauss)
+        # Reference PSM proto stage: a binary code per row, and the fixed pseudo-random
+        # latent policy's draw at that (row, code) -- the proto target's continuation at
+        # s'. The code key is folded out of rng, so the draws above are untouched when
+        # the stage is off; the latent draws no run randomness at all (`utils.psm_proto`).
+        z_bin = u_proto = None
+        if c["proto"]["enabled"]:
+            if "index" not in batch:
+                raise KeyError(
+                    "proto.enabled needs batch['index'], the dataset ROW index: keyed on "
+                    "batch position a transition meets a different proto policy on every "
+                    "resample and proto_psi has no fixed policy to converge to. main.py sets "
+                    "dataset.return_index for this arm.")
+            n_bits = int(c["proto"]["max_log_seed"])
+            z_bin = sample_z_bin(jax.random.fold_in(rng, 117), B, n_bits)
+            u_proto = proto_latents(proto_seed_ints(z_bin, batch["index"], n_bits), adim,
+                                    c["u_clip"], jax.random.PRNGKey(int(c["proto"]["proto_seed"])))
         return StepInputs(
             u_data=u_data, u_next=u_next, task_w=task_w, u_index=u_index,
             flow_x0=jax.random.normal(r_x0, (B, adim)),
             flow_t=jax.random.uniform(r_t, (B, 1)),
             flow_noise=jax.random.normal(r_noise, (B, adim)),
-            task_w_a=task_w_a, u_valid=u_valid, u_extra=u_extra)
+            task_w_a=task_w_a, u_valid=u_valid, u_extra=u_extra,
+            z_bin=z_bin, u_proto=u_proto,
+            # Folded out of rng, so the draws above are untouched when the head is off.
+            u_duel=self._duel_panel(jax.random.fold_in(rng, 119)),
+            u_adv=u_adv)
+
+    def _duel_panel(self, key):
+        """`psi_dueling`: the (K, d_a) clipped prior panel the advantage baseline averages over.
+
+        One panel per call, shared by every state in that call (the baseline is a
+        Monte-Carlo estimate of E_{u ~ p0} Adv(s, u, z); the same K draws at every s is a
+        valid estimate at a K-th of the cost). None when the head is off, and every psi
+        call site passes the result through, so the free head never sees the kwarg.
+        """
+        c = self.config
+        if not c["psi_dueling"]:
+            return None
+        K = int(c["psi_dueling_samples"])
+        return jnp.clip(jax.random.normal(key, (K, c["action_dim"])), -c["u_clip"], c["u_clip"])
+
+    @staticmethod
+    def _duel_kw(u_prior):
+        """kwargs for a psi call: `u_prior` only when there is a panel to pass."""
+        return {} if u_prior is None else {"u_prior": u_prior}
 
     def _sample_preimage_mixture(self, batch, n, key, scale=1.0):
         """n draws per row from the stored EM preimage mixture. Returns (n, B, d_a).
@@ -763,14 +985,16 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             return self.decode(observations, u)
         return u
 
-    def psi_b(self, observations, index, u, **kwargs):
+    def psi_b(self, observations, index, u, u_prior=None, **kwargs):
         """Bounded psi at a latent query, decoding its current-action input when requested.
 
         Only for calls that return psi itself; `method='sa_terms'` / `'encode_index'`
-        return the factors A, beta, w(u'), which are not the bounded object.
+        return the factors A, beta, w(u'), which are not the bounded object. `u_prior` is
+        the dueling head's prior panel (None unless `psi_dueling`).
         """
         return self.bound_psi(self.psi(
-            observations, index, self._measure_input(observations, u), **kwargs))
+            observations, index, self._measure_input(observations, u),
+            **self._duel_kw(u_prior), **kwargs))
 
     # ------------------------------------------------------------------ measure loss
     def measure_loss(self, batch, sampled, phi_params, psi_params):
@@ -787,17 +1011,31 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
 
         index = self._index(sampled)
         phi_next = self.phi(next_obs, params=phi_params)
+        proto_on = c["proto"]["enabled"]
+        if proto_on:
+            # Reference `_update_sf`: phi is FROZEN in the SF stage. The proto stage owns
+            # it; here it is the basis the SF head is fitted on, nothing more.
+            phi_next = jax.lax.stop_gradient(phi_next)
         # In action mode the online transition is fitted at the recorded action exactly;
         # every latent query (including the bootstrap below) goes through ``psi_b`` and
         # therefore through the frozen decoder.
         online_input = batch["actions"] if c["measure_action_input"] == "action" else u
-        psi_raw = self.psi(obs, index, online_input, params=psi_params)
-        M = self.bound_psi(psi_raw) @ phi_next.T
+        psi_raw = self.psi(obs, index, online_input, params=psi_params,
+                           **self._duel_kw(sampled.u_duel))
+        psi_online = self.bound_psi(psi_raw)
+        M = psi_online @ phi_next.T
         # A frozen basis has no lagging target coordinates: the online parameters are the
         # fixed target. This also makes a restored stale target inert on the first step.
         target_phi_params = self.target_phi if c["train_phi"] else phi_params
+        if proto_on:
+            # ... and the reference's target measure is read at the ONLINE phi -- the one
+            # the proto stage stepped this update (`apply_update` passes it) -- not at
+            # target_phi. Only psi has a target net in this stage.
+            target_phi_params = phi_params
         target_phi_next = self.phi(next_obs, params=target_phi_params)
-        M_boot = self.psi_b(next_obs, index, u_next, params=self.target_psi) @ target_phi_next.T
+        psi_boot = self.psi_b(next_obs, index, u_next, params=self.target_psi,
+                              u_prior=sampled.u_duel)                      # (P, B, z)
+        M_boot = psi_boot @ target_phi_next.T
         M_mean, M_unc = targets_uncertainty(M_boot, P)
         target_M = M_mean - c["pessimism_penalty"] * M_unc
         # `psi_bound='clip_target'`: the tanh head's admissible set imposed on the BOOTSTRAP.
@@ -827,7 +1065,8 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         if sampled.u_extra is not None:
             terms = [(sm, sm_diag, sm_offdiag)]
             for u_k in sampled.u_extra:
-                M_k = self.psi_b(obs, index, u_k, params=psi_params) @ phi_next.T
+                M_k = self.psi_b(obs, index, u_k, params=psi_params,
+                                 u_prior=sampled.u_duel) @ phi_next.T
                 terms.append(contrastive_loss(
                     M_k, jax.lax.stop_gradient(target_M), c["discount"], off, off_sum,
                     row_weight=row_w))
@@ -868,7 +1107,41 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             ortho_weight = ortho_weight + c["ortho_rel_coef"] * jnp.abs(
                 jax.lax.stop_gradient(sm))
         loss = sm + ortho_weight * ortho
-        return loss, {"psm_loss": sm, "psm_diag": sm_diag, "psm_offdiag": sm_offdiag,
+        if proto_on:
+            # The reference multiplies the SF stage's copy of the ortho term by a literal
+            # 0: phi is not this stage's to move. Kept above as telemetry only.
+            loss = sm
+        # `psm_scalar_coef` (2026-09-15, Fix 2): the measure's Bellman equation PROJECTED
+        # along the sampled task vector z = task_w, as a scalar TD loss on the readout,
+        #
+        #   ( psi(s, u, z)^T z - gamma * [mean_P - kappa unc](psibar(s', u+, z)^T z)
+        #                      - stopgrad(phi(s'))^T z )^2  /  Var_batch[stopgrad(phi(s')^T z)]
+        #
+        # with u+ the bootstrap latent the measure loss already uses (the actor's at s'
+        # under policy_index=task_vector). This is the ICLR draft's scalar Bellman equation
+        # of the readout Q_z = psi^T z (PAPER/ICLR), and Meta Motivo's `q_loss` on F^T z
+        # (arXiv 2410.20096, `metamotivo/fb/agent.py`, coefficient 0 there by default); the
+        # ensemble reduction is the measure target's own mean - kappa * spread, which at
+        # P = 2, kappa = 0.5 is the min Meta Motivo takes. Gradient reaches psi only: phi is
+        # stop-gradded in the reward term and the target is stop-gradded whole. The batch
+        # variance of the reward term (stop-gradded) normalises it, so coef = 1 weights it
+        # like a unit-variance TD loss whatever scale phi^T z happens to sit at.
+        scalar = jnp.asarray(0.0)
+        scalar_target_std = jnp.asarray(0.0)
+        if float(c["psm_scalar_coef"]) > 0.0:
+            z = sampled.task_w
+            r_z = jax.lax.stop_gradient((phi_next * z).sum(-1))                # (B,)
+            q_online = (psi_online * z[None]).sum(-1)                          # (P, B)
+            q_boot = (psi_boot * z[None]).sum(-1)                              # (P, B)
+            q_mean, q_unc = targets_uncertainty(q_boot, P)
+            q_target = jax.lax.stop_gradient(
+                r_z + c["discount"] * (q_mean - c["pessimism_penalty"] * q_unc))  # (B,)
+            r_var = jax.lax.stop_gradient(jnp.var(r_z)) + 1e-8
+            scalar = jnp.mean((q_online - q_target[None]) ** 2) / r_var
+            scalar_target_std = q_target.std()
+            loss = loss + c["psm_scalar_coef"] * scalar
+        info = {"psm_loss": sm, "psm_diag": sm_diag, "psm_offdiag": sm_offdiag,
+                      "psm_scalar_loss": scalar, "psm_scalar_target_std": scalar_target_std,
                       "orth_loss": ortho, "orth_diag": ortho_diag, "orth_offdiag": ortho_offdiag,
                       # Stabiliser telemetry, logged in every arm so the fixed and relative
                       # runs share a CSV schema.
@@ -885,9 +1158,56 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
                       "phi_gram_eig_min": gram_ev.min(),
                       "phi_gram_eig_max": gram_ev.max(),
                       "phi_gram_cond": gram_ev.max() / jnp.maximum(gram_ev.min(), 1e-12)}
+        if sampled.u_adv is not None:
+            info["bootstrap/adv"] = jnp.mean(sampled.u_adv)
+        return loss, info
+
+    # ------------------------------------------------------------------ reference PSM proto stage
+    def proto_measure_loss(self, batch, sampled, phi_params, proto_params):
+        """`proto.enabled`: PSM's proto branch (Eq. 9) on latent inputs -- the stage that trains phi.
+
+        m^z(s, u, x) = proto_psi(s, z_bin, u)^T phi(x), fitted by the same contrastive loss
+        against psibar(s', z_bin, u_proto)^T phibar(s'_j), where u_proto is the FIXED
+        pseudo-random latent policy pi_z's draw at (row, z_bin) (`utils.psm_proto`), so the
+        bootstrap action G(s', u_proto) is a decode of a prior-typical latent. Reference
+        `proto_loss` verbatim otherwise: both target nets, ensemble mean minus kappa times
+        spread, plus the orthonormality term on phi(s'). Gradients reach phi and proto_psi;
+        the SF head never sees this loss.
+        """
+        c = self.config
+        obs, next_obs = batch["observations"], batch["next_observations"]
+        off, off_sum = off_diagonal_mask(obs.shape[0])
+        P = c["num_parallel"]
+        z_bin, u, u_proto = sampled.z_bin, sampled.u_data, sampled.u_proto
+
+        phi_next = self.phi(next_obs, params=phi_params)
+        psi_raw = self.proto_psi(obs, z_bin, u, params=proto_params)
+        M = psi_raw @ phi_next.T
+        target_phi_next = self.phi(next_obs, params=self.target_phi)
+        M_boot = self.proto_psi(next_obs, z_bin, u_proto, params=self.target_proto_psi) @ target_phi_next.T
+        M_mean, M_unc = targets_uncertainty(M_boot, P)
+        target_M = M_mean - c["pessimism_penalty"] * M_unc
+        row_w = sampled.u_valid if c["mask_invalid_preimages"] else None
+        sm, sm_diag, sm_offdiag = contrastive_loss(
+            M, jax.lax.stop_gradient(target_M), c["discount"], off, off_sum, row_weight=row_w)
+        ortho, ortho_diag, ortho_offdiag = ortho_loss(phi_next, off, off_sum)
+        # `proto.ortho_coef` null = the agent's own ortho_coef. `ortho_mode` applies to
+        # whichever stage carries the term, which under proto is this one.
+        ortho_weight = c["proto"]["ortho_coef"]
+        ortho_weight = c["ortho_coef"] if ortho_weight is None else float(ortho_weight)
+        if c["ortho_mode"] == "relative":
+            ortho_weight = ortho_weight + c["ortho_rel_coef"] * jnp.abs(
+                jax.lax.stop_gradient(sm))
+        loss = sm + ortho_weight * ortho
+        return loss, {"proto_loss": sm, "proto_diag": sm_diag, "proto_offdiag": sm_offdiag,
+                      "proto_orth_loss": ortho, "proto_orth_diag": ortho_diag,
+                      "proto_orth_offdiag": ortho_offdiag,
+                      "proto_ortho_weight": jnp.asarray(ortho_weight, jnp.float32),
+                      "proto_psi_absmean": jnp.mean(jnp.abs(psi_raw)),
+                      "proto_td_target_absmean": jnp.mean(jnp.abs(target_M))}
 
     # ------------------------------------------------------------------ latent-actor losses
-    def _psi_q_over_indices(self, obs, u, w, u_index, params=None):
+    def _psi_q_over_indices(self, obs, u, w, u_index, params=None, u_prior=None):
         """Q(s, u, u'_k) = psi(s, u, u'_k)^T w for K policy indices at once. Returns (P, K, B).
 
         Under psi_form=affine, A and beta do not depend on the index, so an index panel
@@ -897,13 +1217,53 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         if self.config["psi_form"] == "affine" and self.config["psi_bound"] != "tanh":
             measure_input = self._measure_input(obs, u)
             A, beta = self.psi(
-                obs, measure_input, params=params, method="sa_terms")      # (P,B,z,d_w),(P,B,z)
+                obs, measure_input, params=params, method="sa_terms",
+                **self._duel_kw(u_prior))                                  # (P,B,z,d_w),(P,B,z)
             w_index = self.psi(u_index, params=params, method="encode_index")   # (K, B, d_w)
             Aw = jnp.einsum("pbzw,bz->pbw", A, w)
             beta_w = jnp.einsum("pbz,bz->pb", beta, w)
             return jnp.einsum("pbw,kbw->pkb", Aw, w_index) + beta_w[:, None, :]   # (P, K, B)
-        return jax.vmap(lambda idx: (self.psi_b(obs, idx, u, params=params) * w).sum(-1),
+        return jax.vmap(lambda idx: (self.psi_b(obs, idx, u, params=params,
+                                                u_prior=u_prior) * w).sum(-1),
                         out_axes=1)(u_index)                               # (P, K, B)
+
+    def _psi_q_fixed_coeff(self, obs, u, w, coeff, params=None, u_prior=None):
+        """Q_c(s, u) = psi_c(s, u)^T w with psi_c = A(s,u)^T c + beta(s,u): (P, B).
+
+        PSM's test-time policy (arXiv 2411.19418 Eq. 10) is one coefficient vector c on
+        the affine basis, in place of the encoder output w(u') of one family member.
+        With c = w(u'_0) this is `_psi_q_over_indices(..., u_index=u'_0[None])[:, 0]`
+        exactly; c is otherwise free (not on the encoder's unit sphere).
+        """
+        assert self.config["psi_form"] == "affine", "a fixed coefficient needs the affine head"
+        measure_input = self._measure_input(obs, u)
+        A, beta = self.psi(obs, measure_input, params=params, method="sa_terms",
+                           **self._duel_kw(u_prior))                       # (P,B,z,d_w),(P,B,z)
+        coeff = jnp.broadcast_to(coeff, (*A.shape[:-2], A.shape[-1]))
+        psi_c = self.bound_psi(jnp.einsum("pbzw,pbw->pbz", A, coeff) + beta)   # (P, B, z)
+        return (psi_c * w).sum(-1)                                          # (P, B)
+
+    @jax.jit
+    def fixed_coeff_select(self, observations, seed=None):
+        """`acting=fixed_coeff`: argmax over K clipped prior draws u of the pessimistic
+        readout [mean_P - kappa * unc] Q_c(s, u) at the loaded coefficient `fixed_coeff`.
+
+        The candidate draws come off the same split of `seed` as `gpi_select`'s u_cand, so
+        at c = w(u'_0) the score ranks the very candidates the pinned-index ablation ranks.
+        """
+        c = self.config
+        assert observations.ndim == 1, "fixed_coeff_select acts on a single observation"
+        K, d_a = c["gpi_num_u"], c["action_dim"]
+        seed = self.rng if seed is None else seed
+        u_duel = self._duel_panel(jax.random.fold_in(seed, 5))
+        r_u, _ = jax.random.split(seed)
+        u_cand = jnp.clip(jax.random.normal(r_u, (K, d_a)), -c["u_clip"], c["u_clip"])
+        obs = jnp.broadcast_to(observations, (K, *observations.shape))
+        w = jnp.broadcast_to(self.task_z, (K, *self.task_z.shape))
+        q_ens = self._psi_q_fixed_coeff(obs, u_cand, w, self.fixed_coeff, u_prior=u_duel)
+        q_mean, q_unc = targets_uncertainty(q_ens, c["num_parallel"])
+        Q = q_mean - c["actor_pessimism_penalty"] * q_unc
+        return u_cand[jnp.argmax(Q)]
 
     def _actor_q(self, obs, u_a, sampled):
         """The Q the latent actor climbs, and the raw ensemble readout it is normalised by.
@@ -924,14 +1284,16 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             return Q, q_ens
         K = int(c["actor"]["index_panel"])
         if K <= 0:
-            q_ens = (self.psi_b(obs, self._index(sampled), u_a) * w).sum(-1)  # (P, B)
+            q_ens = (self.psi_b(obs, self._index(sampled), u_a,
+                                u_prior=sampled.u_duel) * w).sum(-1)       # (P, B)
             q_mean, q_unc = targets_uncertainty(q_ens, c["num_parallel"])
             return q_mean - c["actor_pessimism_penalty"] * q_unc, q_ens
         B, d_a = obs.shape[0], c["action_dim"]
         ic = self._index_clip()
         u_index = jnp.clip(jax.random.normal(jax.random.fold_in(self.rng, 112), (K, B, d_a)),
                            -ic, ic)
-        q_panel = self._psi_q_over_indices(obs, u_a, w, u_index)           # (P, K, B)
+        q_panel = self._psi_q_over_indices(obs, u_a, w, u_index,
+                                           u_prior=sampled.u_duel)         # (P, K, B)
         q_mean, q_unc = targets_uncertainty(q_panel, c["num_parallel"])    # (K, B)
         Q = (q_mean - c["actor_pessimism_penalty"] * q_unc).max(0)         # (B,)
         return Q, q_panel.reshape(q_panel.shape[0], -1)
@@ -973,6 +1335,31 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             return self.config["u_clip"] * self.actor(obs, w, noise)
         return self._sac_latent(obs, w, noise)[0]
 
+    def _gpi_argmax_latent(self, obs, w, key, n, params=None):
+        """EMaQ-style argmax under the task-vector index: for each row,
+
+            u*(s) = argmax_{u_m ~ p0, m<=n} [mean_P - pessimism_penalty * unc] psi(s, w, u_m)^T w
+
+        with psi read at `params` (the TARGET psi when this builds the TD bootstrap). Every
+        candidate is a clipped prior draw, so the decode G(s, u*) is in-support. Returns
+        (u_star (B, d_a), adv (B,)) with adv = Q(u*) - mean_m Q(u_m), both stop-gradded.
+        Cost: n psi forwards per row.
+        """
+        c = self.config
+        B, d_a = obs.shape[0], c["action_dim"]
+        u_cand = jnp.clip(jax.random.normal(key, (n, B, d_a)), -c["u_clip"], c["u_clip"])
+
+        def score(u_m):
+            q = (self.psi_b(obs, w, u_m, params=params) * w).sum(-1)          # (P, B)
+            q_mean, q_unc = targets_uncertainty(q, c["num_parallel"])
+            return q_mean - c["pessimism_penalty"] * q_unc                    # (B,)
+
+        Q = jax.vmap(score)(u_cand)                                           # (n, B)
+        best = jnp.argmax(Q, axis=0)
+        u_star = jnp.take_along_axis(u_cand, best[None, :, None], axis=0)[0]
+        adv = Q.max(0) - Q.mean(0)
+        return jax.lax.stop_gradient(u_star), jax.lax.stop_gradient(adv)
+
     def _gpi_argmax_target(self, obs, w, key):
         """DSRL-NA's regression target: the acting rule's own choice, per state.
 
@@ -989,9 +1376,11 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         ic = self._index_clip()
         u_cand = jnp.clip(jax.random.normal(k_u, (M, B, d_a)), -c["u_clip"], c["u_clip"])
         u_index = jnp.clip(jax.random.normal(k_i, (K, B, d_a)), -ic, ic)
+        u_duel = self._duel_panel(jax.random.fold_in(key, 2))
 
         def score(u_m):
-            q_panel = self._psi_q_over_indices(obs, u_m, w, u_index)        # (P, K, B)
+            q_panel = self._psi_q_over_indices(obs, u_m, w, u_index,
+                                               u_prior=u_duel)              # (P, K, B)
             q_mean, q_unc = targets_uncertainty(q_panel, c["num_parallel"])
             return (q_mean - c["actor_pessimism_penalty"] * q_unc).max(0)   # (B,)
 
@@ -1032,7 +1421,10 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         distill = jnp.mean((u_a - jax.lax.stop_gradient(rollout(vf_params, obs, noise))) ** 2)
         loss = q_loss + c["actor"]["bc_coeff"] * distill + bc_flow_loss
         return loss, {"actor_loss": loss, "actor_q": Q.mean(),
-                      "actor_bc_flow_loss": bc_flow_loss, "actor_bc_error": distill}
+                      "actor_bc_flow_loss": bc_flow_loss, "actor_bc_error": distill,
+                      # mean ||u_actor||: the prior's typical norm is ~sqrt(d_a) (2.1 at
+                      # d_a = 5); the Section 10 affine checkpoint sits at 0.67 (09-15).
+                      "actor_u_norm": jnp.linalg.norm(u_a, axis=-1).mean()}
 
     def dsrl_actor_loss(self, batch, sampled, sac_params, vf_params):
         """`actor_mode` in {'dsrl_sac', 'dsrl_na'}: the DSRL latent actor on this substrate.
@@ -1148,7 +1540,8 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         obs_rep = jnp.broadcast_to(obs[None], (panel, *obs.shape)).reshape(panel * B, -1)
         u_rep = jnp.broadcast_to(u[None], (panel, *u.shape)).reshape(panel * B, d_a)
         w_rep = jnp.broadcast_to(w[None], (panel, *w.shape)).reshape(panel * B, -1)
-        q_ens = (self.psi_b(obs_rep, u_index.reshape(panel * B, d_a), u_rep) * w_rep).sum(-1)
+        q_ens = (self.psi_b(obs_rep, u_index.reshape(panel * B, d_a), u_rep,
+                            u_prior=sampled.u_duel) * w_rep).sum(-1)
         q_mean, q_unc = targets_uncertainty(q_ens, c["num_parallel"])
         target = jax.lax.stop_gradient(
             (q_mean - c["actor_pessimism_penalty"] * q_unc).reshape(panel, B))
@@ -1187,6 +1580,13 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         the channel work at all), which adds a constant 1/(1-gamma) to every Q and changes
         no policy; and `w`'s sphere projection sets r_hat's scale, which auto-alpha absorbs.
         `na_rhat_corr` logs how much of the real reward survives the round trip.
+
+        `ignore_masks` (2026-09-15) bootstraps with mask = 1 on every row, the continuing
+        formulation: a synthetic reward phi(s')^T w is a per-w constant offset away from any
+        reward the task actually pays, and an offset is harmless only without termination
+        (with the dataset masks the 09-14 raw-r_hat arm valued staying alive above finishing).
+        `reward_scale` multiplies the synthetic reward so its per-w std can be matched to the
+        real -1/0 reward's, the scale the critic widths and alpha were tuned at.
         """
         c, na = self.config, self.config["dsrl_na"]
         obs, next_obs = batch["observations"], batch["next_observations"]
@@ -1194,6 +1594,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         u_next = self._deploy_latent(next_obs, w, sampled.flow_noise)
         a_next = jax.lax.stop_gradient(self.decode(next_obs, u_next))
         q_next = self.qa(next_obs, self._na_in(a_next, w), params=self.target_qa).min(0)
+        mask = jnp.ones_like(batch["masks"]) if na["ignore_masks"] else batch["masks"]
 
         r_true = batch["rewards"]
         info = {}
@@ -1204,7 +1605,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             # Gaussian, both projected to the sphere and stop-gradded), which is the same
             # distribution the measure branch trains against.
             ph = jax.lax.stop_gradient(self.phi(next_obs))
-            r_used = (ph * w).sum(-1)
+            r_used = float(na["reward_scale"]) * (ph * w).sum(-1)
             dr = r_used - r_used.mean()
             dt = (r_true + na["reward_shift"]) - (r_true + na["reward_shift"]).mean()
             # How much the synthetic task happens to resemble the REAL one this batch. Not
@@ -1240,7 +1641,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             r_used = r_true
 
         target = jax.lax.stop_gradient(
-            r_used + na["discount"] * batch["masks"] * q_next)
+            r_used + na["discount"] * mask * q_next)
         q = self.qa(obs, self._na_in(batch["actions"], w), params=qa_params)  # (E, B)
         loss = jnp.square(q - target[None]).mean()
         return loss, {"na_qa_loss": loss, "na_qa_mean": q.mean(),
@@ -1441,7 +1842,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         w = sampled.task_w[:n]
 
         def q_of(index, act):
-            q_ens = (self.psi_b(obs, index, act) * w).sum(-1)               # (P, n)
+            q_ens = (self.psi_b(obs, index, act, u_prior=sampled.u_duel) * w).sum(-1)  # (P, n)
             q_mean, q_unc = targets_uncertainty(q_ens, c["num_parallel"])
             return q_mean - c["actor_pessimism_penalty"] * q_unc            # (n,)
 
@@ -1490,7 +1891,23 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
     def apply_update(self, batch, sampled):
         """One gradient step of every enabled branch, at the pre-update psi (PSM's convention)."""
         tau = self.config["tau"]
-        if self.config["train_phi"]:
+        proto_on = self.config["proto"]["enabled"]
+        p_info = {}
+        if proto_on:
+            # Reference PSM order: the proto stage steps phi + proto_psi, then the SF stage
+            # fits psi on the phi THAT step produced (phi frozen there, target read at the
+            # online phi), then the actor. Targets polyak after each stage's step.
+            (_, p_info), (g_phi, g_proto) = jax.value_and_grad(
+                self.proto_measure_loss, argnums=(2, 3), has_aux=True)(
+                    batch, sampled, self.phi.params, self.proto_psi.params)
+            phi = self.phi.apply_gradients(grads=g_phi)
+            proto_psi = self.proto_psi.apply_gradients(grads=g_proto)
+            target_phi = polyak_update(phi.params, self.target_phi, tau)
+            target_proto_psi = polyak_update(proto_psi.params, self.target_proto_psi, tau)
+            (_, info), g_psi = jax.value_and_grad(
+                self.measure_loss, argnums=3, has_aux=True)(
+                    batch, sampled, phi.params, self.psi.params)
+        elif self.config["train_phi"]:
             (_, info), (g_phi, g_psi) = jax.value_and_grad(
                 self.measure_loss, argnums=(2, 3), has_aux=True)(
                     batch, sampled, self.phi.params, self.psi.params)
@@ -1507,6 +1924,8 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         psi = self.psi.apply_gradients(grads=g_psi)
         target_psi = polyak_update(psi.params, self.target_psi, tau)
         new = self.replace(phi=phi, psi=psi, target_phi=target_phi, target_psi=target_psi)
+        if proto_on:
+            new = new.replace(proto_psi=proto_psi, target_proto_psi=target_proto_psi)
         # Under the task-vector index the backup bootstraps the actor's latent at s'.
         # Under policy_index='latent' it uses u', so train_actor=false drops the actor.
         a_info = {}
@@ -1590,7 +2009,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             s_info = new.action_critic_spread(batch, sampled,
                                               jax.random.fold_in(self.rng, 103))
             a_info = {**a_info, **ac_info, **r_info, **s_info}
-        return new, {**info, **a_info, **na_info}
+        return new, {**p_info, **info, **a_info, **na_info}
 
     @jax.jit
     def update(self, batch):
@@ -1604,6 +2023,10 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         rng = rng if rng is not None else self.rng
         sampled = self.sample_step_inputs(batch, rng)
         loss, info = self.measure_loss(batch, sampled, self.phi.params, self.psi.params)
+        if self.config["proto"]["enabled"]:
+            p_loss, p_info = self.proto_measure_loss(batch, sampled, self.phi.params,
+                                                     self.proto_psi.params)
+            loss, info = loss + p_loss, {**p_info, **info}
         return loss, info
 
     # ------------------------------------------------------------------ acting
@@ -1632,13 +2055,14 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         assert observations.ndim == 1, "gpi_select acts on a single observation"
         K, d_a = c["gpi_num_u"], c["action_dim"]
         seed = self.rng if seed is None else seed
+        u_duel = self._duel_panel(jax.random.fold_in(seed, 5))
         if c["policy_index"] == "latent" and c["index_agg"] == "expectile":
             u_cand = jnp.clip(jax.random.normal(seed, (K, d_a)), -c["u_clip"], c["u_clip"])
             obs = jnp.broadcast_to(observations, (K, *observations.shape))
             wq = jnp.broadcast_to(self.task_z, (K, *self.task_z.shape))
             return u_cand[jnp.argmax(self.q_dist(obs, jnp.concatenate([wq, u_cand], -1)))]
         if c["policy_index"] == "latent" and c["gpi_select"] != "argmax":
-            return self._gpi_select_ablation(observations, seed)
+            return self._gpi_select_ablation(observations, seed, u_duel)
         if c["policy_index"] == "latent":
             r_u, r_up = jax.random.split(seed)
             ic = self._index_clip()
@@ -1655,7 +2079,8 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
                 # Singleton current-action axis: einsum broadcasts it over K actions,
                 # while w_enc itself sees only the K distinct policy indices.
                 index_panel = u_index[:, None, :]
-                q_panel = self._psi_q_over_indices(obs_k, u_cand, w_k, index_panel)
+                q_panel = self._psi_q_over_indices(obs_k, u_cand, w_k, index_panel,
+                                                   u_prior=u_duel)
                 q_ens = jnp.swapaxes(q_panel, 1, 2).reshape(c["num_parallel"], K * K)
                 q_mean, q_unc = targets_uncertainty(q_ens, c["num_parallel"])
                 Q = q_mean - c["actor_pessimism_penalty"] * q_unc
@@ -1663,7 +2088,7 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
             u_pairs = jnp.repeat(u_cand, K, axis=0)         # (K*K, d_a), i-major
             index_pairs = jnp.tile(u_index, (K, 1))         # (K*K, d_a)
             obs = jnp.broadcast_to(observations, (K * K, *observations.shape))
-            psi_out = self.psi_b(obs, index_pairs, u_pairs)  # (P, K*K, z_dim)
+            psi_out = self.psi_b(obs, index_pairs, u_pairs, u_prior=u_duel)  # (P, K*K, z_dim)
             q_ens = (psi_out * self.task_z).sum(-1)         # (P, K*K)
             q_mean, q_unc = targets_uncertainty(q_ens, c["num_parallel"])
             Q = q_mean - c["actor_pessimism_penalty"] * q_unc
@@ -1671,13 +2096,13 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         u_cand = jnp.clip(jax.random.normal(seed, (K, d_a)), -c["u_clip"], c["u_clip"])
         obs = jnp.broadcast_to(observations, (K, *observations.shape))
         w = jnp.broadcast_to(self.task_z, (K, *self.task_z.shape))
-        psi_out = self.psi_b(obs, w, u_cand)                # (P, K, z_dim)
+        psi_out = self.psi_b(obs, w, u_cand, u_prior=u_duel)  # (P, K, z_dim)
         q_ens = (psi_out * self.task_z).sum(-1)             # (P, K)
         q_mean, q_unc = targets_uncertainty(q_ens, c["num_parallel"])
         Q = q_mean - c["actor_pessimism_penalty"] * q_unc
         return u_cand[jnp.argmax(Q)]
 
-    def _gpi_select_ablation(self, observations, seed):
+    def _gpi_select_ablation(self, observations, seed, u_duel=None):
         """`gpi_select != 'argmax'`: eval-time variants of the SELECTION RULE only.
 
         Reached only under policy_index=latent, index_agg=max. Every mode draws from the
@@ -1737,7 +2162,8 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         u_pairs = jnp.repeat(u_cand, n_idx, axis=0)         # (K*n_idx, d_a), i-major
         index_pairs = jnp.tile(u_index, (K, 1))             # (K*n_idx, d_a)
         obs = jnp.broadcast_to(observations, (K * n_idx, *observations.shape))
-        q_ens = (self.psi_b(obs, index_pairs, u_pairs) * self.task_z).sum(-1)  # (P, K*n_idx)
+        q_ens = (self.psi_b(obs, index_pairs, u_pairs, u_prior=u_duel)
+                 * self.task_z).sum(-1)                     # (P, K*n_idx)
         q_mean, q_unc = targets_uncertainty(q_ens, c["num_parallel"])
         pess = 0.0 if mode == "mean" else c["actor_pessimism_penalty"]
         # Per-u GPI score, max over the index panel -- the ranking the shipped argmax
@@ -1801,6 +2227,8 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
                 u_stoch, _ = tanh_gaussian_sample(mu, log_std, noise, self.config["u_clip"])
                 u_mode = self.config["u_clip"] * jnp.tanh(mu)
                 u_star = jnp.where(jnp.asarray(temperature) == 0, u_mode, u_stoch)[0]
+        elif self.config["acting"] == "fixed_coeff":
+            u_star = self.fixed_coeff_select(observations, seed=seed)
         else:
             u_star = self.gpi_select(observations, seed=seed)
         if ac["enabled"]:
@@ -1935,6 +2363,19 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         return self.replace(task_z=z, task_z_a=z_a)
 
 
+def load_fixed_index_coeff(path, w_dim):
+    """The Eq. 10 coefficient `c` (w_dim,) from an npz written by
+    tools/infer_policy_lagrangian.py. Shape-checked here so a file fitted against another
+    checkpoint's head width fails at construction, not inside a jitted einsum."""
+    with np.load(str(path), allow_pickle=False) as z:
+        assert "c" in z.files, f"{path}: no `c` array"
+        coeff = np.asarray(z["c"], np.float32).reshape(-1)
+    assert coeff.shape == (int(w_dim),), (
+        f"{path}: c has shape {coeff.shape}, this head's w_dim is {w_dim}")
+    assert np.all(np.isfinite(coeff)), f"{path}: c is not finite"
+    return coeff
+
+
 def _load_flow_params(ckpt_path, ckpt_epoch, config, ex_observations, ex_actions):
     """Extract the frozen flow subtrees from a Stage-A FQL(bc_only) checkpoint.
 
@@ -1967,6 +2408,33 @@ def _load_flow_params(ckpt_path, ckpt_epoch, config, ex_observations, ex_actions
     return vf, onestep
 
 
+def _load_phi_params(restore_path, restore_epoch, template):
+    """phi's ONLINE params from another run's `params_<epoch>.pkl` (`restore_agent`'s glob
+    convention: `restore_path` must match exactly one run directory).
+
+    Only the `agent/phi/params` subtree is read. The tree must have the template's
+    structure and leaf shapes, i.e. the same `phi` block and `z_dim` and the same env.
+    """
+    import glob
+    import os
+    import pickle
+
+    candidates = glob.glob(str(restore_path))
+    assert len(candidates) == 1, (
+        f"phi_restore_path must match exactly one run directory; {restore_path!r} matched "
+        f"{len(candidates)}: {candidates}")
+    assert restore_epoch is not None, "phi_restore_path needs phi_restore_epoch"
+    path = os.path.join(candidates[0], f"params_{int(restore_epoch)}.pkl")
+    with open(path, "rb") as f:
+        saved = pickle.load(f)["agent"]["phi"]["params"]
+    loaded = flax.serialization.from_state_dict(template, saved)
+    for want, got in zip(jax.tree_util.tree_leaves(template), jax.tree_util.tree_leaves(loaded)):
+        assert tuple(want.shape) == tuple(jnp.shape(got)), (
+            f"{path}: phi leaf shape {tuple(jnp.shape(got))} does not match this agent's "
+            f"{tuple(want.shape)}; the checkpoint's phi block, z_dim or env differs")
+    return jax.tree_util.tree_map(lambda x: jnp.asarray(x, jnp.float32), loaded)
+
+
 def get_config():
     """Importable default config, mirrored by configs/agent/psmflow.yaml."""
     import ml_collections
@@ -1997,11 +2465,20 @@ def get_config():
             # Diagnostic continuation switch. False freezes phi's complete TrainState;
             # psi (including the affine policy-index encoder) continues training.
             train_phi=True,
+            # Take phi's params from another run's params_<epoch>.pkl (online phi into phi
+            # and target_phi; optimiser state fresh). null = phi starts at its init.
+            phi_restore_path=ml_collections.config_dict.placeholder(str),
+            phi_restore_epoch=ml_collections.config_dict.placeholder(int),
             phi=dict(hidden_dim=256, hidden_layers=2),
             sf=dict(hidden_dim=1024, hidden_layers=1, embedding_layers=2),
             mix_ratio=0.5,           # P(w drawn as phi(next_obs[perm])) vs a random unit z
             # Fraction of TD bootstrap latents drawn from the prior instead of the actor.
             backup_explore_frac=0.0,
+            # Backup action slot at s'. "index" = today's backup. "gpi_argmax" (needs
+            # policy_index=task_vector) = EMaQ-style max over bootstrap_candidates prior
+            # draws of the pessimistic target-psi readout under the row's w.
+            bootstrap="index",            # index | gpi_argmax
+            bootstrap_candidates=8,
             # Amortized latent actor pi_eta, off by default (train_actor=False).
             actor=dict(hidden_dim=512, hidden_layers=2, embedding_layers=2,
                        vf_hidden_dim=512, vf_hidden_layers=4, flow_steps=10,
@@ -2026,6 +2503,9 @@ def get_config():
             # Which latent actor `train_actor=true` trains and `acting=actor` deploys.
             actor_mode="ddpg",       # ddpg | dsrl_sac | gpi_distill
             acting="gpi",            # gpi (per-step latent argmax, actor-free) | actor
+                                     # | fixed_coeff (PSM Eq. 10 coefficient, eval only)
+            # acting=fixed_coeff: npz holding `c` (w_dim,) from tools/infer_policy_lagrangian.py
+            fixed_index_coeff_path=ml_collections.config_dict.placeholder(str),
             # psi's index slot. "latent" is psi(s, u, u'): u' ~ p0 per row indexes the
             # policy and w reaches psi only via Q = psi^T w. "task_vector" is psi(s, w, u).
             policy_index="latent",        # latent | task_vector
@@ -2037,6 +2517,13 @@ def get_config():
             # queries through the frozen flow.
             measure_action_input="latent",  # latent | action
             affine=dict(w_dim=128, encoder_hidden=256, encoder_layers=2, norm_w=True),
+            # Fix 2 (2026-09-15). psm_scalar_coef > 0 adds the readout's projected Bellman
+            # loss (psi^T z against gamma psibar^T z + phi(s')^T z, variance-normalised) to
+            # the measure loss, psi-only gradient. psi_dueling decomposes the affine head
+            # into V(s,z) + Adv(s,u,z) - mean over psi_dueling_samples prior latents.
+            psm_scalar_coef=0.0,
+            psi_dueling=False,
+            psi_dueling_samples=8,
             # How psi's index slot is aggregated. "max" is the argmax over the panel;
             # "expectile" distills an upper expectile into q_dist, taking no sample argmax.
             index_agg="max",              # max | expectile
@@ -2061,7 +2548,17 @@ def get_config():
                          reward_refit_every=10000,
                          # Arm D2: critics and actor take w, so the arm generalises over
                          # tasks instead of solving one. Requires synthetic_w.
-                         task_conditioned=False),
+                         task_conditioned=False,
+                         # Fix 1 (2026-09-15): qa's TD target with mask = 1 on every row
+                         # (continuing formulation), and a multiplier on the synthetic
+                         # reward phi(s')^T w (synthetic_w only).
+                         ignore_masks=False, reward_scale=1.0),
+            # Reference PSM critic (2026-09-14): the proto successor-measure stage on latent
+            # inputs, psi as PSM's separate SF head. enabled=False is the shipped critic.
+            # Requires policy_index=task_vector, train_actor=true; main.py switches on
+            # dataset.return_index for it. ortho_coef null = the agent's ortho_coef.
+            proto={"enabled": False, "max_log_seed": 16, "proto_seed": 0, "lr": 1.0e-4,
+                   "ortho_coef": ml_collections.config_dict.placeholder(float)},
             # Action branch: successor features over executed actions plus an eps-bounded
             # residual. `pessimism` is a [0,1] blend weight, not a spread multiplier.
             action_critic=dict(enabled=False, discount=0.99, tau=0.005, pessimism=0.0,

@@ -16,7 +16,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from agents import agents
 from envs.env_utils import make_env_and_datasets
-from utils.datasets import Dataset, ReplayBuffer, add_skill_targets
+from utils.datasets import Dataset, ReplayBuffer, add_skill_targets, apply_reward_override
 from utils.evaluation import evaluate, flatten
 from utils.flax_utils import restore_agent, save_agent
 from utils.log_utils import CsvLogger, get_exp_name, get_wandb_video, setup_wandb
@@ -71,7 +71,7 @@ def main(cfg: DictConfig):
             # re-wrap it here or it stays a plain dict when p_aug/frame_stack are set.
             val_dataset = Dataset.create(**val_dataset)
 
-    if config['agent_name'] == 'psmflow':
+    if config['agent_name'] in ('psmflow', 'psmgoal'):
         # These train on the preimage-augmented dataset (latents per transition).
         from utils.flow_inversion import load_augmented_dataset, repair_invalid_preimages
         assert config.get('preimage_path'), (
@@ -197,6 +197,16 @@ def main(cfg: DictConfig):
         train_dataset = aug
         val_dataset = None  # val split has no preimages; skip validation logging at v1
 
+    # Row-aligned reward relabel (dataset.reward_override_path). Applied last, after every
+    # other dataset transform, so the row order it was written against is the one trained on.
+    _reward_override = (cfg.get('dataset') or {}).get('reward_override_path')
+    if _reward_override:
+        _r_before = np.asarray(train_dataset['rewards'], np.float64)
+        train_dataset = apply_reward_override(train_dataset, _reward_override)
+        _r_after = np.asarray(train_dataset['rewards'], np.float64)
+        print(f'reward override from {_reward_override}: rewards mean/std '
+              f'{_r_before.mean():.4f}/{_r_before.std():.4f} -> {_r_after.mean():.4f}/{_r_after.std():.4f}')
+
     # Initialize agent.
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -218,11 +228,21 @@ def main(cfg: DictConfig):
         if dataset is not None:
             dataset.p_aug = cfg.p_aug
             dataset.frame_stack = cfg.frame_stack
-            if config['agent_name'] == 'psmflow':
+            if config['agent_name'] in ('psmflow', 'psmgoal'):
                 # Emit u_0 / u_0' per transition: either a draw from the stored EM mixture
                 # or the exact backward-ODE point, per the point-vs-mixture ablation.
                 dataset.return_preimage_noise = True
                 dataset.preimage_point_mode = bool(config.get('use_point_preimage', False))
+            if config['agent_name'] == 'psmgoal':
+                # Hindsight goal per row as batch['goals'] (utils.datasets.hindsight_goal_idxs):
+                # geometric horizon at the agent's discount, goal_random_frac random states.
+                dataset.return_goals = True
+                dataset.goal_discount = float(config['discount'])
+                dataset.goal_random_frac = float(config['goal_random_frac'])
+                # Reference PSM proto stage (agent.proto.enabled): the proto policy is keyed
+                # on the dataset ROW, so the batch must carry it as batch['index'].
+                _proto_cfg = config.get('proto', None)
+                dataset.return_index = bool(_proto_cfg is not None and _proto_cfg.get('enabled', False))
 
     # Create agent.
     example_batch = train_dataset.sample(1)
@@ -358,6 +378,13 @@ def main(cfg: DictConfig):
                 z_batch = train_dataset.sample(n_relabel)
                 rew = z_batch['rewards'] + float(cfg.get('eval_reward_shift', 1.0))
                 eval_agent = agent.infer_eval_z(z_batch['next_observations'], rew)
+            elif hasattr(agent, 'infer_eval_goals'):
+                # psmgoal: the same relabel batch, read as a GOAL SET (its rewarding next
+                # states) instead of a task vector.
+                n_relabel = min(train_dataset.size, int(cfg.get('eval_relabel_size', 10000)))
+                z_batch = train_dataset.sample(n_relabel)
+                rew = z_batch['rewards'] + float(cfg.get('eval_reward_shift', 1.0))
+                eval_agent = agent.infer_eval_goals(z_batch['next_observations'], rew)
             eval_info, trajs, cur_renders = evaluate(
                 agent=eval_agent,
                 env=eval_env,

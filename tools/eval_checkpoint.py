@@ -310,6 +310,26 @@ def merge_run_config(cli_agent, restore_path, cli_keys):
     return merged, prov
 
 
+def check_fixed_coeff_npz(path, env_name, restore_path, restore_epoch):
+    """`acting=fixed_coeff`: the coefficient npz records the env it was fitted for and the
+    checkpoint whose head it was fitted on; evaluating it anywhere else is a different
+    policy with the same filename. Pure (numpy only); tests/test_eval_checkpoint_flags.py."""
+    assert path, "acting=fixed_coeff needs agent.fixed_index_coeff_path"
+    with np.load(str(path), allow_pickle=False) as z:
+        meta = {k: str(z[k]) for k in ("env_name", "restore_path", "restore_epoch") if k in z.files}
+    if "env_name" in meta:
+        assert meta["env_name"] == str(env_name), (
+            f"{path} was fitted for {meta['env_name']!r}, this eval is on {env_name!r}")
+    if "restore_path" in meta:
+        want = os.path.basename(os.path.normpath(restore_path))
+        got = os.path.basename(os.path.normpath(meta["restore_path"]))
+        assert got == want, f"{path} was fitted on checkpoint {got!r}, this eval restores {want!r}"
+    if "restore_epoch" in meta:
+        assert int(float(meta["restore_epoch"])) == int(restore_epoch), (
+            f"{path} was fitted at epoch {meta['restore_epoch']}, this eval restores {restore_epoch}")
+    return meta
+
+
 def _evaluate_shard(payload):
     """One worker: build env + agent, run this shard's episodes, return raw successes.
 
@@ -348,6 +368,11 @@ def _evaluate_shard(payload):
         n_relabel = min(ds.size, int(payload["relabel_size"]))
         zb = ds.sample(n_relabel)
         agent = agent.infer_eval_z(zb["next_observations"], zb["rewards"] + payload["reward_shift"])
+    elif hasattr(agent, "infer_eval_goals"):
+        # psmgoal: the relabel batch read as a goal set (its rewarding next states).
+        n_relabel = min(ds.size, int(payload["relabel_size"]))
+        zb = ds.sample(n_relabel)
+        agent = agent.infer_eval_goals(zb["next_observations"], zb["rewards"] + payload["reward_shift"])
 
     t0 = time.time()
     info, trajs, _ = evaluate(agent=agent, env=eval_env, config=config,
@@ -389,6 +414,9 @@ def main(cfg):
     config = ml_collections.ConfigDict(_lists_to_tuples(merged))
     name = config["agent_name"]
     assert cfg.restore_path is not None, "needs a trained checkpoint (restore_path)"
+    if config.get("acting") == "fixed_coeff":
+        check_fixed_coeff_npz(config.get("fixed_index_coeff_path"), cfg.env_name,
+                              str(cfg.restore_path), int(cfg.restore_epoch))
 
     n_ep = int(cfg.eval_episodes)
     base_seed = int(cfg.seed)
@@ -455,9 +483,17 @@ def main(cfg):
         # `argmax` is the shipped rule. An ablation eval differs from the deployed one by
         # this string alone, so it has to be in the report, not only in the filename.
         sel = str(config.get("gpi_select", "argmax"))
-        src = ((f"gpi {sel} over (u, u') pairs, K={config.get('gpi_num_u')}")
-               if config.get("acting") == "gpi"
-               else f"amortized actor latent [{config.get('actor_mode', 'ddpg')}]")
+        if name == "psmgoal":
+            src = (f"psmgoal argmax over K={config.get('gpi_num_u')} u of the goal-averaged "
+                   f"measure, K_g={config.get('k_goals')} rewarding goals")
+        elif config.get("acting") == "gpi":
+            src = f"gpi {sel} over (u, u') pairs, K={config.get('gpi_num_u')}"
+        elif config.get("acting") == "fixed_coeff":
+            # PSM Eq. 10 (2026-09-15): one fitted coefficient c in place of the u' panel.
+            src = (f"fixed_coeff argmax over K={config.get('gpi_num_u')} u at c from "
+                   f"{config.get('fixed_index_coeff_path')}")
+        else:
+            src = f"amortized actor latent [{config.get('actor_mode', 'ddpg')}]"
         mode = f"decode({src}) — action branch disabled"
     elif rank_k == 1:
         mode = "decode-only control: one actor draw, decoded, no residual, no selection"
@@ -492,10 +528,13 @@ def main(cfg):
         "agent_config_source": prov,
         "gpi_select": config.get("gpi_select"),
         "gpi_num_u": config.get("gpi_num_u"),
+        "k_goals": config.get("k_goals"),
+        "constraint_coef": config.get("constraint_coef"),
         "gpi_topm": config.get("gpi_topm"),
         "gpi_index_seed": config.get("gpi_index_seed"),
         "policy_index": config.get("policy_index"),
         "train_actor": config.get("train_actor"),
+        "fixed_index_coeff_path": config.get("fixed_index_coeff_path"),
         # Added 2026-09-06: three switches that change WHICH policy is being evaluated and
         # were previously recoverable only from the run's flags.json. `psi_form` picks the
         # measure head, `index_agg` picks how its policy slot is aggregated, and

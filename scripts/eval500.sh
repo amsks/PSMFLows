@@ -5,7 +5,7 @@
 # these JSONs -- never from the 50-episode in-loop evals, whose 95% CI is about +/-0.115.
 #
 # Usage:
-#   GPU=0 bash scripts/eval500.sh psmflow cube <run_dir> <out_name> [extra hydra args]
+#   GPU=0 bash scripts/eval500.sh psmflow|psmgoal cube <run_dir> <out_name> [extra hydra args]
 #   GPU=0 bash scripts/eval500.sh bc      cube -         <out_name>
 #
 # No arm flags are needed on the CLI: tools/eval_checkpoint.py takes the agent config from
@@ -49,14 +49,14 @@ main() {
   # has not finished yet). Whatever it is, it is recorded in the report JSON's restore_epoch.
   RESTORE_EPOCH="${RESTORE_EPOCH:-500000}"
 
-  MODE="${1:?psmflow|bc}"
+  MODE="${1:?psmflow|psmgoal|bc}"
   ENVKEY="${2:?cube|antmaze|pointmaze|scene}"
   RUN_DIR="${3:?run dir, or - for bc}"
   OUT="${4:?output json basename}"
   shift 4
   EXTRA=("$@")
 
-  case "$MODE" in psmflow|bc) ;; *) echo "unknown mode: $MODE" >&2; exit 1 ;; esac
+  case "$MODE" in psmflow|psmgoal|bc) ;; *) echo "unknown mode: $MODE" >&2; exit 1 ;; esac
 
   # Paths default to midi-01, where every earlier eval500 JSON was produced. On another
   # machine (KISSKI/SLURM) override them in the environment rather than editing this file:

@@ -1,0 +1,54 @@
+# psmgoal: goal-indexed affine successor measure over the frozen flow's latents
+# (docs/design/2026-09-17-psmgoal.md; agents/psmgoal.py mirrors these in get_config()).
+#
+#   M(s,u,s+) = phi(s,u,s+)^T w*(g) + b(s,u,s+),   w*(g) = h(g) / ||h(g)||
+#
+# phi, b: one ensembled trunk on the concatenated triple with two heads (no A/beta split, no
+# state basis). Fitted by contrastive TD on an N x (n_neg + 1) matrix (column 0 = the row's
+# own s'), bootstrapped at the pessimistic argmax of the TARGET goal value over n_backup prior
+# draws. h climbs the goal value M(s,u,g); with constraint_coef > 0 it also pays
+# constraint_coef * mean_ij l_ij * max(-M_ij, 0) over the negatives and the per-triple
+# multiplier l does ascent on that penalty. Same frozen flow, same preimage npz as psmflow.
+agent_name: psmgoal
+batch_size: 1024
+z_dim: 128                 # D, the width of phi and of w*(g)
+num_parallel: 2            # P, the (phi, b) ensemble size
+discount: 0.98             # gamma; also the hindsight-goal geometric horizon (p = 1 - discount)
+tau: 0.01                  # Polyak rate of the (phi, b) target
+pessimism: 0.5             # mean - pessimism * spread over P; exact min at P=2
+
+lr_phi: 1.0e-4             # phi, b
+lr_h: 1.0e-4               # h, the coefficient encoder
+lr_l: 3.0e-5               # l, the multiplier (<= lr_h)
+
+# 0 = loss_h is -obj exactly and l is never stepped; 1 = the constrained arm.
+constraint_coef: 0.0
+n_backup: 8                # prior draws the backup latent u'(s') is the argmax over
+n_neg: 32                  # C, negative columns (other rows' next states) per row
+k_goals: 32                # K_g, size of the eval goal set G (rewarding relabel rows)
+goal_random_frac: 0.3      # fraction of hindsight goals replaced by random dataset states
+
+measure: {hidden_dim: 512, hidden_layers: 2}   # phi, b trunk on [s, u, s+]
+coef:    {hidden_dim: 256, hidden_layers: 2}   # h
+mult:    {hidden_dim: 256, hidden_layers: 2}   # l
+
+# Frozen behaviour flow (must match the Stage-A fql bc_only run).
+flow:
+  hidden_dims: [512, 512, 512, 512]
+  value_hidden_dims: [512, 512, 512, 512]
+  layer_norm: false
+  critic_layer_norm: true
+flow_ckpt_path: null
+flow_ckpt_epoch: null
+allow_untrained_flow: false
+preimage_path: null
+use_point_preimage: true
+
+u_clip: 3.0                # typical-set clamp on every latent draw
+gpi_num_u: 64              # prior draws the acting argmax scans per step
+gpi_decode: onestep        # onestep | ode
+flow_decode_steps: 10
+
+ob_dims: null
+action_dim: null
+encoder: null

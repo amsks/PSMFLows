@@ -14,7 +14,8 @@ What is pinned here:
   - A and beta do not see the policy index (Assumption `affine`), so a psi difference
     across u' at fixed (s,u) lives in the column space of A alone;
   - the head takes a finite step in both shipped arms (strict GPI and latent actor);
-  - psi_form=affine with policy_index=task_vector is refused, not silently mis-typed;
+  - psi_form=affine with policy_index=task_vector builds with w_enc over the task vector
+    (Section 10 on the affine head, 2026-09-14), A and beta still index-free;
   - acting works in both modes;
   - the collapse diagnostics (w_enc_spread, psi_q_*_rel) are emitted in-loop.
 """
@@ -142,9 +143,25 @@ def test_actor_arm_takes_a_finite_step():
                        jax.tree_util.tree_leaves(agent2.actor.params))), "actor did not train"
 
 
-def test_affine_with_a_task_vector_index_is_refused():
-    with pytest.raises(AssertionError, match="psi_form=affine requires policy_index=latent"):
-        _agent(psi_form="affine", policy_index="task_vector")
+def test_affine_with_a_task_vector_index_encodes_the_task_vector():
+    """Section 10 on the affine head (2026-09-14): the index slot carries the z_dim task
+    vector, w_enc encodes THAT into R^{w_dim}, and A/beta still take no index."""
+    agent = _agent(psi_form="affine", policy_index="task_vector", train_actor=True, acting="actor")
+    z, w_dim = agent.config["z_dim"], agent.config["affine"]["w_dim"]
+    rng = np.random.default_rng(3)
+    obs = rng.standard_normal((4, OBS)).astype(np.float32)
+    u = rng.standard_normal((4, ACT)).astype(np.float32)
+    w_task = rng.standard_normal((4, z)).astype(np.float32)
+    w_enc = np.asarray(agent.psi(w_task, method="encode_index"))
+    assert w_enc.shape == (4, w_dim)
+    np.testing.assert_allclose(np.linalg.norm(w_enc, axis=-1), 1.0, rtol=1e-5)
+    A, beta = agent.psi(obs, u, method="sa_terms")                 # no index argument
+    assert np.asarray(A).shape == (agent.config["num_parallel"], 4, z, w_dim)
+    assert np.asarray(beta).shape == (agent.config["num_parallel"], 4, z)
+    assert np.asarray(agent.psi(obs, w_task, u)).shape == (agent.config["num_parallel"], 4, z)
+    _, info = agent.update(_batch())
+    for k in ("psm_loss", "actor_loss", "actor_q"):
+        assert math.isfinite(float(info[k])), (k, info[k])
 
 
 def test_unknown_psi_form_is_refused():

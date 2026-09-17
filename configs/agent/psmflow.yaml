@@ -59,6 +59,13 @@ lr_actor_vf: 3.0e-4
 # Diagnostic continuation switch. false holds the full phi TrainState fixed and uses its
 # online parameters as target_phi while psi and the affine index encoder keep training.
 train_phi: true
+# Take phi's parameters from ANOTHER run's params_<phi_restore_epoch>.pkl (2026-09-15,
+# Fix 1): the checkpoint's online phi goes into phi and target_phi, its optimiser state is
+# not carried, nothing else is read from it. Pair with train_phi=false to train a scalar
+# critic on phi(s')^T w with a finished measure run's basis held fixed. Same glob
+# convention as restore_path (exactly one run directory). null = phi starts at its init.
+phi_restore_path: null
+phi_restore_epoch: null
 
 phi:
   hidden_dim: 256
@@ -132,6 +139,12 @@ acting: gpi                # gpi | actor. DEFAULT gpi: the write-up's Sec. PSMFl
                            # actor at all. `actor` selects the amortized latent actor above
                            # (DSRL-style); it is a non-default switch, kept for the planned
                            # DSRL-NA distillation of the GPI argmax into an amortized head.
+# acting=fixed_coeff (2026-09-15, EVAL ONLY): PSM's test-time policy (arXiv 2411.19418
+# Eq. 10). The affine head is read at ONE coefficient c in R^{w_dim} in place of w(u'),
+# psi = A(s,u)^T c + beta(s,u), and each step is the argmax over gpi_num_u prior draws u of
+# [mean - kappa*unc] psi^T w. `c` comes from this npz (tools/infer_policy_lagrangian.py),
+# fitted per (checkpoint, task); null leaves every other acting mode untouched.
+fixed_index_coeff_path: null
 
 # psi's index slot. `latent` (DEFAULT) is the write-up's psi(s, u, u') — a fresh u' ~ p0 per
 # batch element indexes the policy, the backup continues that SAME u' at s' (so the bootstrap
@@ -160,6 +173,25 @@ affine:
   encoder_hidden: 256      # w(.) encoder width (PhiMap shape)
   encoder_layers: 2
   norm_w: true             # w(u') on the UNIT sphere: pins the (cA, w/c) scale degeneracy
+# --- Fix 2 (2026-09-15), both OFF by default: 0.0 / false reproduce the published loss and
+# head expression for expression. docs/design/2026-09-14-flow-psm-dsrl-paper-versions.md,
+# "Fixes launched 2026-09-15", has the diagnostic they answer (the measure fits its own
+# Bellman equation to 4% of spread yet its readout psi^T w is ~uncorrelated with a scalar
+# TD critic on the same reward, and its within-state spread over u sits below its residual).
+# Scalar grounding: weight on the readout's PROJECTED Bellman loss, added to the measure
+# loss with gradient to psi only (phi stop-gradded in the reward term):
+#     ( psi(s,u,z)^T z - gamma [mean - kappa unc](psibar(s',u+,z)^T z) - sg(phi(s'))^T z )^2
+#       / Var_batch[ sg(phi(s')^T z) ]
+# z = the row's sampled task vector, u+ the bootstrap latent the measure loss uses. The
+# ICLR draft's scalar Bellman equation along w and Meta Motivo's `q_loss` on F^T z. The
+# variance normalisation makes coef = 1 "the same weight as a unit-variance TD loss".
+psm_scalar_coef: 0.0
+# Dueling affine head: psi(s,u,z) = V(s,z) + Adv(s,u,z) - mean_k Adv(s,u_k,z) over
+# psi_dueling_samples clipped prior latents u_k ~ N(0, I), the two towers sharing w(z)
+# (V: beta_V(s) + A_V(s)^T w(z); Adv: the existing A(s,u), beta(s,u)). A and beta stay
+# independent of z. Requires psi_form=affine.
+psi_dueling: false
+psi_dueling_samples: 8
 # Train the amortized latent actor. false (DEFAULT) drops the actor/CFM branch entirely; the
 # write-up's Sec. PSMFlows has no actor. Only valid with acting=gpi.
 train_actor: false
@@ -245,6 +277,47 @@ dsrl_na:
   # arguments, so this is literally "append w". Requires reward_source=synthetic_w, and
   # create() refuses either half without the other.
   task_conditioned: false
+  # Fix 1 (2026-09-15). true: qa's TD target uses mask = 1 on every row, the CONTINUING
+  # formulation. A synthetic reward phi(s')^T w differs from any reward the task actually
+  # pays by a per-w constant offset, and a constant offset changes no policy only when no
+  # episode terminates: with the dataset masks on, the 09-14 raw-r_hat arm (mean reward
+  # +3.95, mask 0 at success) valued staying alive above finishing and scored 0.010.
+  # false = the dataset masks, every DSRL-NA number before this date.
+  ignore_masks: false
+  # Multiplier on the synthetic reward phi(s')^T w (reward_source: synthetic_w only). The
+  # raw readout has std ~10 over the dataset against the real -1/0 reward's ~0.14, and the
+  # critic widths, tau and alpha were tuned at the latter scale. 1.0 = the raw readout.
+  reward_scale: 1.0
+
+# Reference PSM critic (2026-09-14): the proto successor-measure stage of arXiv 2411.19418
+# on latent inputs, with the existing psi as PSM's separate reward-conditioned SF head.
+# OFF by default, and `enabled: false` leaves the agent bit-for-bit as before: the proto
+# tower is built (static pytree) but never sampled for, stepped or read. ON:
+#   proto_psi(s, z_bin, u)   a second PsiMap whose index slot is a binary code z_bin of
+#                            width max_log_seed. Its TD target continues the FIXED
+#                            pseudo-random LATENT policy keyed on (dataset row, z_bin):
+#                              seed    = (z_bin . powers + row) mod (2^max_log_seed + 20000)
+#                              u_proto = clip(N(0, I) at fold_in(PRNGKey(proto_seed), seed), +-u_clip)
+#                            -- the reference ProtoBehaviorSampler arithmetic with its
+#                            uniform action table replaced by a prior latent, so every
+#                            bootstrap G(s', u_proto) stays a flow decode. This stage trains
+#                            phi (with the ortho term) and proto_psi; both have targets.
+#   psi(s, w, u)             becomes the SF head: fitted on phi STOP-GRADDED, its target
+#                            measure read at the ONLINE phi the proto stage just stepped
+#                            (reference _update_sf), bootstrap latent = the actor's at s'.
+#                            No ortho term (the reference multiplies its copy by 0).
+# Update order: proto (phi + proto_psi) -> SF (psi) -> actor; polyak after each stage.
+# Requires policy_index=task_vector and train_actor=true. main.py switches on
+# dataset.return_index so batch['index'] carries the row the proto policy is keyed on.
+# utils/psm_proto.py holds the arithmetic; tests/test_psmflow_psm_ref.py pins it.
+proto:
+  enabled: false
+  max_log_seed: 16         # width of the binary proto code (reference: 16)
+  proto_seed: 0            # PRNGKey of the proto latent family. NOT the run seed: the
+                           # reference's action table is a constant of the code, identical
+                           # in every run, so the policy family must not vary with the seed
+  lr: 1.0e-4               # proto_psi's Adam rate (reference: lr_sf)
+  ortho_coef: null         # ortho weight in the proto stage; null = the agent's ortho_coef
 
 # Action branch: w-conditioned successor features over EXECUTED
 # actions (psi_a shares phi and the w machinery) + an eps-bounded residual head.
@@ -285,6 +358,16 @@ residual:
 # published (it only ever evaluates the actor's own latent). Raising it makes psi see the
 # wider family: the fix direction for the flat-Q finding in logs/d3_q_landscape_cube.json.
 backup_explore_frac: 0.0
+
+# What fills the backup's ACTION slot at s' (2026-09-16). `index` (DEFAULT) is the backup as
+# published: u' itself under policy_index=latent, the actor's latent under task_vector.
+# `gpi_argmax` (task_vector only) is EMaQ's max-over-behaviour-samples backup: argmax over
+# bootstrap_candidates clipped prior draws of [mean - pessimism_penalty*unc]
+# psi_target(s', w, u_m)^T w, so psi(s, w, u) is the successor measure of "take u, then act
+# by GPI-under-w" -- the policy that is actually deployed. Cost: bootstrap_candidates psi
+# forwards per batch row.
+bootstrap: index            # index | gpi_argmax
+bootstrap_candidates: 8
 
 # FROZEN behavior flow — must match the Stage-A `agent=fql agent.bc_only=true` run.
 flow:

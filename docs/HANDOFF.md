@@ -18,7 +18,1836 @@ hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RES
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
 Branch: `feat/inversion-integration` · Machine: `kisski` (GWDG, SLURM/H100) · prior: `midi-01` (UT CS)
-Date: **2026-09-11** (latest) · prior: 2026-09-10, 2026-09-09, 2026-09-08, 2026-09-07, 2026-09-06, 2026-09-05, 2026-09-04, 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+Date: **2026-09-17** (latest) · prior: 2026-09-16, 2026-09-15, 2026-09-14, 2026-09-11, 2026-09-10, 2026-09-09, 2026-09-08, 2026-09-07, 2026-09-06, 2026-09-05, 2026-09-04, 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+
+---
+
+## 2026-09-17 (eval) — psmgoal five-task result: negative
+
+All 6 runs (jobs 2518992-97) finished at 1M steps, scale-anchored, TD stable throughout
+(measure capped at 2D, `w_norm` 11.31). Five-task eval500 (500 episodes/task, 3 seeds):
+
+| arm | 250k | 500k | 750k | 1M |
+|---|---|---|---|---|
+| nocon (constraint_coef 0) | 0.075 ±0.078 | 0.057 ±0.105 | 0.002 ±0.003 | 0.002 ±0.003 |
+| con (constraint_coef 1) | 0.118 ±0.131 | 0.007 ±0.010 | 0.004 ±0.004 | 0.029 ±0.031 |
+
+Best cell con 250k 0.118, at the BC level (0.111) and inside its CI; no cell reaches 0.284.
+Pre-registered reading met: both arms <= 0.284 with stable TD. The goal-indexed affine
+successor measure over flow latents does not carry a goal-reaching value on cube. The
+constraint does not change the verdict (con ~ nocon within noise). Both arms decay from 500k
+on; the 250k checkpoint acts better than 1M. Seed variance is large. Comparators: BC 0.111,
+EMaQ 0.282, 2P-GPI 0.328, FB 0.496, HILP 0.742. Spec + telemetry: `docs/design/2026-09-17-psmgoal.md`.
+
+Eval-pipeline note: the psmgoal eval watcher (`/tmp/psmflow_psmgoal/psmgoal_evals.sh`) submitted
+nothing in 13h — it ran a stale copy, used `MODE=psmflow` (the checkpoints are `agent=psmgoal`,
+which trips the eval's agent-name assertion), and relied on `--export=ALL` for `PSM_REPO` which
+was not in its shell. Resubmitted directly with `MODE=psmgoal` and explicit `PSM_REPO`
+(scratchpad `submit_psmgoal_evals.sh`), smoke-checked one JSON, then all 120. JSON names
+`psmgoal_cube_{nocon,con}_sd00{k}_{ep}_task{t}.json` in `$PSM_DATA/logs`.
+
+## 2026-09-17 — handoff: every arm's state, the psmgoal build in flight, and how to pick this up
+
+Branch `fix/psmflow-paper-strict` (worktree `.claude/worktrees/psmflow-fix`; all SLURM jobs
+import from it). Data root `$PSM_DATA=/mnt/home/amohan/psm-data`; eval JSONs in
+`$PSM_DATA/logs`; SLURM logs in `$PSM_DATA/logs/slurm`. Cluster: KISSKI, partition
+`kisski-inference`, account `general`, one GPU per job. Five-task means over 500 episodes per
+task are the only numbers quoted.
+
+**Correction to the 09-16 entry above.** The 24 phase-2 cancellations it records as "an
+external interruption" were deliberate, user-approved cuts made in this session: the DSRL
+variant (0.04–0.14 five-task on the 500k bases, 12 cells; probe 0.131) at 13:28; the 2M and
+1.5M bases (joint phi already collapsed by 1.5M: sd0 task-3 0.026) at 13:40–13:48; the
+50k/100k/250k/3M eval steps and phase-1 evals; and a STOP2M rule that cancelled each GPI run
+once its `params_2000000.pkl` landed. Reasons and numbers: `docs/design/2026-09-15-psmflows-2p.md`
+("2026-09-16" sections) and the watcher log `/tmp/psmflow_2p_main/p2_watcher.log`.
+
+### Where the number stands
+
+| arm | five-task cube | source |
+|---|---|---|
+| 2P-GPI, 500k basis, psi 500k (3 seeds) | 0.328 ± 0.264 (0.439 / 0.318 / 0.227) | `p2_gpi_phi500k_sd00k_500000_task*.json` |
+| same, pooled with Task A (6 cells, step fixed in advance) | 0.324 ± 0.092 | design doc |
+| 2P-GPI ladder, 500k basis, psi 500k / 1M / 2M | 0.328 / 0.250 / 0.274 | grid closed 09-17 00:34 |
+| 2P-GPI ladder, 1M basis | 0.279 / 0.155 / 0.231 | basis age does not help |
+| EMaQ (`bootstrap=gpi_argmax`, task-vector index), psi 250k / 500k / 750k / 1M | 0.233 / 0.173 / 0.243 / **0.282 ± 0.147** (runs complete; task 1 0.42-0.86, task 3 0.49-0.67, task 2 0.02-0.27) | `emaq_phi500k_sd00k_*_task*.json` |
+| joint affine GPI (previous best) | 0.284 | results.md |
+| BC / FB (TD-JEPA) / HILP (TD-JEPA) | 0.111 / 0.496 / 0.742 | |
+
+Settled negative this week, with the reason on record: Eq. 10 coefficient inference on the
+frozen affine head (linear objective, inert row multipliers, deployed as the fixed-index
+mode; 0.000–0.012), RLDP basis (0.175 vs 0.320 frozen-own), 2P-DSRL, freeze-phi, basis
+age, psi length. Memory files carry the one-line versions.
+
+### What is running / in flight right now
+
+- `emaq_phi500k` sd0/1/2, jobs 2518887/88/89, 1M psi steps, ~9 h in at 30 it/s; the 1M
+  checkpoint lands imminently. `/tmp/psmflow_emaq/emaq_evals.sh` (pid 2746579, nohup) submits
+  the five-task eval500 at 250k/500k/750k/1M as checkpoints land and exits on ALLDONE; its
+  log is `/tmp/psmflow_emaq/emaq_evals.log`. If it is gone, resubmit by hand with
+  `scripts/slurm/eval500.sbatch` (MODE=psmflow, ENVKEY=cube, RUN_DIR, OUT, RESTORE_EPOCH,
+  ENV_NAME=cube-single-play-singletask-task{t}-v0). Design doc with the ladder:
+  `docs/design/2026-09-16-emaq-backup.md`.
+- **psmgoal build, in flight by a subagent** (uncommitted at the time of writing: new
+  `agents/psmgoal.py`, `configs/agent/psmgoal.yaml`, edits to `agents/__init__.py`, `main.py`,
+  `scripts/eval500.sh`, `tools/eval_checkpoint.py`, `utils/datasets.py`, `utils/psm_common.py`,
+  `utils/psm_networks.py`). Spec: `docs/design/2026-09-17-psmgoal.md` — read it first; the
+  notation collation behind it is `docs/design/2026-09-16-goal-indexed-measure.md`. The
+  subagent was told: TDD with `tests/test_psmgoal.py` and `tests/test_hindsight_goals.py`, no
+  A/beta split (general `phi_theta(s,u,s+)`, `b_theta(s,u,s+)` on the triple), `w*(g) =
+  h_theta(g)/||h_theta(g)||`, per-triple softplus multiplier `l_theta` behind
+  `constraint_coef`, EMaQ backup over 8 prior draws, goal-set inference at eval
+  (`infer_eval_goals`), commit with no AI attribution, no SLURM launch. To check its state:
+  `git log --oneline -5`, `git status --short`, then per file
+  `JAX_PLATFORMS=cpu .venv/bin/python -m pytest tests/test_psmgoal.py -q -p no:cacheprovider`
+  (never the whole suite in one process). If the work is half done and untested, finish it
+  against the spec's test list before anything else.
+
+### psmgoal launched 2026-09-17 00:58 (commit `8e5a292`, smoke passed, table in the spec doc)
+
+First launch (2518981-86) diverged — the measure had no scale anchor (positive column at
+3e5 by 10k steps) — and was cancelled at ~15k steps; fix in commit `cfbb285` (phi and w*(g) on
+the sqrt(D) sphere, b bounded by D tanh(b/D)), recorded in the spec doc. **Relaunched 01:11:**
+`psmgoal_cube_nocon` sd0/1/2 = 2518992/93/94, `psmgoal_cube_con` sd0/1/2 = 2518995/96/97,
+1M steps, save 250k, walltime 1-12:00:00. The cancelled runs' directories (jids 2518981-86)
+still exist under the same groups; the newest directory per seed is the live one. Eval submitter `/tmp/psmflow_psmgoal/psmgoal_evals.sh`
+(nohup; log `psmgoal_evals.log`; marks under `/tmp/psmflow_psmgoal/marks`) submits five-task
+eval500 at 250k/500k/750k/1M per run; reports land as
+`$PSM_DATA/logs/psmgoal_cube_{nocon,con}_sd00k_{step}_task{t}.json`. Results go into
+`docs/design/2026-09-17-psmgoal.md` against its pre-registered readings.
+
+### The launch gates, for reference (already passed for the runs above)
+
+1. CPU smoke, 200 steps, exact flags (the subagent's report gives the command; pattern is the
+   `main.py agent=psmgoal ...` line with `agent.flow_ckpt_path=$PSM_DATA/flow/cube-single-play
+   agent.flow_ckpt_epoch=500000 agent.preimage_path=$PSM_DATA/preimages/cube-single-play.npz
+   env_name=cube-single-play-singletask-v0 offline_steps=200 eval_episodes=0
+   save_dir=$PSM_DATA/exp_smoke`). Confirm `flags.json` and that `train.csv` logs `psm_loss`,
+   `obj`, `pen`, `viol_frac`, `mult_mean`, `backup_adv`, `w_norm` (must read 1.0),
+   `td_target_absmean`.
+2. Print the hyperparameter table (spec §Flags) in the design doc before submitting.
+3. Submit 3 seeds × 2 arms with `scripts/slurm/train_psmflow.sbatch` and `AGENT=psmgoal`:
+   `--export=ALL,PSM_REPO=<worktree>,PSM_DATA=/mnt/home/amohan/psm-data,OGBENCH_DATASET_DIR=/mnt/home/amohan/.ogbench/data,ENVKEY=cube,PREIMAGES=$PSM_DATA/preimages/cube-single-play.npz,AGENT=psmgoal,SEED=k,GROUP=psmgoal_cube_{nocon|con},STEPS=1000000,SAVE_INT=250000,EVAL_INT=50000,EVAL_EPS=50,LOG_INT=5000,EXTRA="agent.constraint_coef={0|1}"`,
+   `--time=1-12:00:00`. Then re-read each run's `flags.json`.
+4. Copy `/tmp/psmflow_emaq/emaq_evals.sh`, change `G=` to each group, run under nohup.
+5. Pre-registered readings are in the spec; write results into the spec's doc.
+
+### Paused
+
+Rollout videos (`tools/eval_checkpoint.py` `video_episodes`/`video_dir`): tests written and RED
+in `tests/test_eval_videos.py` (writer `write_render_videos` + `evaluate(...,
+return_render_infos=True)` in `utils/evaluation.py`), implementation not started. Approved
+render set: cube 2P-GPI `p2_gpi_phi500k/sd000` @500k tasks 1–5 ×3, cube BC tasks 2,4 ×3,
+antmaze `affine_strict_antmaze_g99/sd002` @250k task 1 ×4, antmaze BC ×3, EMaQ sd0 @250k
+tasks 2,4 ×2; contact-sheet PNGs (5 frames) per episode so the agent can read them.
+
+### Working agreements from this session (the user was explicit)
+
+- Only the zero-shot PSM policy's five-task number counts; BC and reward-labelled arms do not.
+- Do not launch experiments unprompted; present the hyperparameter table and expected
+  outcomes, get a yes, smoke, launch, re-read flags.json.
+- Notation in every explanation: `u` action, `u'` policy index, `w(u')` coefficient,
+  `phi(s,u,s+)`, `b(s,u,s+)`, `l(s,u,s+)` multipliers, `theta` for anything trained. Do not
+  introduce other symbols, do not use the `A`/`beta` split or a separate state basis when
+  writing the objective, do not add modelling the user did not ask for.
+- Flat declarative reporting; numbers in tables; what it shows / what it does not show.
+
+---
+
+## 2026-09-16 — PSMFlows-2P: refit psi on a frozen basis; basis age and psi length both flat or negative
+
+Branch `fix/psmflow-paper-strict`. Design doc: `docs/design/2026-09-15-psmflows-2p.md` (all
+tables, per-seed cells, ladders and the cancellation record). Every number here was
+recomputed from the eval JSONs in `$PSM_DATA/logs`; 500 episodes per task, five tasks,
+`num_episodes` asserted at 500 in every file read.
+
+**The recipe.** PSMFlows-2P is two phases on the frozen behaviour flow.
+
+- Phase 1 trains the default affine agent end to end, phi and psi together.
+- Phase 2 loads phi from a phase-1 checkpoint, freezes it, re-initialises psi and trains psi
+  from scratch. Flags: `agent.phi_restore_path`, `agent.phi_restore_epoch`,
+  `agent.train_phi=false`. Only the online phi parameters are read; no optimiser state, no psi.
+- 2P-GPI is the paper-strict agent on the frozen basis (`psi_form=affine`,
+  `policy_index=latent`, `acting=gpi`, `u_clip=3.0`).
+- 2P-DSRL adds `policy_index=task_vector train_actor=true acting=actor actor_mode=dsrl_sac
+  actor.bc_coeff=0.0 actor.target_entropy=-3.4657`.
+
+Phase-2 seed k always uses phase-1 seed k's basis.
+
+**Runs.** The plan was 2 variants x 4 bases x 3 seeds = 24 phase-2 runs at 3M psi steps. An
+external interruption cancelled all 24 SLURM jobs on 2026-09-16 between 13:28:55 and
+19:15:47 (`CANCELLED by 10025`). This record does not attribute the cancellations.
+
+| arm | jobs | started | last psi step | 500-episode evals on disk |
+|---|---|---|---|---|
+| phase 1 joint, 2M | 2518506-08 | yes | 2.000M, COMPLETED | 500k, 1M (3 seeds); 1.5M (sd0, sd2) |
+| 2P-GPI 500k basis | 2518522/29/36 | yes | 2.000M / 2.015M / 2.025M | 50k, 100k, 250k, 500k, 1M, 2M |
+| 2P-GPI 1M basis | 2518640/47, 2518633 | yes | 2.005M / 2.015M / 2.000M | same, 2M only sd1 and sd2 |
+| 2P-GPI 1.5M basis | 2518783/95, 2518776 | sd0, sd2 | 690k / -- / 725k | none |
+| 2P-GPI 2M basis | 2518861/65, 2518858 | no | -- | none |
+| 2P-DSRL 500k basis | 2518523/30/37 | yes | 1.380M / 1.415M / 1.385M | 50k, 100k, 250k, 500k |
+| 2P-DSRL 1M basis | 2518641/48, 2518634 | yes | 965k / 940k / 980k | 50k, 100k, 250k |
+| 2P-DSRL 1.5M basis | 2518784/96, 2518777 | sd0, sd2 | 540k / -- / 550k | none |
+| 2P-DSRL 2M basis | 2518862/66, 2518859 | no | -- | none |
+
+Basis checkpoints at 500k, 1M, 1.5M and 2M remain on disk for all three phase-1 seeds, as do
+all phase-2 checkpoints written before the cancellation.
+
+**Consolidated five-task cube.** Mean over the five tasks per seed, then a t interval over
+the seed means (df 2; df 1 on rows marked n=2).
+
+| arm | 50k | 100k | 250k | 500k | 1M | 2M |
+|---|---|---|---|---|---|---|
+| phase 1 joint | -- | -- | -- | 0.261 ± 0.206 | 0.192 ± 0.381 | -- |
+| 2P-GPI, 500k basis | 0.173 ± 0.246 | 0.093 ± 0.111 | 0.287 ± 0.317 | **0.328 ± 0.264** | 0.250 ± 0.418 | 0.274 ± 0.192 |
+| 2P-GPI, 1M basis | 0.215 ± 0.242 | 0.059 ± 0.108 | 0.242 ± 0.310 | 0.279 ± 0.137 | 0.155 ± 0.130 | 0.250 ± 0.719 (n=2) |
+| 2P-GPI, task A shared basis | 0.247 ± 0.084 | 0.100 ± 0.084 | -- | 0.320 ± 0.218 | -- | -- |
+| 2P-DSRL, 500k basis | 0.125 ± 0.039 | 0.100 ± 0.121 | 0.072 ± 0.035 | 0.090 ± 0.111 | -- | -- |
+| 2P-DSRL, 1M basis | 0.129 ± 0.029 | 0.104 ± 0.014 | 0.088 ± 0.038 | -- | -- | -- |
+
+The phase-1 joint run at 1.5M reads 0.182 ± 1.428 on two seeds. References: joint affine GPI
+pooled 0.284, BC control 0.111, FB 0.496.
+
+**Reading 1: refit does not beat joint training.** 2P-GPI on a 500k basis reads 0.328 ± 0.264
+at 500k psi. The joint runs that produced those bases read 0.261 ± 0.206 at their own 500k
+step, and the older pooled joint reference is 0.284. The intervals overlap.
+
+**Reading 2: longer psi training does not help.** Both bases read their highest five-task
+mean at 500k psi steps and fall after it (500k basis 0.328 -> 0.250 at 1M; 1M basis 0.279 ->
+0.155 at 1M). All three 1M-basis seeds fall from 500k to 1M; two of three 500k-basis seeds
+fall. `td_target_absmean` and `psm_loss` rise with psi steps in all six runs, in the seeds
+that rose and the seeds that fell, so neither gives a reward-free stopping rule. Three seeds
+do not establish one either way.
+
+**Reading 3: basis age changes nothing beyond seed spread.** 500k vs 1M basis reads 0.328 vs
+0.279 at 500k psi, 0.250 vs 0.155 at 1M psi, 0.274 vs 0.250 at 2M psi. The older basis is
+lower at all three steps and every interval covers the other cell. The 1.5M and 2M rungs are
+not answerable: no 500-episode evals exist for any 1.5M- or 2M-basis phase-2 run.
+
+**2P-DSRL, partial.** At or below the BC control 0.111 at every step measured, except the two
+50k cells (0.125 and 0.129). It is below 2P-GPI in 5 of the 7 matched cells; the two
+exceptions are the 100k psi cells, where both arms sit at their own minimum. Successes are
+concentrated on task 1 (0.23-0.41) and task 3 (0.09-0.33); tasks 2, 4 and 5 read 0.00-0.03 in
+every cell. This matches the pre-registered expectation and every earlier measure-as-critic
+actor arm.
+
+**Two things found while checking the data.**
+
+1. Phase-1 seed 0 diverged after about 1.1M steps. Its phi Gram condition number goes 5.67 at
+   600k, 11.9 at 1M, 587 at 1.2M, 4.58e5 at 1.4M, 1.28e14 at 1.8M; `psm_loss` reaches 6.73e10
+   at 2M. Seeds 1 and 2 stay at Gram condition 4-6 through 2M. The seed-0 bases at 1.5M and
+   2M are degenerate, so the basis-age axis could not have been read past 1M on that seed
+   even without the cancellation.
+2. Phase-1 seed 1 reproduces `affine_strict_cube` seed 1 exactly (`psm_loss` 1588.7823 at 50k
+   in both), so `p2_gpi_phi500k` sd1 and `cube_frozen_own_phi_gpi` sd1 are one run under two
+   names, with 15 bit-identical eval cells. The two groups cannot be pooled as independent.
+
+Commits: this entry and the design-doc results section. Prior 2P commits: 583fcbd (the
+`bootstrap=gpi_argmax` seam and the emaq launch), dc678d5 and 0a6e277 (the 500k- and
+1M-basis ladders as they stood mid-schedule), d53d118 (emaq 250k).
+
+---
+
+## 2026-09-15 (evening) — handoff: where the PSMFlow failure sits, what is settled, what is in flight
+
+Branch `fix/psmflow-paper-strict`, worktree
+`/mnt/home/amohan/git/Austin/PSMFLows/.claude/worktrees/psmflow-fix`, HEAD 19afb30. This
+entry is the resume point. It links to the entries below for their tables and repeats no
+table already recorded. Sources: the three entries below (09-15 afternoon, 09-15 00:08,
+09-14 night), `docs/design/2026-09-15-policy-family-diversity.md` (3e579dc),
+`docs/design/2026-09-14-flow-psm-dsrl-paper-versions.md`,
+`docs/design/2026-09-14-paper-vs-code-diagnosis.md`, `docs/design/2026-09-15-rldp-phi-basis.md`
+(untracked at write time), `git log daa0268..HEAD`, `squeue -u amohan` at about 20:10.
+
+**1. State of the branch.** 30 commits since the branch point daa0268 (`feat/inversion-integration`
+HEAD), 30 files changed, +6384 / −66 lines, of which `docs/HANDOFF.md` is +718. Nothing is
+pushed. Grouped by kind:
+
+| kind | commits |
+|---|---|
+| diagnosis and design docs | 98cbce5 (paper-vs-code diff), 5d06aa3 (paper versions), 82429fa (five-task rule), b9f8e1a, 9b6ac38 (measure vs scalar Q), b470f47, 1d75240 (fixes launched), 43295b3 (policy-side), 3e579dc (diversity table) |
+| tools | 2c7189b, 5d06aa3 (`relabel_reward_rhat.py`), 76eb9cf (`utils/psm_proto.py`), cd371fc, 395475d, 92aba31 (`diag_measure_vs_scalar_q.py`), 28fac72 (`diag_policy_family_diversity.py`), 19afb30 (`pretrain_rldp_phi.py`) |
+| seams in `agents/psmflow.py` / `main.py` | 2c7189b (`dataset.reward_override_path`), ebb2a5c (affine head under `policy_index=task_vector`), e373ab7 + abbd1fd (`proto.enabled`), 98539ec (`phi_restore_path`, `dsrl_na.ignore_masks`, `dsrl_na.reward_scale`), 2cbd723 (`psm_scalar_coef`, `psi_dueling`), a3fc920 (`measure_action_input=action` with the task-vector index) |
+| arm launches | 98cbce5 (posterior latent), ebb2a5c (Section 10 free/affine), d51de4c (antmaze repeat), e373ab7 (reference-critic port), a3fc920 (Fix 3), d6c7bb1 (bc0 arms) |
+| handoff entries | a6b39dd, 0df9dcd, d547171, 7135157 |
+
+Working tree at write time: modified `agents/psmflow.py`, `configs/agent/psmflow.yaml`,
+`tools/eval_checkpoint.py` (the `acting=fixed_coeff` seam, uncommitted); untracked
+`tools/infer_policy_lagrangian.py`, `tests/test_infer_policy_lagrangian.py`,
+`tests/test_psmflow_fixed_coeff.py`, `docs/design/2026-09-15-rldp-phi-basis.md`. Two other
+agents own those files and were editing them when this entry was written. Commit only with
+an explicit pathspec.
+
+Merge note. The main checkout on `feat/inversion-integration` carries an uncommitted
+697-line modification of `docs/HANDOFF.md` (the 09-13 and 09-14 entries) plus untracked
+design and plan docs (`2026-09-08-critic-signal-and-dsrl-na.md`,
+`2026-09-11-affine-action-conditioning.md`, `2026-09-11-freeze-phi-diagnostic.md`,
+`2026-09-13-psm-interface-audit.md`, three plans). Both branches insert at the top of
+`docs/HANDOFF.md`, so the merge will conflict there; the resolution is to keep both sets of
+entries in date order.
+
+**2. The finding chain.**
+
+1. The measure loss in `agents/psmflow.py` is the paper's loss; the code-vs-paper deviations were listed and each was measured or shown rank-preserving (`docs/design/2026-09-14-paper-vs-code-diagnosis.md`; posterior latent measured 09-14).
+2. The flow, the inferred reward `r_hat = phi(s')^T w` and the preimages are cleared: a scalar Bellman critic on the scaled `r_hat` reaches the real-reward level on cube (0.867 vs 0.882, task 2) and antmaze (0.853 vs 0.979, task 1) (09-14 evening, 09-14 night).
+3. The measure `psi^T w` used as the critic is where the number drops: every measure-critic arm on cube scores 0.04–0.28 five-task against BC 0.111 and FB 0.496, on both loss forms (Section 10, reference PSM proto stage) and every fix tried (09-15 00:08, 09-15 afternoon).
+4. The measure fits its own Bellman equation (residual 4% of its spread) but its readout is close to flat along the action latent and moves 4–193 times more with the policy index; across states it agrees with the scalar critic at Spearman 0.10, within a state at 0.12 (design doc, "Diagnostic: measure value vs scalar Q" and "Policy-side diagnostic").
+5. The policies the index ranges over (one fixed noise vector repeated at every step) are distinct from each other and coherent, but all of them score below BC and their state clouds drift off the data's states, so the family GPI selects from holds no good member (`docs/design/2026-09-15-policy-family-diversity.md`).
+
+**3. Consolidated results: every five-task cube number produced on this branch.** 500
+episodes per task, 500k checkpoint, t interval over 3 seeds (df 2) unless stated. BC and
+FB/HILP are the references the method has to beat.
+
+| group | what | five-task mean ± CI | entry |
+|---|---|---|---|
+| BC control | frozen flow alone | 0.111 | 09-11 |
+| `affine_strict_cube` | affine GPI, the default agent (300k–500k window) | 0.284 | 09-06 / `docs/tables/results.md` |
+| FB | TD-JEPA Table 1 | 0.496 | — |
+| HILP | TD-JEPA Table 1 | 0.742 | — |
+| `cube_affine_posterior_u` | affine GPI, posterior-sampled dataset latent | task 2 only, 18 cells 250k–500k: 0.252 ± 0.057 vs point control 0.424 ± 0.076; not a five-task number, not quotable | 09-14 |
+| `cube_sec10_free_actor` | Section 10 actor, free psi | 0.171 ± 0.027 | 09-14 evening |
+| `cube_sec10_affine_actor` | Section 10 actor, affine psi (the template for the fixes) | 0.246 ± 0.041 | 09-14 evening |
+| `cube_psmref_actor` | reference PSM critic (proto stage) on latent inputs | 0.156 ± 0.023 | 09-15 00:08 |
+| `cube_fix1_scalar_tc` | task-conditioned scalar critic on frozen phi, DSRL-NA actor | 0.044 ± 0.014 | 09-15 afternoon |
+| `cube_fix2_scalar_only` | Section 10 affine + projected Bellman grounding (`psm_scalar_coef=1`) | 0.233 ± 0.031 | 09-15 afternoon |
+| `cube_fix2_scalar_dueling` | + dueling head (`psi_dueling=true`) | 0.219 ± 0.073 | 09-15 afternoon |
+| `cube_fix3_action_measure_actor` | Section 10 affine, measure at the decoded action | 0.217 ± 0.008 | 09-15 afternoon |
+| `cube_sec10_affine_bc0` | Section 10 affine, `actor.bc_coeff=0` | 0.038 ± 0.072 | 09-15 afternoon |
+| `cube_fix2_dueling_bc0` | Fix 2 dueling, `actor.bc_coeff=0` | 0.003 ± 0.014 | 09-15 afternoon |
+
+Single-task cube rows that belong with the table (task 2, 500 episodes, 500k, 3 seeds):
+`cube_dsrlna_rhat_scaled` (scalar critic on scaled `r_hat`) 0.867 ± 0.153 against the
+real-reward control 0.882 ± 0.121; `cube_dsrlna_rhat_frozen` (raw-scale `r_hat`) 0.010 ± 0.013
+(09-14 evening).
+
+Antmaze-medium-navigate rows (500 episodes per cell, 500k, 3 seeds):
+
+| group | what | number | entry |
+|---|---|---|---|
+| BC control | frozen flow alone | task 1: 0.072 | `docs/tables/results.md` |
+| `affine_strict_antmaze_g99` | affine GPI, discount 0.99 | task 1, 30-cell ladder: 0.294 ± 0.070 | 09-07 |
+| `antmaze_sec10_affine_actor` | Section 10 actor, affine psi | five-task: 0.105 ± 0.025 | 09-14 night |
+| `antmaze_dsrlna_rhat_scaled` | scalar critic on scaled `r_hat` | task 1: 0.853 ± 0.334 (control `dsrlna_antmaze` 0.979 ± 0.008) | 09-14 night |
+| FB / HILP | TD-JEPA Table 1 | five-task: 0.730 / 0.836 | — |
+
+**4. Mechanism tests.** Each row names the JSON that holds the full table.
+
+| test | what was measured | numbers | source |
+|---|---|---|---|
+| scalar critic on `r_hat` | DSRL-NA scalar Bellman critic fed the scale-matched inferred reward, same phi, w and flow as the measure arms | cube task 2 0.867 vs real 0.882; antmaze task 1 0.853 vs real 0.979 | 09-14 evening, 09-14 night |
+| measure vs scalar Q (`affine_strict_cube/sd001` vs `cube_dsrlna_rhat_scaled/sd001`, 10k rows x 64 latents) | Bellman residual of each critic on its own target; agreement of the two values at the same (s, u) | measure residual 4.2% of its spread, scalar 4.1%; across states Pearson 0.05 / Spearman 0.10; per-state Spearman over 64 u mean 0.12, 39% of states negative; measure argmax in the scalar top-8 on 33% of states (chance 12.5%); success rows at chance (rho 0.01) | `$PSM_DATA/logs/diag_measure_vs_scalar_q_cube_sd001.json`; design doc "Diagnostic: measure value vs scalar Q" |
+| policy-side (64 x 64 grid of action latent x index, 500 states, three checkpoints) | share of the readout's within-state variance on the index slot vs the action slot; whether different indices rank the actions alike | index share 0.993 (GPI) / 0.917 (Section 10 affine) / 1.000 (bc0); action share 0.002 / 0.079 / 0.000; std ratio index/u 36.2 / 4.21 / 193; rank correlation across u between indices 0.29 / 0.92 / 0.35 | `$PSM_DATA/logs/diag_policy_side_cube_{gpi,sec10,sec10bc0}_sd001.json`; design doc "Policy-side diagnostic", block G |
+| bc0 actor and the latent box | where the free actor's latent sits and how both critics score it | `cube_sec10_affine_bc0/sd001` actor latent at `|u|_inf = 3.0` (p90 and max), `|u|_2` 5.88 of the 6.7 the box allows, 14% of components at the clip; measure scores it +3.45 panel-std, scalar critic +2.54; on success rows the scalar critic scores it −0.74 (qa) and −2.23 (qw) panel-std | same JSONs, block H; 09-15 afternoon (b) |
+| policy-family diversity (`affine_strict_cube/sd001`, 16 members x 20 episodes, task 2) | how different the state clouds of fixed-noise policies are, against a resampling floor (bc) and an off-support reference (random actions) | noise_index pairwise MMD² raw 0.2441 vs bc floor 0.0069 (35x); linear classifier 0.859 (chance 0.0625); latent explains 0.510 of within-state action deviation; task-2 success 0.006 vs bc 0.084; MMD² vs pooled bc 0.137 vs goal-directed DSRL-NA 0.024 and random actions 0.053 | `$PSM_DATA/logs/diag_policy_family_diversity_cube.json`; `docs/design/2026-09-15-policy-family-diversity.md` |
+
+Readings of the diversity table that correct the afternoon entry's (d). The fixed-noise
+policies are distinct and coherent. All of them are bad on the task. Their state clouds sit
+farther from the data's states (0.137) than a goal-directed policy's (0.024) or uniform
+random actions' (0.053). The in-support guarantee holds per action and fails per trajectory.
+"Random actions" is not a diversity ceiling on cube: sixteen seeds of one action
+distribution have pairwise MMD² at the bc floor. The index-slot dominance of the measure
+is real and is what the policy-side diagnostic measured.
+
+**5. Two papers read today, not yet in any doc.**
+
+PSM (arXiv 2411.19418), Sec. 5.3, Eq. 10. Its test-time inference does not search the
+trained family. It optimises the policy coefficient w over the whole affine set of valid
+measures, with the constraint that `Phi w + b` is non-negative on dataset (s, a), solved by
+gradient descent-ascent on a batch of 10^4 transitions; then `Q* = M* r` and an argmax
+(discrete) or DDPG (continuous). Our GPI only takes the argmax over the trained family's
+coefficients `w(u')` at 64 prior draws. Eq. 10 has never been run here.
+
+RLDP (arXiv 2603.15857). A policy-free basis phi is trained by latent-dynamics prediction
+plus an orthonormality term and then frozen; an FB-style psi and actor are trained on top.
+No scalar critic, no per-task refit. The paper's claim is that Bellman-trained bases lose
+span under low coverage. It reports no OGBench numbers.
+
+**6. In flight at write time.**
+
+| arm | code | jobs / state | expected | where results land |
+|---|---|---|---|---|
+| Eq. 10 policy inference | `tools/infer_policy_lagrangian.py` (untracked), seam `acting=fixed_coeff` + `agent.fixed_index_coeff_path` (uncommitted diff in `agents/psmflow.py`, `configs/agent/psmflow.yaml`, `tools/eval_checkpoint.py`), tests `tests/test_infer_policy_lagrangian.py`, `tests/test_psmflow_fixed_coeff.py` | no job submitted; `$PSM_DATA/logs/eq10/` does not exist yet | the tool fits one coefficient c per (checkpoint, task) on 10k rows of `affine_strict_cube` in minutes; the five-task eval500 with `acting=fixed_coeff` follows, per task the usual eval cost | `$PSM_DATA/logs/eq10/infer_policy_lagrangian_cube_<tag>.json` (+ `.npz`), `$PSM_DATA/logs/eq10/eq10_<variant>_<tag>_task<t>.npz`; write-up in the design doc the Eq. 10 agent names (the tool docstring is the spec until then) |
+| RLDP phi pretraining | `tools/pretrain_rldp_phi.py` (19afb30), `scripts/slurm/pretrain_rldp_phi.sbatch` | 2518382 (`rldp_phi_cube_H5`), 2518383 (`rldp_phi_cube_H1`), RUNNING since 19:57, 4 h limit; 1M steps, d 128, lambda 1, batch 1024, Adam 3e-4, at ~798 it/s; step 345k reached at 20:10, `params_250000.pkl` written | done at about 20:20; `params_1000000.pkl` in `$PSM_DATA/exp/PSMFLows/rldp_phi_cube/{H5,H1}_sd0/` | `rldp_curve.json` in the same dirs; `PRETRAIN_TABLE` / `CURVES` placeholders in `docs/design/2026-09-15-rldp-phi-basis.md` |
+| `cube_rldp_phi_gpi` | template `affine_strict_cube` + `phi_restore_path=.../rldp_phi_cube/H5_sd0 train_phi=false` | not yet submitted; waits on the H5 checkpoint | 3 seeds x ~3 h 10 min once submitted; five-task eval500 after | `$PSM_DATA/exp/PSMFLows/cube_rldp_phi_gpi/`, `$PSM_DATA/logs/cube_rldp_phi_gpi_sd00{0,1,2}_500000_task{1..5}.json`; design doc placeholders `JOBS_TABLE`, `LADDERS`, `FIVE_TASK`, `READING` |
+| `cube_frozen_own_phi_gpi` (control) | template `affine_strict_cube` + `phi_restore_path=$PSM_DATA/exp/PSMFLows/affine_strict_cube/sd001_s_2491601.0.20260904_181115 train_phi=false` (re-read from `flags.json`: `psi_form=affine policy_index=latent acting=gpi train_actor=false discount=0.98 ortho_coef=1000`, 500k steps, eval every 50k) | 2518384 (sd0), 2518385 (sd1), 2518386 (sd2), RUNNING since 20:01, 12 h limit; CPU smoke `$PSM_DATA/logs/cpusmoke/cube_frozen_own_phi_gpi.out` passed | ~3 h 10 min each (the 09-14 posterior arm took 3h08–3h16), so about 23:15; five-task eval500 after | `$PSM_DATA/exp/PSMFLows/cube_frozen_own_phi_gpi/sd00{0,1,2}_s_251838{4,5,6}.0.20260915_2001*`, eval JSONs `$PSM_DATA/logs/cube_frozen_own_phi_gpi_sd00{0,1,2}_500000_task{1..5}.json`; same design doc |
+
+Pre-registered readings, stated before results.
+
+| arm | outcome | reading |
+|---|---|---|
+| Eq. 10 | c* stays inside the trained family's coefficient patch and scores about 0.284 | the family's own coefficients were already the optimum the basis allows; GPI was not leaving anything on the table |
+| Eq. 10 | c* leaves the patch and scores above 0.35 | the basis spans a good policy that GPI over 64 prior draws never reached |
+| Eq. 10 | c* leaves the patch and success collapses | the basis has to be retrained over a more diverse family before Eq. 10 can help |
+| RLDP + frozen-own | both about 0.28 | the basis is not the limit |
+| RLDP | above 0.35 | the basis geometry was the limit |
+| frozen-own | below 0.28 | freezing phi itself costs, and the RLDP number has to be read against that |
+
+**7. Open list, ranked.**
+
+1. Eq. 10 result (row above). Decides whether the trained basis already contains a good policy.
+2. RLDP and frozen-own results. Decides whether the basis geometry is the limit.
+3. A policy family with good members: the index has to range over policies that are not one fixed noise vector. Candidates are an actor-conditioned, goal-conditioned or skill-conditioned flow as the family, or state-dependent index policies `u = f_k(s)` from fixed random networks (afternoon entry (d), fix A). Not run.
+4. Task-vector coverage: whether the inferred eval `w` sits inside the training mixture of task vectors (32 projected `N(0, I)` draws plus 32 projected `phi(s'_j)`). Not measured.
+5. Section 10 with the DSRL box (`u_clip=1.5`) instead of 3.0, since the bc0 actors sit at the 3.0 corner. Not run.
+
+Settled negative on cube, one line each, with the entry that holds the number: posterior
+sampled dataset latent, 0.252 vs 0.424 task 2 (09-14); Section 10 free psi 0.171 and affine
+psi 0.246 (09-14 evening); reference PSM critic on latent inputs 0.156 (09-15 00:08); Fix 1
+task-conditioned scalar critic on frozen phi 0.044, Fix 2 scalar grounding 0.233 and dueling
+0.219, Fix 3 measure at the decoded action 0.217, bc0 on the affine measure 0.038 and on the
+dueling measure 0.003 (09-15 afternoon); raw-scale `r_hat` in the scalar critic 0.010 (09-14
+evening). On antmaze: Section 10 affine 0.105 five-task (09-14 night). Earlier settled items
+are in `docs/COMPENDIUM.md` and the 09-06 to 09-11 entries.
+
+**8. How to resume.**
+
+Tools (all write JSON through `report_out`; run with the flow, preimage and restore flags
+the afternoon and 00:08 entries record):
+
+| tool | what it does |
+|---|---|
+| `tools/diag_measure_vs_scalar_q.py` | blocks A–H: Bellman residuals, measure-vs-scalar agreement, policy-slot variance split, box exploitation, actor latent placement; takes a measure checkpoint and a `cube_dsrlna_rhat_scaled` checkpoint |
+| `tools/diag_policy_family_diversity.py` | rolls out fixed-noise, bc, random, tilted-bc and goal-directed families and writes the MMD² / classifier / success table |
+| `tools/relabel_reward_rhat.py` | writes the `r_hat = phi(s')^T w` reward file (raw or scale-matched) that `dataset.reward_override_path` consumes |
+| `tools/infer_policy_lagrangian.py` | PSM Eq. 10 coefficient fit per (checkpoint, task); writes the npz `acting=fixed_coeff` deploys |
+| `tools/pretrain_rldp_phi.py` | policy-free phi by latent-dynamics prediction; writes a checkpoint `phi_restore_path` loads |
+
+Seams in `agents/psmflow.py` / `configs/agent/psmflow.yaml`, all OFF by default so the
+default agent is unchanged: `proto.enabled` (reference PSM critic), `dataset.reward_override_path`
+(`main.py`), `phi_restore_path` + `train_phi=false` (frozen external phi),
+`dsrl_na.ignore_masks` and `dsrl_na.reward_scale`, `psm_scalar_coef`, `psi_dueling` +
+`psi_dueling_samples`, `measure_action_input=action`, `acting=fixed_coeff` +
+`fixed_index_coeff_path` (uncommitted). `tools/eval_checkpoint.py` reads the agent config
+from the run's `flags.json`; pass a flag only to evaluate off a run's own config.
+
+Eval rule: five tasks, 500 episodes per task, 500k checkpoint, mean over tasks, t interval
+over 3 seeds. Single-task numbers are paired directions only and are not quoted as results.
+BC control and FB beside every number.
+
+Standing rules are in `~/.claude/projects/-mnt-home-amohan-git-Austin-PSMFLows/memory/MEMORY.md`:
+five-task average only, no local GPU (sbatch, not tmux), pytest per file, no AI attribution
+in commits, plain RL language, no rhetorical writing. The cluster and paths:
+`PSM_DATA=/mnt/home/amohan/psm-data`, SLURM logs `$PSM_DATA/logs/slurm/`, CPU smokes
+`$PSM_DATA/logs/cpusmoke/`.
+
+Caveats. The in-flight rows are as of about 20:10 on 09-15; no in-flight arm has a number.
+The Eq. 10 tool had no job at write time and its seam is uncommitted, so a resume should
+`git status` first. The RLDP `H1` pretraining run has no stage-C arm planned in the design
+doc; only `H5` feeds `cube_rldp_phi_gpi`. The diversity numbers are one checkpoint
+(sd001), N = 20 episodes per member.
+
+---
+
+## 2026-09-15 (afternoon) — three fixes and two bc0 arms on cube: all settled negative; the measure's readout varies with the policy slot, not the action slot
+
+Branch `fix/psmflow-paper-strict`, worktree `.claude/worktrees/psmflow-fix`. Six cube arms,
+three seeds each, 500k steps, all COMPLETED and scored at 500 episodes per task. Design,
+objects, per-arm flag diffs and the pre-registered criteria:
+`docs/design/2026-09-14-flow-psm-dsrl-paper-versions.md`, sections "Fixes launched
+2026-09-15", "bc_coeff = 0 arms" and "Policy-side diagnostic (2026-09-15)". Code: 98539ec
+(Fix 1 seams: `phi_restore_path`, `dsrl_na.ignore_masks`, `dsrl_na.reward_scale`), 2cbd723
+(Fix 2: `psm_scalar_coef`, `psi_dueling`), a3fc920 (Fix 3: the action-input measure allowed
+with the task-vector index), d6c7bb1 (bc0 arms, `actor_u_norm` telemetry); docs b470f47,
+1d75240. Diagnostics: cd371fc, b9f8e1a, 395475d, 9b6ac38 (measure vs scalar Q), 92aba31
+(policy-slot and box-exploitation blocks).
+
+**What was run.** Every arm: cube-single-play, flow `$PSM_DATA/flow/cube-single-play`
+@500000, preimages `$PSM_DATA/preimages/cube-single-play.npz`, eval every 50k with 50
+episodes, one GPU per seed. Flags re-read from each run's `flags.json` after the runs
+finished; the diffs below are against `cube_sec10_affine_actor/sd000` (Section 10 affine:
+`psi_form=affine policy_index=task_vector train_actor=true acting=actor actor_mode=ddpg
+actor.bc_coeff=1.0 u_clip=3.0 batch_size=1024 lr_actor=1e-4 discount=0.98`) unless stated.
+
+| group | change vs template | jobs | run dirs (`$PSM_DATA/exp/PSMFLows/<group>/`) |
+|---|---|---|---|
+| `cube_fix1_scalar_tc` | template `cube_dsrlna_rhat_scaled` (DSRL-NA dual scalar critic, `actor_mode=dsrl_sac`, `bc_coeff=0`, `batch_size=256`, `u_clip=1.5`, `policy_index=latent`): reward `0.01262 * phi(s')^T w` at a fresh `w` per row (`reward_source=synthetic_w task_conditioned=true`), phi restored from `affine_strict_cube/sd001 @500k` and frozen (`train_phi=false`), `ignore_masks=true` | 2518243, 2518244, 2518245 | `sd000_s_2518243.0.20260915_031441`, `sd001_s_2518244.0.20260915_031441`, `sd002_s_2518245.0.20260915_031441` |
+| `cube_fix2_scalar_only` | `psm_scalar_coef=1.0` (projected Bellman equation of `psi^T z` added to the measure loss) | 2518249, 2518250, 2518251 | `sd000_s_2518249.0.20260915_034039`, `sd001_s_2518250.0.20260915_034039`, `sd002_s_2518251.0.20260915_034043` |
+| `cube_fix2_scalar_dueling` | `psm_scalar_coef=1.0 psi_dueling=true psi_dueling_samples=8` (state tower plus zero-mean advantage over 8 prior latents) | 2518252, 2518253, 2518254 (the 2518246-48 dirs are the cancelled first submission, no checkpoint) | `sd000_s_2518252.0.20260915_034600`, `sd001_s_2518253.0.20260915_034559`, `sd002_s_2518254.0.20260915_034600` |
+| `cube_fix3_action_measure_actor` | `measure_action_input=action` (measure at the decoded action, every latent query decoded through the frozen flow; guard relaxed in a3fc920) | 2518255, 2518256, 2518257 | `sd000_s_2518255.0.20260915_035530`, `sd001_s_2518256.0.20260915_035531`, `sd002_s_2518257.0.20260915_035531` |
+| `cube_sec10_affine_bc0` | `actor.bc_coeff=0.0` | 2518258, 2518259, 2518260 | `sd000_s_2518258.0.20260915_040357`, `sd001_s_2518259.0.20260915_040357`, `sd002_s_2518260.0.20260915_040358` |
+| `cube_fix2_dueling_bc0` | `psm_scalar_coef=1.0 psi_dueling=true psi_dueling_samples=8 actor.bc_coeff=0.0` | 2518261, 2518262, 2518263 | `sd000_s_2518261.0.20260915_040357`, `sd001_s_2518262.0.20260915_040358`, `sd002_s_2518263.0.20260915_040358` |
+
+Eval JSONs: `$PSM_DATA/logs/<group>_sd00{0,1,2}_500000_task{1..5}.json`, 500 episodes
+each, `restore_epoch=500000`. The `proto.*`, `phi_restore_*`, `psm_scalar_coef`,
+`psi_dueling*` and `dsrl_na.{ignore_masks, reward_scale}` keys are absent from the
+templates' `flags.json` and sit at their OFF values in every run where the table does not
+name them.
+
+**Five-task table: 500 episodes per cell, 500k checkpoint, t interval over 3 seeds (df 2).**
+
+| group | seed | task 1 | task 2 | task 3 | task 4 | task 5 | seed mean | mean ± CI |
+|---|---|---|---|---|---|---|---|---|
+| `cube_fix1_scalar_tc` | 0 | 0.128 | 0.018 | 0.058 | 0.032 | 0.012 | 0.050 | |
+| | 1 | 0.068 | 0.020 | 0.104 | 0.022 | 0.010 | 0.045 | |
+| | 2 | 0.000 | 0.026 | 0.110 | 0.040 | 0.014 | 0.038 | **0.044 ± 0.014** |
+| `cube_fix2_scalar_only` | 0 | 0.238 | 0.288 | 0.256 | 0.204 | 0.126 | 0.222 | |
+| | 1 | 0.162 | 0.294 | 0.478 | 0.198 | 0.102 | 0.247 | |
+| | 2 | 0.216 | 0.262 | 0.344 | 0.220 | 0.112 | 0.231 | **0.233 ± 0.031** |
+| `cube_fix2_scalar_dueling` | 0 | 0.170 | 0.330 | 0.230 | 0.228 | 0.048 | 0.201 | |
+| | 1 | 0.274 | 0.300 | 0.378 | 0.188 | 0.124 | 0.253 | |
+| | 2 | 0.198 | 0.278 | 0.324 | 0.170 | 0.044 | 0.203 | **0.219 ± 0.073** |
+| `cube_fix3_action_measure_actor` | 0 | 0.182 | 0.334 | 0.280 | 0.232 | 0.040 | 0.214 | |
+| | 1 | 0.174 | 0.326 | 0.268 | 0.250 | 0.068 | 0.217 | |
+| | 2 | 0.168 | 0.352 | 0.246 | 0.284 | 0.050 | 0.220 | **0.217 ± 0.008** |
+| `cube_sec10_affine_bc0` | 0 | 0.010 | 0.002 | 0.040 | 0.000 | 0.000 | 0.010 | |
+| | 1 | 0.104 | 0.000 | 0.068 | 0.002 | 0.000 | 0.035 | |
+| | 2 | 0.286 | 0.004 | 0.048 | 0.000 | 0.004 | 0.068 | **0.038 ± 0.072** |
+| `cube_fix2_dueling_bc0` | 0 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | |
+| | 1 | 0.000 | 0.000 | 0.050 | 0.000 | 0.000 | 0.010 | |
+| | 2 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | **0.003 ± 0.014** |
+
+Task means: Fix 1 0.065 / 0.021 / 0.091 / 0.031 / 0.012; Fix 2 scalar-only 0.205 / 0.281 /
+0.359 / 0.207 / 0.113; Fix 2 dueling 0.214 / 0.303 / 0.311 / 0.195 / 0.072; Fix 3 0.175 /
+0.337 / 0.265 / 0.255 / 0.053; affine bc0 0.133 / 0.002 / 0.052 / 0.001 / 0.001; dueling
+bc0 0.000 / 0.000 / 0.017 / 0.000 / 0.000.
+
+References (same protocol): Section 10 affine `cube_sec10_affine_actor` 0.246 ± 0.041
+(seeds 0.252 / 0.259 / 0.227, 09-14 evening); Section 10 free 0.171 ± 0.027; affine GPI
+`affine_strict_cube` 0.284; reference-critic port `cube_psmref_actor` 0.156 ± 0.023
+(09-15 00:08); BC control 0.111; FB (TD-JEPA Table 1) 0.496.
+
+**In-loop ladder (50 episodes, task 2, `eval.csv` column `evaluation/success`).**
+
+| group | seed | 50k | 100k | 150k | 200k | 250k | 300k | 350k | 400k | 450k | 500k |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `cube_fix1_scalar_tc` | 0 | 0.16 | 0.04 | 0.04 | 0.38 | 0.00 | 0.00 | 0.00 | 0.00 | 0.02 | 0.04 |
+| | 1 | 0.00 | 0.06 | 0.04 | 0.26 | 0.04 | 0.10 | 0.00 | 0.04 | 0.00 | 0.00 |
+| | 2 | 0.02 | 0.04 | 0.20 | 0.02 | 0.02 | 0.08 | 0.08 | 0.02 | 0.00 | 0.04 |
+| `cube_fix2_scalar_only` | 0 | 0.30 | 0.28 | 0.30 | 0.42 | 0.28 | 0.28 | 0.22 | 0.30 | 0.30 | 0.26 |
+| | 1 | 0.14 | 0.20 | 0.20 | 0.36 | 0.28 | 0.30 | 0.14 | 0.24 | 0.18 | 0.32 |
+| | 2 | 0.16 | 0.30 | 0.42 | 0.32 | 0.28 | 0.34 | 0.32 | 0.42 | 0.28 | 0.32 |
+| `cube_fix2_scalar_dueling` | 0 | 0.24 | 0.28 | 0.28 | 0.36 | 0.30 | 0.42 | 0.32 | 0.22 | 0.34 | 0.42 |
+| | 1 | 0.18 | 0.24 | 0.26 | 0.40 | 0.26 | 0.14 | 0.32 | 0.26 | 0.16 | 0.28 |
+| | 2 | 0.22 | 0.22 | 0.42 | 0.30 | 0.42 | 0.18 | 0.34 | 0.28 | 0.34 | 0.26 |
+| `cube_fix3_action_measure_actor` | 0 | 0.20 | 0.14 | 0.30 | 0.36 | 0.24 | 0.22 | 0.18 | 0.30 | 0.30 | 0.34 |
+| | 1 | 0.18 | 0.36 | 0.26 | 0.24 | 0.28 | 0.24 | 0.20 | 0.28 | 0.26 | 0.36 |
+| | 2 | 0.14 | 0.34 | 0.22 | 0.24 | 0.20 | 0.34 | 0.38 | 0.28 | 0.38 | 0.42 |
+| `cube_sec10_affine_bc0` | 0 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.02 | 0.02 | 0.00 | 0.00 | 0.00 |
+| | 1 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.04 | 0.02 | 0.02 | 0.04 | 0.00 |
+| | 2 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.04 | 0.00 | 0.06 | 0.00 | 0.02 |
+| `cube_fix2_dueling_bc0` | 0 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 |
+| | 1 | 0.00 | 0.00 | 0.00 | 0.02 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 |
+| | 2 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 |
+| template `cube_sec10_affine_actor` | 0 | 0.28 | 0.38 | 0.18 | 0.34 | 0.30 | 0.24 | 0.24 | 0.30 | 0.30 | 0.24 |
+| | 1 | 0.24 | 0.36 | 0.42 | 0.28 | 0.36 | 0.22 | 0.26 | 0.42 | 0.34 | 0.32 |
+| | 2 | 0.26 | 0.30 | 0.38 | 0.30 | 0.24 | 0.26 | 0.12 | 0.36 | 0.28 | 0.32 |
+
+The three Section 10 variants (Fix 2 both forms, Fix 3) move within 0.14–0.42 across the
+ladder with no trend, inside the template's 0.12–0.42. Fix 1 is at 0.00–0.10 on every
+cell but three (0.16, 0.20, 0.26, 0.38). The two bc0 arms are at 0.00–0.06 on every cell
+from 50k on.
+
+Actor telemetry on the bc0 arms (`train.csv`, `training/actor_u_norm`, mean `||u_actor||`
+at 100k / 300k / 500k): affine bc0 5.56 / 5.79 / 5.93, 5.53 / 5.81 / 5.85, 5.49 / 5.83 /
+5.89; dueling bc0 5.57 / 5.48 / 5.79, 5.62 / 5.49 / 5.83, 5.52 / 5.48 / 5.83.
+`training/actor_bc_error` (distance to the flow rollout) is 6.9–7.9 on the bc0 arms
+against 0.12–0.14 at 500k on the bc = 1 template and Fix 2 dueling. The prior's typical
+norm at d_a = 5 is about 2.1; the box corner is 6.7. The design doc's expectation was a
+norm near 2; the actors sit at 5.5–5.9 from 100k on.
+
+**Verdicts.**
+
+(a) Fix 1 (`cube_fix1_scalar_tc`) scores 0.044 ± 0.014 against the pre-registered 0.5.
+Settled negative. The task-conditioned scalar critic on the frozen phi's synthetic reward
+scores below the BC control (0.111); the single-task form of the same critic on the scaled
+`r_hat` scored 0.867 on task 2. Fix 3 (`cube_fix3_action_measure_actor`) scores 0.217 ±
+0.008 against the pre-registered 0.35, and below the template's 0.246. Settled negative.
+Fix 2 scalar-only scores 0.233 ± 0.031 and Fix 2 dueling 0.219 ± 0.073, both against the
+pre-registered "> 0.246". Both settled negative; the intervals of all three Section 10
+variants overlap the template's, and the differences from it are −0.013, −0.027 and −0.029.
+
+(b) The bc0 arms score 0.038 ± 0.072 (plain affine measure) and 0.003 ± 0.014 (dueling
+measure). The pre-registered reading was: above 0.246 means the pinned actor was the limit
+of the Section 10 affine arm; below it, the measure's content is. Both are below. Freeing
+the actor from the BC term collapses success to about 0 on both measures. The actor climbs
+the measure's value (`actor_u_norm` 5.5–5.9, at the box edge; the design doc's block H puts
+the sd001 bc0 actor latent at `|u|_inf = 3.0` on the p90 and the max, with the measure
+scoring it 3.45 panel-std above the panel mean), and the latents it reaches decode to
+actions that do not solve the tasks. The measure's value points to bad latents when it is
+maximised without the BC anchor.
+
+(c) Policy-side diagnostic (`tools/diag_measure_vs_scalar_q.py` blocks G and H, 92aba31;
+job 2518330; reports `$PSM_DATA/logs/diag_policy_side_cube_{gpi,sec10,sec10bc0}_sd001.json`,
+all three present; the write-up in the design doc is by the other agent and was in
+progress at the time of this entry). On a 64 x 64 grid of (action latent u, index) per
+state over 500 states, the within-state variance of the readout `psi^T w` splits as: GPI
+checkpoint (`affine_strict_cube/sd001`, index = prior latent u') share from the index slot
+0.993, from u 0.002; Section 10 affine checkpoint (`cube_sec10_affine_actor/sd001`, index
+= task vector z) share from the index 0.917, from u 0.079; bc0 checkpoint 1.000 / 0.000.
+The pooled ratio of the std across the index at the data latent to the std across u at one
+index is 36.2 (GPI), 4.21 (Section 10), 193 (bc0). On the Section 10 checkpoint the
+ordering of the 64 action latents is rank-correlated 0.916 (p10 0.808) across the 64 task
+vectors, i.e. every task vector ranks the actions at a state alike. The action-axis spread
+is 0.6–1.4 times the ensemble disagreement on every checkpoint; the index-axis spread is
+5–133 times it. Acting requires the value to separate actions at a state; the measure's
+readout moves 4–193 times more with the policy it is asked about than with the action.
+
+(d) Closed on cube by this and the preceding entries: Fix 1 (task-conditioned scalar
+critic on frozen phi), Fix 2 (scalar grounding, dueling head), Fix 3 (measure at the
+decoded action), bc0 on both measures, the reference PSM critic port (0.156), Section 10
+free (0.171) and affine (0.246), and posterior-sampled dataset latents (09-14). The
+remaining candidates are two. First, the policy family the flow-latent interface hands the
+measure: a fixed noise vector u' as the index is behaviour cloning with one random mode
+chosen per state, so the index panel spans policies that differ in which mode they pick,
+and the measure's variance lands on that axis (block G). Proposed fix A: state-dependent
+index policies `u = f_k(s)` from fixed random networks, so that indexed policies differ in
+a state-consistent way and the successor measure has to separate actions to fit them.
+Second, the coverage of the test `w` by the training task-vector mixture (32 projected
+`N(0, I)` draws plus 32 projected `phi(s'_j)`): the sec10 readout through its own z shows
+share 0.994 on the index axis with rank correlation 0.042 across z, and whether the
+inferred eval `w` sits inside that mixture's support has not been measured. Neither
+candidate was run today.
+
+**Day summary: every arm scored on 2026-09-15 (500 episodes per cell, 500k checkpoint, t
+interval over 3 seeds, df 2, five-task).**
+
+| group | what | number | criterion | verdict |
+|---|---|---|---|---|
+| `cube_fix1_scalar_tc` | task-conditioned scalar critic on frozen phi, DSRL-NA actor | 0.044 ± 0.014 | ≥ 0.5 | settled negative |
+| `cube_fix2_scalar_only` | Section 10 affine + scalar grounding | 0.233 ± 0.031 | > 0.246 | settled negative |
+| `cube_fix2_scalar_dueling` | + dueling head | 0.219 ± 0.073 | > 0.246 | settled negative |
+| `cube_fix3_action_measure_actor` | Section 10 affine, measure at the decoded action | 0.217 ± 0.008 | ≥ 0.35 | settled negative |
+| `cube_sec10_affine_bc0` | Section 10 affine, `bc_coeff=0` | 0.038 ± 0.072 | > 0.246 means the actor was the limit | below; the measure's content is the limit |
+| `cube_fix2_dueling_bc0` | Fix 2 dueling, `bc_coeff=0` | 0.003 ± 0.014 | same | same |
+| `cube_psmref_actor` | reference PSM critic port (09-15 00:08) | 0.156 ± 0.023 | > 0.171 | settled negative |
+| `cube_sec10_affine_actor` | Section 10 affine (09-14 evening), the template | 0.246 ± 0.041 | — | reference |
+| BC control | frozen flow alone | 0.111 | — | reference |
+| FB | TD-JEPA Table 1 | 0.496 | — | reference |
+
+Caveats. One 500k checkpoint per arm, no 250k five-task eval. The Fix 2 dueling arm's
+seed 1 (0.253) is above the template's mean and its seed interval is the widest of the
+day (± 0.073). Fix 1 changes the actor family, the batch size and the latent box along
+with the critic (its template is the DSRL-NA arm, not Section 10), so its 0.044 does not
+isolate the task conditioning from the frozen phi or the mask change. The policy-side
+numbers in (c) are from one seed (sd001) of each checkpoint. The bc0 actors were not
+evaluated at any checkpoint before 500k at 500 episodes; the in-loop cells are at 0.00–0.06
+throughout.
+
+---
+
+## 2026-09-15 (00:08) — reference PSM critic on latent inputs: 0.156 five-task; the measure-critic limit is not the loss form
+
+Branch `fix/psmflow-paper-strict`, worktree `.claude/worktrees/psmflow-fix`. One cube arm,
+three seeds, 500k steps, all COMPLETED. It was launched in the 09-14 (night) entry below;
+design, objects, losses and the pre-registered expectation:
+`docs/design/2026-09-14-flow-psm-dsrl-paper-versions.md`, section "Reference PSM critic
+(proto stage) on latent inputs". Commits 76eb9cf (`utils/psm_proto.py`, tests), e373ab7
+(`agent.proto.enabled` in `agents/psmflow.py`), abbd1fd (`main.py` dataset row for the
+proto stage).
+
+**What was run.**
+
+The `cube_sec10_free_actor` template (`psi_form=free policy_index=task_vector
+train_actor=true acting=actor actor_mode=ddpg ortho_coef=1000 lr_phi=1e-5
+pessimism_penalty=0.5 discount=0.98 u_clip=3.0 batch_size=1024 lr_actor=1e-4
+actor.bc_coeff=1.0 num_parallel=2 mix_ratio=0.5`, flow `$PSM_DATA/flow/cube-single-play`
+@500000, preimages `$PSM_DATA/preimages/cube-single-play.npz`) plus
+`agent.proto.enabled=true` (`proto.max_log_seed=16 proto.proto_seed=0 proto.lr=1e-4
+proto.ortho_coef=null`). The critic is the reference PSM critic (arXiv 2411.19418): a proto
+stage on latent inputs trains phi and `proto_psi(s, z_bin, u)` against the pseudo-random
+latent policy family, then a separate SF head `psi(s, w, u)` is fit against the post-proto
+phi with phi stop-gradded and no ortho term. The actor, the flow, the preimages, `infer_z`
+and the update budget are the template's. Re-read from `flags.json` after launch: the diff
+against the template is the four `proto.*` keys and `run_group`.
+
+| item | value |
+|---|---|
+| group | `cube_psmref_actor` |
+| jobs | 2518213 (sd0), 2518214 (sd1), 2518215 (sd2), 500k steps, COMPLETED |
+| run dirs | `$PSM_DATA/exp/PSMFLows/cube_psmref_actor/sd000_s_2518213.0.20260914_211207`, `.../sd001_s_2518214.0.20260914_211206`, `.../sd002_s_2518215.0.20260914_211206` |
+| eval JSONs | `$PSM_DATA/logs/cube_psmref_actor_sd00{0,1,2}_500000_task{1..5}.json`, 500 episodes each, `restore_epoch=500000` |
+
+**Five-task table: 500 episodes per cell, 500k checkpoint, t interval over 3 seeds (df 2).**
+
+| seed | task 1 | task 2 | task 3 | task 4 | task 5 | seed mean |
+|---|---|---|---|---|---|---|
+| 0 | 0.134 | 0.232 | 0.276 | 0.152 | 0.038 | 0.166 |
+| 1 | 0.100 | 0.190 | 0.256 | 0.128 | 0.078 | 0.150 |
+| 2 | 0.144 | 0.180 | 0.256 | 0.138 | 0.036 | 0.151 |
+| task mean | 0.126 | 0.201 | 0.263 | 0.139 | 0.051 | **0.156 ± 0.023** |
+
+The seed means are 0.166 / 0.150 / 0.151; the t half-width over them is 0.0227. The lowest
+task is task 5 at 0.036–0.078 per seed, as for the free Section 10 template (0.052–0.070).
+
+**In-loop ladder (50 episodes, task 2, `eval.csv` column `evaluation/success`), with the
+template's cells from `cube_sec10_free_actor` (HANDOFF 09-14 evening).**
+
+| arm | seed | 50k | 100k | 150k | 200k | 250k | 300k | 350k | 400k | 450k | 500k |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| port `cube_psmref_actor` | 0 | 0.22 | 0.22 | 0.20 | 0.26 | 0.34 | 0.26 | 0.18 | 0.34 | 0.24 | 0.24 |
+| | 1 | 0.20 | 0.20 | 0.12 | 0.12 | 0.16 | 0.24 | 0.22 | 0.18 | 0.26 | 0.10 |
+| | 2 | 0.38 | 0.36 | 0.38 | 0.20 | 0.32 | 0.22 | 0.22 | 0.08 | 0.30 | 0.18 |
+| template `cube_sec10_free_actor` | 0 | 0.28 | 0.24 | 0.46 | 0.22 | 0.24 | 0.18 | 0.30 | 0.32 | 0.26 | 0.24 |
+| | 1 | 0.20 | 0.48 | 0.30 | 0.16 | 0.28 | 0.22 | 0.18 | 0.26 | 0.20 | 0.18 |
+| | 2 | 0.24 | 0.34 | 0.20 | 0.28 | 0.14 | 0.24 | 0.10 | 0.14 | 0.26 | 0.28 |
+
+The port moves within 0.08–0.38 across the ladder with no trend. Its 500-episode task-2
+numbers at 500k (0.232 / 0.190 / 0.180) sit inside the in-loop range.
+
+**Verdicts.**
+
+(a) The port scores 0.156 ± 0.023 five-task. The free Section 10 template scored
+0.171 ± 0.027 and the affine Section 10 arm 0.246 ± 0.041; BC is 0.111 and FB 0.496. The
+pre-registered expectation was a number above 0.171, with 0.35 as the mark for "the proto
+stage was the missing piece" and 0.17–0.25 for "the reference critic inherits the same
+limit on latent inputs". The number landed below the whole band. The proto stage does not
+rescue the measure critic on latent inputs. Swapping the Section 10 critic for the reference
+PSM critic, with the actor, the flow, the preimages and the optimiser held, changes the
+five-task mean by −0.015; the two seed intervals overlap.
+
+(b) The loss form is now matched to the reference that scores 694 on Walker (arXiv
+2411.19418, ExORL). The candidates that remain for the Walker/OGBench difference are the
+data (ExORL RND exploratory trajectories against OGBench play data), the action space (raw
+actions there, flow latents here), and psmflow's optimiser and regulariser values, which
+this arm kept from the template: `ortho_coef=1000`, `lr_phi=1e-5`,
+`pessimism_penalty=0.5`, 500k steps. None of the three was varied today.
+
+(c) The scalar-grounded route (DSRL-NA on a scalar Bellman critic fed by `phi^T w`) remains
+the only composition above 0.5 on either env: cube task 2 0.867 ± 0.153, antmaze task 1
+0.853 ± 0.334, against the measure-critic rows at 0.10–0.28. Its zero-shot form is the
+proposed next arm: a task-conditioned scalar Q on `phi(s')^T w` for sampled `w`, phi
+frozen, no termination masks (`dsrl_na.task_conditioned` is the seam; the earlier D1b/D2
+arms of that shape had the sign and mask defects recorded on 09-13 and have to be redone
+with the scaled reward).
+
+(d) The proposed next measurement is eval-only: on the same `(s, u)` pairs, compare
+`psi^T w` from a measure-critic run against the scalar Q from the 0.87 run
+(`cube_dsrlna_rhat_scaled`). Report the correlation and the rank correlation over 64
+sampled `u` per state, split by the distance of `u` to the dataset preimage at that
+state. This measures whether the measure critic orders latents the way the scalar critic
+does, and where in latent space the ordering breaks.
+
+**Codebase check (facts only, no code changed).** TD-JEPA trains no scalar critic: its
+actor maximises `predictor(phi(s), z, a)^T z` (arXiv 2510.00739, Alg. 1). Meta Motivo's
+plain FB has an optional scalar `q_loss` on `F^T z` whose default coefficient is 0.0.
+FB-CPR's scalar critic is grounded on the discriminator reward. psmflow's defaults match
+TD-JEPA's shape: no scalar critic. The `dsrl_na` seam is psmflow's scalar-critic path.
+
+**Day summary: every arm run on 2026-09-14 (500 episodes per cell, 500k checkpoint unless
+stated, t interval over 3 seeds, df 2).**
+
+| env | group | what | metric | number | entry |
+|---|---|---|---|---|---|
+| cube | `cube_affine_posterior_u` | affine GPI, posterior-sampled dataset latent | task 2, pooled 18 cells 250k–500k | 0.252 ± 0.057 (point control 0.424 ± 0.076) | 09-14 |
+| cube | `cube_dsrlna_rhat_frozen` | DSRL-NA on raw-scale `r_hat` | task 2 | 0.010 ± 0.013 | 09-14 evening |
+| cube | `cube_dsrlna_rhat_scaled` | DSRL-NA on scaled `r_hat` | task 2 | 0.867 ± 0.153 (real-reward control 0.882 ± 0.121) | 09-14 evening |
+| cube | `cube_sec10_free_actor` | Section 10 actor, free psi | five-task | 0.171 ± 0.027 | 09-14 evening |
+| cube | `cube_sec10_affine_actor` | Section 10 actor, affine psi | five-task | 0.246 ± 0.041 | 09-14 evening |
+| cube | `cube_psmref_actor` | reference PSM critic (proto stage), free psi | five-task | 0.156 ± 0.023 | this entry |
+| cube | BC control | frozen flow alone | five-task | 0.111 | HANDOFF 09-11 |
+| cube | FB | TD-JEPA Table 1 | five-task | 0.496 | — |
+| antmaze | `antmaze_dsrlna_rhat_scaled` | DSRL-NA on scaled `r_hat` | task 1 | 0.853 ± 0.334 (real-reward control 0.979 ± 0.008) | 09-14 night |
+| antmaze | `antmaze_sec10_affine_actor` | Section 10 actor, affine psi | five-task | 0.105 ± 0.025 | 09-14 night |
+| antmaze | BC control | frozen flow alone | task 1 | 0.072 | `docs/tables/results.md` |
+| antmaze | FB | TD-JEPA Table 1 | five-task | 0.730 | — |
+| antmaze-stitch | `relaunch_point_v2` | affine GPI, point preimage, stitch flow (campaign launched 09-13, cells finished 09-14) | five-task | 0.049 ± 0.113 (seeds 0.056 / 0.091 / 0.000) | this entry |
+| antmaze-stitch | `distribution_v1` | affine GPI, distribution preimage, same stitch flow | five-task | 0.087 ± 0.179 (seeds 0.149 / 0.008 / 0.104) | this entry |
+| antmaze-stitch | BC control | stitch flow alone | five-task | 0.013 (0.002 / 0.002 / 0.052 / 0.000 / 0.008) | `outputs/psmflow_antmaze_stitch_20260913/reports/bc_flow_task{1..5}.json` |
+
+The stitch rows come from
+`outputs/psmflow_antmaze_stitch_20260913/{relaunch_point_v2,distribution_v1}/reports/psmflow_seed{0,1,2}_task{1..5}.json`;
+all thirty cells are 500 episodes at `restore_epoch=500000`. Tasks 1, 2 and 4 are at
+0.000–0.032 on every seed for both arms; task 5 carries the whole mean (point 0.276 / 0.422
+/ 0.000, distribution 0.740 / 0.036 / 0.520). Their flow is the campaign's own Stage A
+(`stitch_stage_a/sd000_s_2506471`), not the published `antmaze-medium-navigate` flow.
+
+Caveats. One arm, three seeds, 500k only; no 250k five-task eval. The port keeps the
+template's `discount=0.98` and the free psi; the affine head under `proto.enabled` was
+not run (`create` does not forbid it; its guards are `policy_index=task_vector`,
+`train_actor=true`, `train_phi=true`, `max_log_seed` in [1, 30]). The template's cells in the ladder are from the 09-14
+evening runs, not re-run. The stitch aggregates (`tools/report_seed_comparison.py`, jobs
+2513750 / 2513899) were not checked; the stitch numbers above are recomputed from the
+per-cell JSONs.
+
+---
+
+## 2026-09-14 (night) — antmaze repeat: scaled r_hat 0.853 vs control 0.979 on task 1; Section 10 affine 0.105 five-task; reference PSM critic ported and launched
+
+Branch `fix/psmflow-paper-strict`, worktree `.claude/worktrees/psmflow-fix`. Two antmaze arms,
+three seeds each, 500k steps, all COMPLETED; one cube arm (the reference-critic port)
+launched and RUNNING at write time. Design and pre-registered expectations:
+`docs/design/2026-09-14-flow-psm-dsrl-paper-versions.md`, sections "Antmaze repeat launched"
+and "Reference PSM critic (proto stage) on latent inputs". Commits d51de4c (antmaze
+launches), 76eb9cf (`utils/psm_proto.py` + `tests/test_psmflow_psm_ref.py`), e373ab7
+(`agent.proto.enabled` in `agents/psmflow.py`, `configs/agent/psmflow.yaml`), abbd1fd
+(`main.py` emits the dataset row for the proto stage; docs).
+
+**What was run.**
+
+Arm 1 is the DSRL-NA pipeline of the antmaze real-reward control `dsrlna_antmaze` (HANDOFF
+09-10 §1, jobs 2492660-62): `psi_form=affine policy_index=latent train_actor=true
+acting=actor actor_mode=dsrl_sac dsrl_na.enabled=true dsrl_na.discount=0.99
+dsrl_na.hidden_dim=2048 dsrl_na.num_ensembles=2 dsrl_na.inner_steps=10 u_clip=1.5
+batch_size=256 discount=0.99`, env `antmaze-medium-navigate-singletask-v0` (OGBench task 1,
+the maze default), flow `$PSM_DATA/flow/antmaze-medium-navigate` @500000, preimages
+`$PSM_DATA/preimages/antmaze-medium-navigate.npz`. The only change is
+`dataset.reward_override_path`: the dataset `rewards` array is replaced by
+`r_hat = phi(s')^T w` from `affine_strict_antmaze_g99/sd002 @500k` (`w` closed form on 10k
+relabel rows, `reward_shift=1.0`), mapped by least squares onto the 0/1 reward and shifted
+by −1 (`0.002591 r_hat − 0.012158 − 1`; output mean −0.991, std 0.027, range
+[−1.074, −0.791]). The masks stay the dataset's (`1 - success`). The `flags.json` diff
+against the control is the override path plus three keys that did not exist on 09-09, at
+their defaults (`dsrl_na.reward_refit_every=10000`, `measure_action_input=latent`,
+`train_phi=true`).
+
+Arm 2 is the paper's Section 10 agent on the affine head: the `affine_strict_antmaze_g99`
+template (discount 0.99) plus `policy_index=task_vector train_actor=true acting=actor
+actor_mode=ddpg u_clip=3.0 pessimism_penalty=0.5 num_parallel=2 mix_ratio=0.5
+actor.bc_coeff=1.0 lr_actor=1e-4 batch_size=1024`, same flow and preimage file. The dataset
+reward is not used.
+
+| arm | group | jobs | run dirs | wall clock |
+|---|---|---|---|---|
+| 1 scaled r_hat | `antmaze_dsrlna_rhat_scaled` | 2518182, 2518183, 2518184 | `$PSM_DATA/exp/PSMFLows/antmaze_dsrlna_rhat_scaled/sd00{0,1,2}_s_25181*` | 4h29–4h32 |
+| 2 Section 10, affine psi | `antmaze_sec10_affine_actor` | 2518179, 2518180, 2518181 | `.../antmaze_sec10_affine_actor/sd00{0,1,2}_s_25181*` | 3h43–3h45 |
+
+Reward file:
+`$PSM_DATA/rewards/antmaze-medium-navigate_rhat_affine_strict_antmaze_g99_sd002_500k_scaled.npz`
+(its `.meta.json` carries the fit and `w`). Eval JSONs, 500 episodes each,
+`restore_epoch=500000`: `$PSM_DATA/logs/antmaze_dsrlna_rhat_scaled_sd00{0,1,2}_500000_task1.json`,
+`$PSM_DATA/logs/dsrlna_antmaze_sd00{0,1,2}__500000.json` (control),
+`$PSM_DATA/logs/antmaze_sec10_affine_actor_sd00{0,1,2}_500000_task{1..5}.json`.
+
+Relabel fit of `r_hat` against the shifted reward on all 1M rows: Pearson 0.286, R² under
+the best affine map 0.082, top-1% precision 0.291 at a base rate 0.0091. Cube (09-14
+evening): 0.330 / 0.109 / 0.369 at 0.021.
+
+**Mechanism table: task 1, 500 episodes, 500k checkpoint, t interval over 3 seeds (df 2).**
+
+| arm | reward channel | sd0 | sd1 | sd2 | mean ± 95% |
+|---|---|---|---|---|---|
+| 1 scaled r_hat | `phi^T w` mapped to −1/0 | 0.888 | 0.966 | 0.704 | **0.853 ± 0.334** |
+| control `dsrlna_antmaze` | dataset reward | 0.982 | 0.978 | 0.976 | **0.979 ± 0.008** |
+
+**Zero-shot table: five tasks, 500 episodes per task, 500k checkpoint, t interval over 3 seeds (df 2).**
+
+| arm | sd0 | sd1 | sd2 | mean ± 95% | source |
+|---|---|---|---|---|---|
+| BC (frozen flow alone) | | | | 0.072 | `docs/tables/results.md` (task 1, 500 ep) |
+| 2 Section 10, affine psi | 0.109 | 0.113 | 0.094 | **0.105 ± 0.025** | this entry |
+| FB | | | | 0.730 | TD-JEPA Table 1 |
+| HILP | | | | 0.836 | TD-JEPA Table 1 |
+
+No five-task GPI row exists for antmaze. The affine GPI antmaze number on record is task 1
+only: `affine_strict_antmaze_g99`, 30-cell ladder 0.294 ± 0.070 (HANDOFF 09-07). The BC row
+is task 1 as well. Arm 2 per task (mean over seeds): 0.177 / 0.075 / 0.089 / 0.053 / 0.132
+on tasks 1–5; the lowest task is task 4 at 0.048–0.060 per seed.
+
+**In-loop ladders (50 episodes, task 1, `eval.csv` column `evaluation/success`).**
+
+| arm | seed | 50k | 100k | 150k | 200k | 250k | 300k | 350k | 400k | 450k | 500k |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 scaled r_hat | 0 | 0.84 | 0.68 | 0.92 | 0.94 | 0.92 | 0.96 | 0.86 | 0.94 | 0.92 | 0.82 |
+| | 1 | 0.88 | 0.60 | 0.86 | 0.96 | 0.92 | 1.00 | 0.92 | 0.82 | 0.94 | 0.94 |
+| | 2 | 0.76 | 0.92 | 0.90 | 0.92 | 1.00 | 0.86 | 0.92 | 0.84 | 0.84 | 0.68 |
+| control `dsrlna_antmaze` | 0 | 0.88 | 0.88 | 0.78 | 0.94 | 0.98 | 0.96 | 0.90 | 0.96 | 0.98 | 1.00 |
+| | 1 | 0.80 | 0.96 | 0.90 | 1.00 | 1.00 | 0.98 | 0.98 | 1.00 | 1.00 | 1.00 |
+| | 2 | 0.94 | 0.90 | 0.98 | 0.94 | 0.98 | 0.98 | 0.96 | 1.00 | 0.74 | 0.98 |
+| 2 Sec10 affine | 0 | 0.16 | 0.22 | 0.14 | 0.14 | 0.18 | 0.16 | 0.16 | 0.24 | 0.12 | 0.24 |
+| | 1 | 0.12 | 0.16 | 0.24 | 0.24 | 0.16 | 0.22 | 0.20 | 0.14 | 0.22 | 0.22 |
+| | 2 | 0.22 | 0.22 | 0.28 | 0.16 | 0.22 | 0.16 | 0.18 | 0.18 | 0.18 | 0.16 |
+
+Arm 1 is at 0.60–1.00 from 50k on. Seed 2's last three in-loop cells are 0.84 / 0.84 /
+0.68 and its 500-episode number at 500k is 0.704, so the low seed-2 cell agrees with its
+ladder. Arm 2 moves within 0.12–0.28 across the ladder with no trend; its task-1 in-loop
+numbers sit above the five-task 500-episode mean because task 1 is its best task.
+
+**Reference PSM critic port, launched.**
+
+`agent.proto.enabled=true` (commits 76eb9cf, e373ab7, abbd1fd) replaces the Section 10
+critic with the reference PSM critic (arXiv 2411.19418): a proto stage fits
+`proto_psi(s, z_bin, u)` against a fixed pseudo-random latent policy family keyed on the
+dataset row and trains phi (with the ortho term); a separate reward-conditioned SF head
+`psi(s, w, u)` is then fit against the online phi the proto stage just stepped, with phi
+stop-gradded and no ortho term. Everything else stays: frozen flow, point preimages,
+closed-form `infer_z`, the ddpg noise-space actor, `task_w` mixing, `P=2`. With
+`enabled=false` the params after 3 updates equal the pre-change baseline on both the strict
+and the actor arm (`tests/test_psmflow_psm_ref.py`). Objects, losses and update order are
+tabulated in the design doc.
+
+| item | value |
+|---|---|
+| group | `cube_psmref_actor` |
+| template | `cube_sec10_free_actor` flags: `psi_form=free policy_index=task_vector train_actor=true acting=actor actor_mode=ddpg ortho_coef=1000 lr_phi=1e-5 pessimism_penalty=0.5 discount=0.98 u_clip=3.0 batch_size=1024 lr_actor=1e-4 actor.bc_coeff=1.0`, flow `$PSM_DATA/flow/cube-single-play` @500000, preimages `$PSM_DATA/preimages/cube-single-play.npz` |
+| change | `agent.proto.enabled=true` (`proto.max_log_seed=16 proto.proto_seed=0 proto.lr=1e-4 proto.ortho_coef=null`); the `flags.json` diff against the template is these four keys and `run_group` only |
+| jobs | 2518213 (sd0), 2518214 (sd1), 2518215 (sd2), 500k steps, RUNNING |
+| run dirs | `$PSM_DATA/exp/PSMFLows/cube_psmref_actor/sd00{0,1,2}_s_25182*` |
+
+In-loop so far (50 episodes, task 2, checkpoints 50k–200k), with the template's cells at the
+same checkpoints from `cube_sec10_free_actor`:
+
+| arm | seed | 50k | 100k | 150k | 200k |
+|---|---|---|---|---|---|
+| port `cube_psmref_actor` | 0 | 0.22 | 0.22 | 0.20 | 0.26 |
+| | 1 | 0.20 | 0.20 | 0.12 | 0.12 |
+| | 2 | 0.38 | 0.36 | 0.38 | 0.20 |
+| template `cube_sec10_free_actor` | 0 | 0.28 | 0.24 | 0.46 | 0.22 |
+| | 1 | 0.20 | 0.48 | 0.30 | 0.16 |
+| | 2 | 0.24 | 0.34 | 0.20 | 0.28 |
+
+Pre-registered expectation for the port: five-task mean above the free Section 10 arm
+(0.171 ± 0.027). Above 0.35 means the proto stage was the missing piece. 0.17–0.25 means the
+reference critic inherits the same limit on latent inputs. Eval at 500k, five tasks, 500
+episodes each, once the jobs finish.
+
+**Verdicts.**
+
+(a) On antmaze the scaled inferred reward reaches 0.853 ± 0.334 on task 1 against the
+real-reward control's 0.979 ± 0.008. The gap is 0.13. It is driven by seed 2 (0.704; seeds
+0 and 1 are 0.888 and 0.966). Cube's gap on the same test was 0.015 (0.867 vs 0.882). The
+larger antmaze gap goes with the weaker relabel statistics (Pearson 0.286 vs 0.330, R²
+0.082 vs 0.109, top-1% precision 0.291 vs 0.369). The scaled reward still scores 2.9x the
+measure-critic route on the same task (affine GPI `affine_strict_antmaze_g99` 0.294 ± 0.070).
+
+(b) Section 10 with the affine head scores 0.105 ± 0.025 five-task on antmaze: above BC
+0.072, far below FB 0.730 and HILP 0.836. The pre-registered band was 0.1–0.3; it landed at
+the bottom edge. On cube the same arm scored 0.246 ± 0.041 five-task.
+
+(c) The isolation to the measure critic holds on both envs. The same phi, w and flow give
+the real-reward level when a scalar Bellman critic consumes the scaled r_hat (cube 0.867 on
+task 2, antmaze 0.853 on task 1) and 0.1–0.3 when the measure `psi^T w` is the critic (cube
+0.246 five-task Section 10, 0.284 five-task GPI; antmaze 0.105 five-task Section 10, 0.294
+task-1 GPI). The gap to FB is in the measure-as-critic path on both environments.
+
+(d) The port arm `cube_psmref_actor` is the direct test of the critic swap: the reference
+PSM critic (proto stage plus SF head) in place of the Section 10 critic, every other piece
+held. Its 500k five-task number decides between the two readings pre-registered above.
+
+Caveats. Arm 1 is task 1 only; `w` was inferred from task-1 relabel rows and the scale map
+was fit on the task-1 reward (two scalars), as on cube. Three seeds per cell; the arm-1
+interval (± 0.334) is wide because of seed 2. No 250k eval was run for either antmaze arm.
+The port arm has no 500-episode number yet.
+
+---
+
+## 2026-09-14 (evening) — flow + PSM + DSRL: reward channel settled, Section 10 arms measured five-task
+
+Branch `fix/psmflow-paper-strict`, worktree `.claude/worktrees/psmflow-fix`. Four arms,
+three seeds each, cube-single-play, 500k steps, all COMPLETED. Design and pre-registered
+expectations: `docs/design/2026-09-14-flow-psm-dsrl-paper-versions.md`; the paper-vs-code
+diff behind them: `docs/design/2026-09-14-paper-vs-code-diagnosis.md`. Commits 98cbce5
+(diagnosis, posterior-latent arm), 2c7189b (`tools/relabel_reward_rhat.py`,
+`dataset.reward_override_path`), 5d06aa3 (scale-matched relabel), ebb2a5c (affine head
+under `policy_index=task_vector`, Section 10 launches), 82429fa (five-task reporting rule).
+
+**What was run.**
+
+Arms 1 and 2 are the DSRL-NA pipeline of the real-reward run `dsrlna_cube` (HANDOFF 09-09,
+`scripts/slurm/launch_dsrl_na.sh`, `REWARD_SOURCE=real`): `psi_form=affine
+policy_index=latent train_actor=true acting=actor actor_mode=dsrl_sac dsrl_na.enabled=true
+dsrl_na.discount=0.99 dsrl_na.hidden_dim=2048 dsrl_na.num_ensembles=2 dsrl_na.inner_steps=10
+u_clip=1.5 batch_size=256 discount=0.98`, flow `$PSM_DATA/flow/cube-single-play` @500000,
+preimages `$PSM_DATA/preimages/cube-single-play.npz`. The only change is the dataset
+`rewards` array, replaced through `dataset.reward_override_path`. `r_hat = phi(s')^T w` is
+computed once from `affine_strict_cube/sd001 @500k` with `w` inferred as at eval (10k
+relabel rows, `reward_shift=1.0`, closed form). The masks stay the dataset's (`1 - success`).
+
+Arms 3 and 4 are the paper's Section 10 agent (`psi(s,u,w)` indexed by the task vector,
+DDPG-style noise-space actor, the actor's latent in the bootstrap): the `affine_strict_cube`
+template plus `policy_index=task_vector train_actor=true acting=actor actor_mode=ddpg
+u_clip=3.0 pessimism_penalty=0.5 num_parallel=2 mix_ratio=0.5 actor.bc_coeff=1.0
+lr_actor=1e-4 batch_size=1024 discount=0.98`, same flow and preimage file. Arm 3 adds
+`psi_form=free`; arm 4 keeps `psi_form=affine`, which needed the guard relaxed in ebb2a5c.
+
+| arm | group | jobs | reward file | run dirs |
+|---|---|---|---|---|
+| 1 raw-scale r_hat | `cube_dsrlna_rhat_frozen` | 2518095, 2518096, 2518097 | `$PSM_DATA/rewards/cube-single-play_rhat_affine_strict_cube_sd001_500k.npz` (mean +3.95, std 10.58, range [−32.0, 62.6]) | `$PSM_DATA/exp/PSMFLows/cube_dsrlna_rhat_frozen/sd00{0,1,2}_s_25180*` |
+| 2 scaled r_hat | `cube_dsrlna_rhat_scaled` | 2518113, 2518114, 2518115 | `..._500k_scaled.npz` = `0.00445 r_hat + 0.00325 − 1` (least-squares map onto the 0/1 reward, then −1; mean −0.979, std 0.047, range [−1.139, −0.718]) | `.../cube_dsrlna_rhat_scaled/sd00{0,1,2}_s_25181*` |
+| 3 Section 10, free psi | `cube_sec10_free_actor` | 2518116, 2518117, 2518118 | dataset reward not used | `.../cube_sec10_free_actor/sd00{0,1,2}_s_25181*` |
+| 4 Section 10, affine psi | `cube_sec10_affine_actor` | 2518119, 2518120, 2518121 | dataset reward not used | `.../cube_sec10_affine_actor/sd00{0,1,2}_s_25181*` |
+
+Eval JSONs, 500 episodes each, `restore_epoch=500000`:
+`$PSM_DATA/logs/cube_dsrlna_rhat_{frozen,scaled}_sd00{0,1,2}_500000_task2.json`,
+`$PSM_DATA/logs/dsrlna_cube_sd00{0,1,2}_500000_task2.json` (control),
+`$PSM_DATA/logs/cube_sec10_{free,affine}_actor_sd00{0,1,2}_500000_task{1..5}.json`.
+
+Reporting rule from today (82429fa): zero-shot arms are quoted as five-task means only.
+Arms 1 and 2 are single-task mechanism tests by construction: `w` and the real-reward
+control are task-2 objects, so they are reported on task 2 and labelled as such.
+
+**Mechanism table: task 2, 500 episodes, 500k checkpoint, t interval over 3 seeds (df 2).**
+
+| arm | reward channel | sd0 | sd1 | sd2 | mean ± 95% |
+|---|---|---|---|---|---|
+| 1 raw-scale r_hat | `phi^T w`, raw | 0.012 | 0.004 | 0.014 | **0.010 ± 0.013** |
+| 2 scaled r_hat | `phi^T w` mapped to −1/0 | 0.856 | 0.812 | 0.934 | **0.867 ± 0.153** |
+| control `dsrlna_cube` | dataset reward | 0.842 | 0.868 | 0.936 | **0.882 ± 0.121** |
+
+Relabel fit of `r_hat` against the shifted reward on all 1M rows: Pearson 0.330, R² under
+the best affine map 0.109, top-1% precision 0.369 at a base rate 0.021. The fit is
+scale-free and identical for arms 1 and 2.
+
+**Zero-shot table: five tasks, 500 episodes per task, 500k checkpoint, t interval over 3 seeds (df 2).**
+
+| arm | sd0 | sd1 | sd2 | mean ± 95% | source |
+|---|---|---|---|---|---|
+| BC (frozen flow alone) | | | | 0.111 | HANDOFF 09-11 |
+| 3 Section 10, free psi | 0.179 | 0.158 | 0.175 | **0.171 ± 0.027** | this entry |
+| 4 Section 10, affine psi | 0.252 | 0.259 | 0.227 | **0.246 ± 0.041** | this entry |
+| affine GPI (`affine_strict_cube`, 300k–500k) | | | | 0.284 | HANDOFF 09-06 / `docs/tables/results.md` |
+| FB | | | | 0.496 | TD-JEPA Table 1 |
+| HILP | | | | 0.742 | TD-JEPA Table 1 |
+
+Per task (mean over seeds): free 0.149 / 0.205 / 0.289 / 0.149 / 0.061 on tasks 1–5;
+affine 0.221 / 0.316 / 0.333 / 0.211 / 0.149. Free psi's lowest task is task 5 at 0.052–0.070
+per seed; affine's lowest is task 5 at 0.096–0.218.
+
+**In-loop ladders (50 episodes, task 2 for all four arms, `eval.csv` success column).**
+
+| arm | seed | 50k | 100k | 150k | 200k | 250k | 300k | 350k | 400k | 450k | 500k |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 raw r_hat | 0 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.02 | 0.02 | 0.00 | 0.00 | 0.00 |
+| | 1 | 0.00 | 0.00 | 0.02 | 0.00 | 0.02 | 0.04 | 0.02 | 0.00 | 0.00 | 0.00 |
+| | 2 | 0.04 | 0.00 | 0.06 | 0.04 | 0.00 | 0.02 | 0.06 | 0.00 | 0.10 | 0.04 |
+| 2 scaled r_hat | 0 | 0.88 | 0.88 | 0.96 | 0.86 | 0.96 | 0.96 | 0.96 | 0.98 | 0.84 | 0.86 |
+| | 1 | 0.88 | 0.90 | 0.90 | 0.94 | 0.92 | 0.90 | 0.94 | 0.92 | 0.82 | 0.86 |
+| | 2 | 0.90 | 0.82 | 0.90 | 0.88 | 0.96 | 0.88 | 0.80 | 0.86 | 0.84 | 0.92 |
+| 3 Sec10 free | 0 | 0.28 | 0.24 | 0.46 | 0.22 | 0.24 | 0.18 | 0.30 | 0.32 | 0.26 | 0.24 |
+| | 1 | 0.20 | 0.48 | 0.30 | 0.16 | 0.28 | 0.22 | 0.18 | 0.26 | 0.20 | 0.18 |
+| | 2 | 0.24 | 0.34 | 0.20 | 0.28 | 0.14 | 0.24 | 0.10 | 0.14 | 0.26 | 0.28 |
+| 4 Sec10 affine | 0 | 0.28 | 0.38 | 0.18 | 0.34 | 0.30 | 0.24 | 0.24 | 0.30 | 0.30 | 0.24 |
+| | 1 | 0.24 | 0.36 | 0.42 | 0.28 | 0.36 | 0.22 | 0.26 | 0.42 | 0.34 | 0.32 |
+| | 2 | 0.26 | 0.30 | 0.38 | 0.30 | 0.24 | 0.26 | 0.12 | 0.36 | 0.28 | 0.32 |
+
+Arm 2 is at 0.82–0.98 from the first checkpoint on; the scaled reward needs no warm-up
+beyond 50k. Arm 1 never leaves 0.00–0.10. Arms 3 and 4 move within 0.10–0.48 across the
+ladder with no trend; the Section 10 single-task in-loop numbers sit above their five-task
+500-episode means because task 2 is their second-best task.
+
+**Verdicts.**
+
+(a) The inferred reward `phi^T w`, once mapped to the dataset's −1/0 convention, supports
+latent Q-learning plus the noise actor at the real-reward level: 0.867 ± 0.153 against
+0.882 ± 0.121 on task 2. The two intervals overlap almost entirely. The reward vector `w`
+and the features `phi` carry enough of the task to drive a Bellman critic, even though the
+per-row fit to the true reward is weak (R² 0.109).
+
+(b) The raw-scale `r_hat` reproduces the earlier actor-on-inferred-reward failures:
+0.010 ± 0.013. The per-step reward is positive on average (+3.95) and the termination mask
+ends the episode at success, so the critic values staying alive above finishing. This
+is the likely cause of the 09-07 to 09-10 DSRL-NA-on-r_hat results (0.307 and below) and
+of D1b/D2, which used the same raw readout with the masks on; the 09-13 audit already
+recorded the mask defect for D1b/D2. The pre-registered expectation for arm 1 was low,
+and it landed there.
+
+(c) Section 10 with the affine head scores 0.246 ± 0.041 five-task, 0.075 above the free
+head's 0.171 ± 0.027; the seed intervals do not overlap. The affine head has no task
+below 0.096, the free head has task 5 at 0.052–0.070. The affine Section 10 arm is at the
+affine GPI level (0.284) and stays below FB (0.496). The pre-registered band for arm 4 was
+0.2–0.5; it landed at the bottom of it.
+
+(d) The reward channel and the flow are therefore not where the gap to FB is. The scaled
+`r_hat` reaches the real-reward number when a scalar Bellman critic uses it; the same
+`phi`, `w` and flow give 0.25–0.28 when the measure `psi^T w` is the critic. The gap is in
+the measure-as-critic path (rung 1 GPI, Section 10 actor on `psi^T w`). The working
+composition is per-task rungs 2–3: relabel with the scaled `r_hat`, then DSRL-NA. It uses
+reward labels only (no dataset reward), but it is one model per task, so it is not
+single-model zero-shot. The next decision is between (i) running it per task, 5 tasks × 3
+seeds, for a five-task number comparable to the zero-shot table, and (ii) building a
+task-conditioned scalar-Q version (`dsrl_na.task_conditioned` exists as a seam; the earlier
+D1b/D2 arms of that shape had the sign and mask defects and have to be redone with the
+scaled reward and the masks handled).
+
+Caveats. Arms 1 and 2 are task 2 only and `w` was inferred from task-2 relabel rows; no
+five-task number exists for the scaled-reward composition. The scaled map was fit on the
+task-2 reward, which is the quantity a zero-shot method may not see; the mechanism test
+uses it to fix the scale and sign, and the map's slope and offset are two scalars. Section
+10 arms are at 500k only; no 250k five-task eval was run.
+
+---
+
+## 2026-09-14 — posterior-sampled dataset latent on cube (paper Alg. pretrain), paper-vs-code diagnosis
+
+Branch `fix/psmflow-paper-strict`, worktree `.claude/worktrees/psmflow-fix`. The diagnosis
+of the paper's LatentFlowPSM against `agents/psmflow.py` is in
+`docs/design/2026-09-14-paper-vs-code-diagnosis.md`. Its conclusion: the loss in the code
+is the paper's loss. The remaining deviations are the point dataset latent instead of a
+posterior sample, one-step decode at acting, the ensemble-min target, the reward shift and
+sphere projection of `w`, and the box latent support. Only the first had never been
+measured on cube with the affine head. This entry measures it.
+
+**What was run.** One arm, three seeds, 500k steps, cube-single-play task 2. Default
+`agent=psmflow` (`psi_form=affine policy_index=latent train_actor=false acting=gpi`) with
+the single change `agent.use_point_preimage=false`: the dataset latent `u_i` is one fresh
+sample per visit from the stored Gaussian posterior `q_alpha(u | s_i, a_i)`, which is the
+paper's Alg. `pretrain`. Every other key equals the `affine_strict_cube` baseline's
+`flags.json` (`discount=0.99`, `gpi` K=64, flow `$PSM_DATA/flow/cube-single-play` @500000).
+The preimage file is `$PSM_DATA/preimages/cube-single-play-a20p6-ps0p69-ns12-N200.npz`
+(alpha 20.57, prior weight 0.69, 12 ODE steps, 200 samples); the baseline's legacy
+`cube-single-play.npz` was inverted with `prior_scale=None` and `main.py` refuses
+`use_point_preimage=false` on it. The point preimages of the two files differ by at most
+0.035 (max abs over 1M rows), so the baseline point arm was not rerun on the new file.
+
+| item | value |
+|---|---|
+| group | `cube_affine_posterior_u` |
+| jobs | 2516368 (sd0), 2516369 (sd1), 2516371 (sd2), all COMPLETED, 3h08m-3h16m |
+| run dirs | `$PSM_DATA/exp/PSMFLows/cube_affine_posterior_u/sd00{0,1,2}_s_25163*` |
+| eval JSONs | `$PSM_DATA/logs/cube_posterior_u_sd00{0,1,2}_{250000..500000 step 50000}.json` |
+| baseline JSONs | `$PSM_DATA/logs/eval500_affine{250..500}k_strict_cube_sd{0,1,2}.json` |
+
+**Results, 500 episodes per cell, checkpoints 250k-500k.**
+
+| ckpt | posterior sd0 | posterior sd1 | posterior sd2 | point sd0 | point sd1 | point sd2 |
+|---|---|---|---|---|---|---|
+| 250k | 0.288 | 0.402 | 0.104 | 0.532 | 0.620 | 0.246 |
+| 300k | 0.202 | 0.332 | 0.076 | 0.286 | 0.532 | 0.360 |
+| 350k | 0.238 | 0.410 | 0.148 | 0.704 | 0.494 | 0.350 |
+| 400k | 0.152 | 0.428 | 0.114 | 0.282 | 0.346 | 0.546 |
+| 450k | 0.114 | 0.402 | 0.152 | 0.272 | 0.568 | 0.564 |
+| 500k | 0.320 | 0.394 | 0.254 | 0.086 | 0.548 | 0.292 |
+| seed mean | 0.219 | 0.395 | 0.141 | 0.360 | 0.518 | 0.393 |
+
+| arm | n (ckpt x seed) | pooled mean | sd | 95% CI | min | max |
+|---|---|---|---|---|---|---|
+| posterior latent (`use_point_preimage=false`) | 18 | **0.252** | 0.123 | ± 0.057 | 0.076 | 0.428 |
+| point latent (`affine_strict_cube`, recomputed) | 18 | **0.424** | 0.164 | ± 0.076 | 0.086 | 0.704 |
+| BC control | — | 0.072 | — | — | — | — |
+
+CI convention: both rows use the `docs/tables/results.md` late-window rule
+(`tools/make_tables.py::_actor_ablation_agg`): mean over the 18 cells, 1.96 x sd / sqrt(18).
+The baseline recomputed from its own 18 JSONs reproduces the recorded 0.424 ± 0.076 exactly.
+Across the three seed means with a t interval (df 2) the rows are 0.252 ± 0.322 and
+0.424 ± 0.207.
+
+| paired difference (posterior minus point, same seed and checkpoint) | value |
+|---|---|
+| n | 18 |
+| mean | **−0.172** |
+| sd | 0.171 |
+| 95% CI, 1.96 x sd / sqrt(n) | ± 0.079 |
+| 95% CI, t (df 17) | ± 0.085 |
+| cells with posterior below point | 16 of 18 |
+| cells with posterior above point | 2 of 18 (sd0 @500k +0.234, sd1 @400k +0.082) |
+
+**Verdict against the pre-registered expectation** (diagnosis doc §5): the expectation was a
+move of less than 0.1 in either direction, and less than 20% chance of exceeding 0.55. The
+measured move is −0.172 with interval [−0.251, −0.093]. The interval excludes the
+pre-registered band. No cell exceeded 0.428. Per the rule stated in §5, item (a) of the
+diagnosis (point latent instead of posterior sample) joins the settled list: training on
+the posterior-sampled latent scores below the point latent on cube with the affine head,
+the same sign as the free-psi era comparison (0.239 point vs 0.194 posterior). The
+posterior arm's spread is smaller (sd 0.123 vs 0.164), and its seed 1 is the only seed
+whose mean is within the baseline's range.
+
+Caveats. The comparison uses two preimage files. Their point preimages agree to 0.035 but
+their posteriors differ by up to 15.7 in the mean; the posterior is the quantity under
+test, so this is the intended difference, but the prior weight is 0.69 where the paper
+uses 1.0, and no cube file at 1.0 exists. The number of posterior samples per row is one
+(`measure_u_samples=1`).
+
+**Stitch state at 2026-09-14 ~12:30 UTC** (antmaze-medium-stitch, point vs distribution
+preimage, campaign `outputs/psmflow_antmaze_stitch_20260913/`). All six training jobs are
+still RUNNING at 6h08m of a 24h limit; their training receipts record 500000 steps, and the
+jobs are now in the per-task 500-episode eval phase (about 70 min per task).
+
+| arm | jobs | task 1 (sd0/1/2) | task 2 (sd0/1/2) | tasks 3-5 |
+|---|---|---|---|---|
+| point (`relaunch_point_v2`) | 2513746/48/49 RUNNING | 0.000 / 0.000 / 0.000 | 0.000 / 0.000 / 0.000 | evaluating |
+| distribution (`distribution_v1`) | 2513895/97/98 RUNNING | 0.000 / 0.000 / 0.000 | 0.000 / 0.000 / 0.000 | evaluating |
+
+The twelve finished cells are `.../{relaunch_point_v2,distribution_v1}/reports/psmflow_seed{0,1,2}_task{1,2}.json`,
+each 500 episodes at `restore_epoch=500000`. Aggregates 2513750 (point) and 2513899
+(distribution) are PENDING on `afterok` of their three C jobs; they write the five-task
+three-seed Student-t summary into the same `reports/` directories via
+`tools/report_seed_comparison.py`, logs at `.../logs/aggregate_2513750.log` and the
+`distribution_v1/logs/` counterpart. Nothing was resubmitted. No five-task CI exists yet.
+
+---
+
+## 2026-09-14 03:43 UTC — Conditional Walker affine retry queued; both Stitch arms past halfway
+
+The user explicitly approved a 12-hour retry of affine Walker seed 1 **only if** its
+current evaluation fails or times out. Job **2516137** is PENDING with
+`afternotok:2514952`, TimeLimit12:00:00, one H100, 8 CPUs and 96GB.
+`KillOnInvalidDependent=Yes` prevents the fallback from running if the original succeeds.
+The original seed-1 job remains RUNNING, with zero restarts and its unchanged 8-hour
+limit / 10:20:18 Berlin deadline. No original job was cancelled, restarted or modified.
+
+This is a complete reevaluation from the unchanged seed-1 2M checkpoint, not a resumable
+continuation. The evaluator, source/data/config/checkpoint hashes, runtime versions,
+fresh per-step GPI64x64, eval seed0, workers4, inference10k, and 500 episodes for each
+of stand/walk/run/flip are unchanged. Only the output paths and scheduler fallback
+settings differ. No training or test-time adaptation was added.
+
+Recovery aggregate **2516143** is PENDING on successful original seeds0/2 plus retry
+2516137, with 1 CPU, 8GB and 10 minutes. It uses the existing strict three-seed
+aggregator and writes a separate report. The original aggregate2514955 is untouched;
+the recovery branch auto-cancels if its dependencies become impossible.
+
+New files and exact commands are under
+`outputs/walker_identity_20260913/eval500_affine_20260914/seed1_retry12h/`:
+`preflight.json`, both `.sbatch` payloads, both submission records, and
+`postlaunch_verification.json`. Both payloads pass `bash -n`; Slurm's saved payloads
+match the local files exactly. The existing corrected smoke report and validation
+receipt were revalidated, as were all three checkpoint/config provenance records.
+The retry has not started: its startup/final checks will run only if it becomes eligible.
+
+Fresh progress at03:42 UTC: corrected affine Walker seeds0/1/2 are approximately
+47%/36%/47% through logged rollouts, with no final reports yet. All six Stitch jobs
+remain RUNNING. Point seeds0/1/2 are at311k/313k/313k of500k; full stored-posterior seeds
+are at300k/305k/300k. Latest training metrics are finite. Saved sampler flags were
+rechecked: the distribution arm is the full stored Gaussian sampler, not the shrunk
+point-plus-extra variant. These are progress/numerical checks, not evidence of improved
+policy performance or posterior accuracy.
+
+Existing final reports were revalidated (hashes, 500-episode counts and aggregate
+arithmetic), not rerun: the plain zero-shot Walker port has mean return694.131 with
+three-seed95% t halfwidth62.030; raw-action RLU-derived full-affine Stitch has success
+3.20% with halfwidth2.508 percentage points. The latter includes task-time constrained
+inference/actor adaptation and is not training-free zero-shot extraction. The plain
+Walker result validates that reference setup, not the identity-affine or flow interface.
+No new final PSMFlow success result is available.
+
+---
+
+
+## 2026-09-14 02:46 UTC — Stitch full inversion and both C smokes passed; six seeds training
+
+On the user's request to continue, fresh accounting confirmed fullB2513740 completed0:0
+in4h37m03s. Point C200 smoke2513745 completed0:0 in11m34s; full-posterior C200 smoke2513889
+completed0:0 in12m52s. These are numerical/wiring checks, not policy-performance results.
+
+Full1M preimage, metadata and exact Stage-A500k checkpoint hashes were reverified.
+The artifact has239 invalid rows (0.0239%). Both smoke checkpoint/config hashes and all
+five two-episode task-report hashes were reverified; their training receipts record
+finite checkpoint leaves and bitwise unchanged frozen flow parameters.
+
+All six production jobs are RUNNING. Their own flags were read, confirming affine psi,
+latent policy index, actorless GPI64x64, same flow/preimage artifacts,B1024,z128,gamma.99,
+500k target updates. Point seeds0/1/2 have `use_point_preimage=true`; full stored-posterior
+seeds0/1/2 have `false`, `measure_u_samples=1`, `measure_u_mixture_shrink=null`.
+The latest logged steps were156k/157k/157k for point and147k/152k/150k for distribution.
+All latest logged training metrics were finite. Final500-episode/task performance is pending.
+
+Full-data distribution receipts still explicitly mark posterior accuracy uncertified:
+passing numerical/wiring gates must not be reported as passing ESS/same-action fidelity.
+No arm settings or experimental gates were changed.
+
+Walker corrected affine evaluations2514951/52/54 are also RUNNING, roughly33%/25%/33%
+through logged rollouts. No final reports are present. Seed1 still has8h and the unchanged
+10:20:18 Berlin deadline; its average-rate projection is roughly9.23h, not a guaranteed
+completion time. A conditional12h retry, only if the current evaluation fails/times out,
+was proposed for user approval. **No retry was submitted and no existing job was changed.**
+
+Verification record:
+`outputs/psmflow_antmaze_stitch_20260913/reports/continuation_20260914_0246.json`.
+
+---
+
+
+## 2026-09-14 01:28 UTC — Requested Walker affine seed1 time extension denied
+
+The user approved extending only affine Walker evaluation seed1, job2514952,
+from8h to12h after its observed average rollout rate projected roughly9.4h total.
+The exact job name, owner and RUNNING state were checked before the attempt.
+
+`scontrol update JobId=2514952 TimeLimit=12:00:00` returned exit1:
+`Access/permission denied for job 2514952`.
+A subsequent scheduler read confirmed RUNNING, TimeLimit08:00:00 and the unchanged
+scheduler-local deadline2026-09-14T10:20:18 (Berlin). **The extension did not happen.**
+This was a Slurm permission denial, not a denied local-tool approval.
+
+No job was restarted, cancelled or resubmitted; other jobs and all experimental
+settings remain unchanged. An in-place increase requires cluster permission/admin
+assistance. Exact before/after scheduler records and the denied command are saved in
+`outputs/walker_identity_20260913/eval500_affine_20260914/seed1_time_extension_denied_20260914.json`.
+The earlier progress projection included startup and is not a guaranteed completion time.
+
+---
+
+
+## 2026-09-14 00:21 UTC — Walker affine final evaluation running with corrected fresh GPI draws
+
+The user requested the completed Walker affine PSM evaluation and explicitly approved
+correcting its evaluation RNG. This is the **affine identity-decoder/no-flow control**,
+not the RLU full-affine AntMaze adapter. Only affine seeds0/1/2 are evaluated here;
+the free-head final evaluation was not additionally submitted.
+
+**Confirmed evaluator bug.** The identity harness called `sample_actions(observations)`
+without a key. The immutable agent defaulted to its unchanged `self.rng`, so each worker
+reused its action/index panels across steps and episode batches, contrary to the planned
+fresh draws. The original sampler regression failed with identical actions at identical
+states; an explicit fresh-key adapter passes. This finding concerns the inspected Walker
+identity harness, not the production PSMFlow evaluator. Existing small free/affine Walker
+reports remain intact but do not measure the corrected fresh-draw protocol.
+
+**Bounded correction.** `tools/walker_psm/eval_identity.py` supplies a new explicit key
+per batched step, advancing across episode batches. Each task restarts the same eval-seed
+stream for common random numbers, independently of the checkpoint training RNG. It wraps
+the original evaluator in memory and retains original source/data/flags/checkpoint checks,
+environment/reward code, task inference, candidate distributions and action scoring.
+No training code, trained weights, original source manifests, flags or checkpoints were
+changed. Full dynamic agent state, including targets/optimizers/RNG, is fingerprinted
+before and after evaluation. New results are separate from the original eval JSONs.
+
+**Fixed protocol:** unchanged2M checkpoints, seeds0/1/2, same5M ExORL Walker transitions,
+stand/walk/run/flip,500 episodes/task, horizon1000, four workers, eval seed0,10k inference
+rows,64x64 GPI, no actor or test-time learning. All saved model/training HPs are unchanged
+(B1024,z128,gamma.98,tau.01,ortho1,bothLR1e-4). The full table was shown before launch.
+Expected outcome is corrected evaluation, not an assumed performance improvement.
+
+Campaign-local evaluation directory:
+`outputs/walker_identity_20260913/eval500_affine_20260914/`.
+Immutable `eval_manifest.json` binds all three checkpoint/config hashes and the separate
+frozen evaluation adapter `code/eval_identity.py` (SHA256
+`b788425ce7e74b0c2ba567b178c1cf262d48855818840a5bee47a185742a16fd`).
+`preflight.json` is the earlier historical diagnosis, not the executable manifest.
+Submission commands, timing caveats and observed job states are in `launch_manifest.json`.
+
+| Job | Purpose | Observed at00:21 UTC |
+|---|---|---|
+| 2514903 | Restore seed0 at2M; corrected4 episodes/task smoke | COMPLETED0:0,5m14s |
+| 2514951 | Corrected500 episodes/task, affine seed0 | RUNNING |
+| 2514952 | Corrected500 episodes/task, affine seed1 | RUNNING |
+| 2514954 | Corrected500 episodes/task, affine seed2 | RUNNING |
+| 2514955 | Strict three-seed aggregate | PENDING after all three evaluations |
+
+The smoke verified four full1000-step episodes per task,1000 fresh-key calls per task,
+reproducible paired task streams and identical before/after agent-state SHA256. Its
+scores are not benchmark results. Production startup records were re-read: all three
+have the correct seed,2M checkpoint,500 episodes/task,workers4,K64 and fresh RNG mode.
+Each gets one H100,8 CPUs,96GB and8h. Historical periodic-eval timing suggests roughly4.7h;
+the corrected smoke includes startup/loading, so it is not an isolated acting-rate
+measurement or a guaranteed ETA. Final performance is still pending.
+
+Validation:35 focused tests passed, Ruff clean, five shell payloads passed `bash -n`,
+and independent read-only code plus manifest/import/provenance reviews found no launch
+blocker. Production requires the completed smoke receipt and validates complete task
+reports, source/config/checkpoint pairing, fresh-key traces and unchanged state.
+The dependent aggregator requires three distinct training seeds and500 episodes/task,
+averages tasks within each seed, then reports the mean and95% Student-t interval.
+Other campaigns and existing user work were not modified; no artifacts were published.
+
+---
+
+
+## 2026-09-13 21:21 UTC — Matched distribution-preimage stitch arm queued alongside point
+
+The user challenged the point-preimage choice and explicitly requested a distribution
+run as well. The preceding relaunch had inherited `use_point_preimage=true` from the
+existing strict baseline; it was not selected by a new point-vs-distribution comparison.
+The latest evidence does **not** establish distribution sampling as generally better:
+September10 demotes the earlier shrunk-mixture Arm C gain after its longer continuation
+and AntMaze comparison. Keep that distinct from this new stitch experiment.
+
+**Requested arm and unchanged comparison.** New directory:
+`outputs/psmflow_antmaze_stitch_20260913/distribution_v1/`.
+Use `agent.use_point_preimage=false`, `measure_u_samples=1`,
+`measure_u_mixture_shrink=null`: one fresh draw from the full stored K=1 Gaussian
+per sampled transition, followed by the existing coordinate clip at3. This is NOT
+point-plus-shrunk-extra-latents Arm C and not a multimodal posterior.
+Resolved Hydra agent configs differ from the point arm only in
+`use_point_preimage`; only output/run-group names change elsewhere.
+All source/model/loss/inversion code is unchanged. The full hyperparameter table was
+shown before launch. Seeds0/1/2,500k updates,B1024,gamma.99,d128,affine latent-index GPI,
+no actor/DSRL/action critic, trainable phi, same rewards-only-at-readout protocol,
+five tasks x500 final episodes, and same frozen BC control remain matched.
+
+**Reuse, do not recompute.** Stage-B2513740 already computes both point and
+distribution arrays. Both arms wait for that exact full1M artifact, native-row and
+Stage-A500k pairing checks. No point job was modified or cancelled.
+Distribution draws consume additional NumPy RNG values, so matching seeds/configs
+does not mean identical minibatch streams between arms.
+
+**Fresh posterior diagnostics, not policy results.** B256 contains no invalid rows;
+weights are exactly1 and minimum symmetrized covariance eigenvalue is1.02e-6.
+The real Dataset sampler at fixed row indices matched `sample_preimage_noise`
+bitwise; consecutive visits redraw, resetting the seed reproduces, and draws differ
+from stored points. Sample coordinate clip fraction is0.001465.
+ODE-100 with the training clip (256 valid rows, one draw each) measured:
+
+| Latent source | Mean action L2 error | p90 | Nonfinite decodes |
+|---|---:|---:|---:|
+| Distribution sample | 0.201563 | 0.295266 | 0 |
+| Point inverse | 0.002531 | 0.000292 | 0 |
+| Independent prior | 0.943807 | 1.516194 | 0 |
+
+Stored un-clipped point roundtrip on these rows is0.000208; clipping explains its
+larger evaluated mean/tail. Posterior samples are informative relative to the prior,
+but fail the standing point-p90 same-action-fidelity diagnostic. D3 meanESS18.012
+and B256 final-ESS16.75856 also fail the historical >20 criterion.
+**Proceeding is the requested exploratory comparison, not posterior certification.**
+Receipts explicitly carry `posterior_accuracy_certified=false`, numerical-check
+scope and `exploratory_authorized=true`; full-data same-action fidelity is measured,
+recorded and typed, not forced to either verdict. The point-only waiver is not
+evidence that the distribution is accurate.
+
+Independent review caught `diag_mixture_decode.py --ode` inheriting10 decode steps.
+That completed ODE10 report is retained but quarantined by
+`reports/diagnostic_limitations.json`; job2513837 reran the correct
+`validate_decode_recovery.py agent.flow_steps=100` path.
+One-step diagnostics use first4096 rows on the full artifact; ODE100 selects random
+valid4096, so they are not row/RNG-paired. The one-step tool clips sample/prior but
+not point/mean; that baseline is not a fully training-matched clipping comparison.
+
+| Stage | Job | Observed at21:21:51 UTC |
+|---|---|---|
+| Shared full1M inversion | 2513740 | RUNNING; retained unchanged |
+| B256 one-step + ancillary ODE10 diagnostic | 2513809 | COMPLETED 0:0 |
+| Explicit matched ODE100 B256 diagnostic | 2513837 | COMPLETED 0:0 |
+| Full distribution integrity/decode checks + C200 smoke | 2513889 | PENDING after successful2513740 |
+| Distribution seed0 /1 /2,500k + five-task final eval | 2513895 /2513897 /2513898 | PENDING after successful2513889 |
+| Distribution three-seed aggregate | 2513899 | PENDING after all three distribution seeds |
+
+The full-data distribution gate pins the complete inversion recipe, subset, flow
+and Stage-B receipt hashes, checks covariance/weights/validity, and exercises the
+actual posterior sampler. The C200 path checks its own false/1/null flags, finite
+losses/checkpoint/actions, frozen-flow bitwise equality and restored five-task
+two-episode evaluation. Production readers require both distribution input and decode
+receipts with hashes. Numerical failures block production; no silent switch to
+point, shrinkage, different inversion settings or a reward-trained arm is allowed.
+
+Validation:53 tests passed (13 preimage pipeline/validity +40 affine/index/eval-config),
+seven shell payloads,32 inline Python blocks and26 Hydra commands parsed. Independent
+read-only review's provenance/decoder cautions were incorporated. Source manifest
+remains `439f3717ee47514ffd52afd063303ce86047c558388fd44189a52a2b395e68c3`.
+An initial C-smoke submission was rejected because completed diagnostic2513809 had
+left Slurm's live records; no job was created. Its COMPLETED0:0 accounting status and
+saved diagnostic hashes were verified; the successful chain depends on active fullB
+and checks those completed artifacts by hash instead. See
+`reports/dependency_submission_note.json`.
+
+Exact commands/IDs: `distribution_v1/launch_manifest.json`; verification:
+`distribution_v1/reports/postlaunch_validation.json`. All C work is still pending,
+not trained or performance-validated. Existing Walker/raw-action-affine jobs and all
+user edits remain untouched.
+
+---
+
+
+## 2026-09-13 20:59 UTC — Stitch PSMFlow point-preimage relaunch is running
+
+The user explicitly approved the point-specific relaunch after the original
+ESS-only gate failure. This applies to the existing affine-psi, latent-index,
+GPI, point-preimage PSMFlow arm, **not** the separate raw-action RLU full-affine
+campaign. No model, loss, loader, inversion computation, decoder or hyperparameter
+changes were made. The original trained Stage-A500k flow and completed same-flow
+BC evaluation are reused; the 171-file frozen source manifest is unchanged.
+
+The old D3 job2506527 failed only its mean-ESS>20 condition. Its dependent full-B
+and all three Stage-C jobs were cancelled before starting; they have no results.
+The relaunch lives in
+`outputs/psmflow_antmaze_stitch_20260913/relaunch_point_v2/`, with separate exact
+submissions and `launch_manifest.json`. The original launch records are historical.
+
+**Bounded gate change.** Campaign-local `point_gate.py` treats finite, nonnegative
+EM ESS as diagnostic-only for the explicitly checked point-preimage arm. It still
+requires point roundtrip <0.1, central-99%-chi-square typicality >=0.95, the exact
+trained flow/configuration and artifact hashes. Sampled and full-data receipts
+also enforce these point metrics on valid rows, invalid fraction <=1%, and exact
+native transition pairing. The existing EM+point validity/repair checks remain;
+Gaussian computation is not skipped. Full inversion therefore remains expensive.
+C readers require the explicit point-gate receipt fields before training.
+
+Fresh D3 reproduced mean ESS18.012, mean point roundtrip0.000205 and typicality
+0.9844. The original combined D3 report correctly remains `gate_pass=false`;
+the separate authorized point receipt passes. The 256-row inversion smoke passed:
+0 invalid rows, point roundtrip0.0002077203, typicality0.984375, diagnostic final
+ESS16.75856, and all native transition columns bitwise matched. This is an
+inversion diagnostic, never the Stage-C training dataset.
+
+| Stage | New job | Observed at 20:59:12 UTC |
+|---|---|---|
+| Fresh D3 + point gate + B256 smoke | 2513739 | COMPLETED 0:0, 2m16s |
+| Full 1M inversion + full point/artifact checks | 2513740 | RUNNING; source/data and authorized receipt verified |
+| Full-artifact C200 + restored-action/eval checks | 2513745 | PENDING after successful full B |
+| C500k seed0 + five-task final evaluation | 2513746 | PENDING after successful C smoke |
+| C500k seed1 + five-task final evaluation | 2513748 | PENDING after successful C smoke |
+| C500k seed2 + five-task final evaluation | 2513749 | PENDING after successful C smoke |
+| Strict three-seed aggregate | 2513750 | PENDING after all three C jobs |
+
+The C200 gate requires finite losses/checkpoint/actions and both frozen flow trees
+bitwise unchanged, with five restored two-episode task evaluations. Production
+remains 500k updates per seed and 500 final episodes per task over five tasks;
+no actor or DSRL-NA branch, no reward-trained representation arm, no online data.
+The reused BC control is the previously measured 32/2500 successes (1.28% mean);
+it was hash-verified, not rerun. No new PSMFlow performance result exists yet.
+
+Validation: 27 focused gate tests passed (`tests_final_formatted.xml`); Ruff
+passed; seven shell payloads, 39 inline Python blocks and 28 Hydra configurations
+parsed; all four C readers contain the point-specific receipt checks; expected
+model flags equal the original submissions. Independent read-only review found
+no remaining clean-run launch blocker. Scheduler resources/dependencies, fresh
+D3/smoke receipt hashes, and Stage-A/source pairing were checked. See relaunch
+`reports/submission_verification.json` and `reports/postlaunch_validation.json`.
+Point-gate SHA256:
+`1613a34fa199af3528d95d0045affd1a7d636f24724455abb4fbfa1e5f86329c`.
+The full-B and C gates remain uncompleted; submission/smoke success is not an
+implementation-validity or performance claim. Walker and raw-action affine jobs
+were not altered; no publication or destructive cleanup was performed.
+
+---
+
+
+## 2026-09-13 — AntMaze oracle-aim is 0.966: the reachable set is fine there too; batch 512 is not a lever
+
+### E1 on antmaze (`tools/diag_oracle_aim.py`, 500 ep, K=512, ODE-100)
+
+The cube-only E1 row now has its antmaze counterpart. Same harness, same eval-seed
+protocol, the frozen Stage-A flow `antmaze-medium-navigate@500000` for decode and
+`fqlexpert_ant_a10/sd000@500000` as the oracle.
+
+| arm | success | Wilson 95% |
+|---|---|---|
+| **oracle_aim** | **0.966** | [0.946, 0.979] |
+| oracle (ceiling control) | 0.972 | [0.954, 0.983] |
+| random_latent_onestep (floor) | 0.078 | [0.058, 0.105] |
+| random_latent_ode (floor) | 0.048 | [0.033, 0.070] |
+
+Both controls land where the record says they should: the ceiling matches the expert's own
+0.95-1.00 in-loop evals, the one-step floor matches the antmaze BC control 0.072. That is
+what makes the aim number readable.
+
+**Verdict.** AntMaze is a selection failure, not a reachability ceiling. Drawing the same
+512 prior latents the deployed GPI path draws and executing the one closest to the expert's
+action reaches 0.966, against 0.078 for executing a random one and 0.294 pooled for the
+trained agent. `COMPENDIUM` §4.3's conclusion — "the entire Stage-C loss is latent
+*selection*" — now holds on both environments rather than on cube alone.
+
+**One earlier reading is overturned.** The 09-02 smoothness probe recorded antmaze's
+best-of-512 distance as 15.7% of the mean action norm (0.313 / 1.99) against cube's 6.9%
+(0.060 / 0.87), and that was written up as the "third independent sighting of the
+cube/antmaze split". It costs nothing in rollout: antmaze's aim arm (0.966) sits above
+cube's (0.934). The distance gap is real and is not the antmaze problem.
+
+Report: `$PSM_DATA/logs/oracle_aim_antmaze.json`. `tools/diag_oracle_aim.py` was restored
+from the archive to run this and is kept.
+
+### Batch size 512, both environments, 3 seeds each
+
+Pre-registered before launch: no gain, and more swing between checkpoints, because the
+measure loss sums `B^2 - B` off-diagonal pairs and 1024 → 512 cuts that term ~4x.
+
+Runs: `bs512_cube` and `bs512_antmaze`, identical to `affine_strict_cube` and
+`affine_strict_antmaze_g99` except `agent.batch_size=512`. In-loop 50-episode evals over
+the 250k-500k ladder, 18 cells per arm:
+
+| arm | mean | sd | swing per 50k |
+|---|---|---|---|
+| cube 1024 | 0.427 | 0.147 | 0.121 |
+| cube 512 | 0.381 | 0.197 | 0.219 |
+| antmaze 1024 | 0.267 | 0.184 | 0.147 |
+| antmaze 512 | 0.188 | 0.201 | 0.188 |
+
+Per-seed ladder means: cube 1024 0.350/0.500/0.430 against 512 0.393/0.297/0.453; antmaze
+1024 0.197/0.183/0.420 against 512 0.090/0.097/0.377. Cell-level differences +0.046
+(cube, permutation p 0.223) and +0.079 (antmaze, p 0.115).
+
+**Reading.** Batch size is not a lever. The mean is lower at 512 in both environments and
+neither gap separates from the seed spread. The swing between neighbouring checkpoints is
+larger at 512 in both, as pre-registered, but that difference is p 0.058 on cube and
+p 0.372 on antmaze, so it is not established either. These are 50-episode evals and do not
+count as reportable numbers; the 500-episode ladder was not run.
+
+### Training-log diagnostics from those six runs
+
+`psm_offdiag` is the squared residual `M - gamma*target_M` on mismatched pairs
+(`utils/psm_common.py:24-26`). It grows through training in every arm: antmaze seed 0 goes
+754 → 11968 (16x) monotonically, cube seed 0 spikes to 36841 at 350k and 34129 at 500k. The
+diagonal term stays flat near -170 throughout, so the growth is confined to mismatched
+pairs. `psi_q_spread_rel`, the critic's score range across candidates relative to its own
+magnitude, stays at 0.009-0.020 on antmaze and 0.026-0.058 on cube for the whole run — the
+separating part does not grow with the scale.
+
+Across 120 checkpoints, no training signal tracks the eval score: Spearman +0.124 for
+`psm_loss`, -0.308 for `w_enc_spread` (which decays monotonically with time in every seed),
++0.270 for `psi_q_spread_rel`.
+
+**Correction to an earlier note in this record's margins.** `index_agg=max` does not put a
+max operator inside the measure backup under the default config. At `agents/psmflow.py:652`,
+`policy_index=latent` sets `u_next = u_index`, a prior draw, so the TD target is
+`psi_bar(s', u', u')^T phi_bar` with `u'` sampled and never maximised. Classic maximization
+bias does not apply to the measure fit; the ensemble reduction is exact min, so the target
+is biased low if anything.
+
+### Repo: the archived agents moved to the `archive` branch
+
+`archive/` (58 Python files) and `scripts/baselines/` (11 launchers) are off
+`feat/inversion-integration` as of `daa0268` and live on the `archive` branch, cut at that
+commit's parent. Five network classes (`PSMActor`, `AffineMeasureNet`,
+`FactoredAffineMeasureNet`, `LagrangeNet`, `WNet`, -208 lines) and four helpers
+(`proto_sample`, `_HashableDict`, `_step`, `_soft`, -31 lines) were dead once those left and
+are deleted; each was checked for references outside `archive/` first. `pyproject.toml`
+drops the ruff exclude and the pytest `norecursedirs` entry. Retrieval is
+`git show archive:archive/<path>` to read and `git checkout archive -- archive/<path>` to
+restore. Five test files (62 passed, 2 skipped) and the ruff count on `utils/` and `agents/`
+(42 findings) are unchanged across the deletion.
+
+---
+
+## 2026-09-13 — flow-backed affine PSM on AntMaze medium-stitch queued
+
+User additionally requested affine **flow** PSM on stitch. This campaign uses the
+current `agent=psmflow`: affine successor features, latent current-action coordinate
+and policy index, GPI argmax, no trained actor/DSRL-NA/action critic. It is distinct
+from the archived raw-action RLU full-affine solver below. No live algorithm code,
+loss, loader or inversion routine was changed. [Full binding recipe and plan](plans/2026-09-13-psmflow-antmaze-stitch.md).
+
+Campaign: `outputs/psmflow_antmaze_stitch_20260913/`. Exact submissions/dependencies:
+`launch_manifest.json`; saved wrap payloads: `stage_a_submission.json`,
+`stage_b_submissions.json`, `stage_c_submissions.json`, `aggregate_submission.json`.
+Frozen171-file working-tree snapshot: `code/`, source-manifest SHA256
+`439f3717ee47514ffd52afd063303ce86047c558388fd44189a52a2b395e68c3`.
+The existing shared `.venv` is reused, with package versions recorded rather than
+claimed as an independently frozen installation. No existing Walker/raw-action
+affine jobs were altered, and no artifact was published to Hugging Face.
+
+**Data:** Reuses the exact Drive files already downloaded for the raw-action campaign;
+both hashes and the native1M/100k train/validation pairing were freshly verified.
+`envs.env_utils` does not pass a dataset directory and installed OGBench ignores
+`OGBENCH_DATASET_DIR`. Approved non-overwriting links in `/mnt/home/amohan/.ogbench/data/`
+point to the original stitch NPZs. No navigate dataset is substituted. Obs29/action8,
+five tasks,1000-step horizon; provenance in `reports/runtime_preflight.json`.
+
+**Recipe:** One shared seed0 behaviour flow,500k BC-only updates, B256,LR3e-4,
+4x512,distillation10,100 flow steps. B retains the existing point-plus-EM path:
+alpha50,prior1,N200,10EM steps,100 inverse steps,K1,B256,full1M transitions.
+Representation seeds0/1/2 each500k updates,B1024,d128,2 ensembles,gamma.99,tau.01,
+ortho1000,LRphi1e-5/LRsf1e-4,affine latent index,point preimages,64x64 GPI,
+frozen one-step decode. Phi trains; flow does not. Training rewards/masks are not
+read by the default measure loss; rewards enter task-vector inference/evaluation only.
+`mask_invalid_preimages=false` is the unchanged loss flag, but the existing dataset
+sampler independently excludes invalid preimage rows. This is an untuned transfer,
+not a matched-architecture causal comparison with the raw-action full-affine arm.
+
+**Verification before release:**64 focused tests passed (10 BC/aggregation +54
+affine/index/preimage/GPI), with JUnit records. Stage-A full-size200-update H100 smoke
+2506433 COMPLETED0:0 in1m01s; all logged train/validation losses and171 serialized
+checkpoint leaves were finite. Its flags/data/source/checkpoint binding is recorded
+in `reports/stage_a_smoke_receipt.json`. Independent read-only launch review found
+no clean-run blocker; all34 scheduled Hydra invocations composed, shell and inline
+Python parsed. Review feedback added exclusive B-output guards and2 CPU threads per
+evaluation worker. None of this establishes stitch benchmark performance.
+
+**Observed at2026-09-13 00:56:45 UTC:** Stage-A production2506471 RUNNING on one H100,
+257k/500k logged updates, all metrics finite, own flags verified unchanged. Inversion
+gate2506527 is PENDING after Stage A; full inversion2506529 after that gate; full-data
+Stage-C200-update smoke2506567 after full inversion. Stage-C seeds0/1/2 jobs
+2506571/2506573/2506574 are PENDING after successful C smoke, **not running yet**.
+Same-flow BC evaluation2506575 waits on Stage A. Aggregate2506577 waits on all three
+C train/final-eval jobs and the BC control. All dependency IDs and requested resources
+were checked against the scheduler in `reports/postlaunch_validation.json`.
+
+**Pending gates/results:** D1 is descriptive; D3 must meet its existing gate:
+chi-square99%-band typicality>=.95, mean roundtrip<.1, final ESS>20. No automatic ESS
+waiver is applied for point mode. A sampled256 inversion checks plumbing/pairing but
+is never C input; full B checks all transition columns against the native loader and
+binds NPZ/sidecar/flow hashes. C smoke checks200 updates, finite checkpoint/actions,
+bitwise-unchanged velocity and one-step flow trees, and restored2-episode evaluations
+on all five tasks. Only successful gates release production. Final saved500k endpoints
+and the same-flow BC control get500 episodes/task, five tasks,4 workers; the strict
+aggregate averages tasks within seed and then computes the three-seed Student-t95% CI.
+Failed prerequisites prevent downstream execution; no method/seed/checkpoint fallback.
+Inversion has a48h allocation (not an ETA). No completed stitch result is claimed.
+
+---
+
+## 2026-09-13 — full-affine PSM on AntMaze medium-stitch queued
+
+User requested our full-affine PSM on the exact assets from Drive folder
+`1OqKCtqNwQoS7gUmM1QaFc8NN5aYHqBbt`. This campaign uses the archived RLU-derived
+`AffinePSMAgent`, **raw actions and full goal inference**, not PSMFlow and not the
+plain Walker zero-shot PSM baseline. [Declared recipe and completed launch plan](plans/2026-09-13-affine-antmaze-stitch.md).
+Campaign: `outputs/affine_antmaze_stitch_20260913/`; exact job record:
+`launch_manifest.json` there. Walker jobs/files were not modified.
+
+**Data:** Downloaded the exact Drive `antmaze-medium-stitch-v0.npz` and `-val.npz`.
+SHA256, ZIP integrity, finite schema/action bounds and native OGBench sentinel pairing
+were verified. The files contain1M training transitions in5000 short200-step episodes
+and100k validation transitions in500 episodes. Observation/goal width29, action8,
+five fixed tasks,1000-step evaluation horizon. Training and inference use only the
+training split; batches exclude rewards, masks and terminal indicators. Exact hashes,
+Drive IDs and raw source evidence are in `data/provenance/manifest.json`. Official
+OGBench names/content lengths match; no official publisher cryptographic checksum
+was available, so this is not a claim of independently verified cross-host byte equality.
+
+**Recipe is an untuned AntMaze transfer, not reference parity:** seeds0/1/2,500k updates,
+B1024,d=z128, factored measure rank32,width1024,depth3,bias scale10, gamma.99,tau.01,
+all LR1e-4,ortho1000, DDPG+BC actor with BC.3,width1024,hidden1,embedding2. Proto16-bit
+codebook uses archived draws shifted+1 to correct the released[-2,0) range to[-1,1).
+No archived loss/inference code changed. Full primal-dual goal inference uses5120
+updates with a normalized coordinate and dual256x2, followed by exactly512 actor
+adaptation updates per task. It is task-time optimization, not training-free extraction.
+Evaluate10 episodes/task every100k and500/task at the saved500k endpoint; average
+tasks within each seed, then compute a Student-t95% interval across the three seeds.
+
+**Implementation verification:** isolated `tools/affine_stitch/` adapter,12 passing
+focused CPU tests, clean Ruff/shell syntax and an independent read-only review with
+no critical or important adapter issue. Full-size CPU construction/data loading,
+checkpoint restoration and all five full29-D goals passed. OGBench uses global NumPy
+for initial-position noise before its seeded reset; the adapter seeds/restores this
+stream along with environment/action-space RNGs. Inference has an independent dataset
+RNG and every task starts from the same pre-inference agent. It verifies unchanged
+representation parameters/optimizer states/targets and exactly-once actor adaptation.
+Source/data manifests bind through flags to checkpoints; final evaluation restores the
+saved endpoint. Artifacts are exclusive and the archived source is checksummed in
+`code/`, manifest SHA256 `b8138ff7e12fb88a47a2ba61bff18ae2634854fca4b5acc37b48e7bca1c8c0de`.
+
+**Numerical edge case found, not silently fixed:** a synthetic width8,d4,rank2 fixture
+reaches an exactly zero x-side basis. Its forward loss is finite but `psm_norm` has NaN
+gradients at zero; measure parameters become nonfinite before task inference. A
+width32 fixture passes deterministic inference. The small failure remains an expected
+rejection regression; evidence is `tiny_feature_diagnostic.json`. This does not show
+that the same event occurs in the full-size campaign or explain historical PSMFlow
+performance. The archived normalization remains unchanged for this run.
+
+**GPU gate passed:** smoke2506198 COMPLETED/0:0 in3m32s,200 full-size updates plus
+full5120+512 inference and2 rollout episodes on each of five tasks from the restored
+checkpoint. Logged losses/actions/coordinates were finite, representation hashes
+unchanged and full goals identical to CPU preflight. Flags and source/data/checkpoint
+binding verified in `smoke_validation.json`. Its zero successes are wiring diagnostics,
+not a benchmark result. Post-compile70.633 updates/s projects1.966h for500k training
+alone; including evaluation via short-run extrapolation projects2.757h, not a guarantee.
+
+**Production submitted and observed RUNNING:** seed0 job2506231, seed1 job2506233,
+seed2 job2506232, one H100/24h each, using the passing smoke's exact `code/` snapshot.
+At2026-09-12 23:59:25 UTC, each run's own declared/resolved config, bounded proto
+range, data paths,500k budget, final500-episode protocol and source/data hashes matched.
+Seeds0/1/2 had reached6k/5k/5k logged updates with finite metrics. Full evidence:
+`postlaunch_validation.json`. Checkpoints save optimizer/RNG state but this adapter
+does not implement interrupted-training resume. Aggregate job2506237 is PENDING on
+successful completion of all three training/final-evaluation jobs and will write
+`aggregate.json`. No completed stitch benchmark result is claimed.
+
+---
+
+## 2026-09-13 — Walker no-flow PSM setup and RLU source-lineage correction
+
+The user authorized downloading ExORL and running a raw-action PSM positive control.
+[Declared recipe and launch plan](plans/2026-09-13-walker-zero-shot-psm.md).
+Campaign: `outputs/walker_psm_20260913/`; job record: `launch_manifest.json` there.
+
+**Data acquired and validated:** official `denisyarats/exorl` Walker RND ZIP, 10,000
+episodes /10M transitions. All ZIP CRCs, episode schemas, numeric finiteness and
+checksums passed. First 5,000 numeric episode IDs provide the declared5M training
+transitions. Observations24, actions6, physics18; every environment discount is1.
+Loader pairs `obs[t-1], action[t], obs[t], physics[t]`, excluding dummy initial rows
+and all collection rewards. Provenance: `data/provenance.json`, archive SHA256
+`384bc064ea62ccea19e5be22646d2af7eb5d1c2b19bf3dbb23b7bb5641b63b1c`.
+
+**Implementation:** isolated archived raw-action `PSMAgent` and matching utilities,
+archive commit `ee0e1746b36f48300eee06ad02e66b16f46851ff`; no live agent restored.
+New harness: `tools/walker_psm/`, `scripts/slurm/walker_psm.sbatch`, and focused tests.
+The final harness has **10 passing CPU tests**, including changed-sidecar rejection.
+Independent review verified real physics-to-observation agreement on five rows in all
+four tasks (max absolute error3.57e-7) and approved the source/data-to-checkpoint binding
+fix. Full-size construction, episode horizons, and checkpoint restoration were checked.
+Test reports and preflight JSON are retained in the campaign.
+
+**Protocol is explicitly not exact published replication.** The official zero-shot
+PSM release revision `b1a2e7f388f789a0d6abaabd317692c1f50f42b2` samples proto actions
+as `2*(rand-1)` in[-2,0), feeding them unclipped to its TD target despite Walker's
+[-1,1] bounds. The primary baseline corrects this to `2*rand-1`, preserving per-row
+Torch seeds; the exact released table/mode remain available but are not the primary
+run. The bounded table matches released+1 exactly, has zero out-of-bounds rows, and
+hashes to `730718b792a05097adbe1d22af8ffa3375380f5b69cd99481232d0fd2494130e`.
+
+Recipe: seeds0/1/2,5M transitions,2M updates,B1024,d128,gamma.98,tau.01,all LR1e-4,
+ortho1,raw TD3-style actor with BC0,target pessimism0,actor pessimism.5. Numerical
+architecture/optimizer settings follow released code; data/update budget follow the
+paper. JAX initialization/sampling and the pre-proto task-mixture feature timing also
+differ from upstream execution. Stand/walk/run/flip use fixed10k reward inference rows,
+10 periodic episodes/task and500/task at the saved2M checkpoint; aggregate across
+training seeds after task averaging. Published Table1's Walker average689.07 (five
+seeds) is context, not a newly reproduced score or an exact-protocol comparator.
+
+**GPU gate:** initial smoke2505858 completed0:0 in3m10s, with200 full-size updates,
+finite logged losses, restored-checkpoint four-task evaluation (2 episodes/task),
+and the displayed settings in its flags. Post-compile rate132.718 updates/s projects
+to4.186h for2M updates alone; startup/evaluation are additional. Its two-episode
+returns are wiring diagnostics, not benchmark evidence. Metadata-only provenance
+hardening created snapshot `code_v2`; final smoke2505882 completed0:0 in2m19s in
+`smoke_v2/seed0`. Its flags, restored200-update checkpoint evaluation, and checkpoint-
+bound source/data hashes passed the launch gate.
+
+**Production submitted and observed RUNNING:** seed0 job2505905, seed1 job2505904,
+seed2 job2505906, one H100 each with24h allocation, all using `code_v2`. Aggregate
+job2505911 depends on all three training/evaluation jobs succeeding and will write
+`outputs/walker_psm_20260913/aggregate.json`. Startup validation passed at
+2026-09-12 23:03:36 UTC: every declared agent/run setting matched each run's own flags,
+source/data hashes agreed across seeds and with the bound sidecars, and seeds0/1/2
+had advanced to5k/9k/5k with finite logged metrics. Full check:
+`outputs/walker_psm_20260913/postlaunch_validation.json`.
+The runner saves optimizer/RNG state but does not currently
+support interrupted-training resume; the observed update rate fits comfortably inside
+the allocation with evaluation headroom. No completed Walker benchmark result is claimed.
+
+**RLU correction:** the supplied full-affine source is
+`CalCharles/RLU/controllable_agent`, not the separate zero-shot PSM release. The URL
+was not freshly accessible; local archive/design/code provide the inspected lineage.
+Archived `AffinePSMAgent` has goal-conditioned constrained coordinate inference and
+actor distillation, unlike current PSMFlow's GPI-only extraction. Its normalized
+source and factored bias branches also differ. The archived design explicitly deferred
+reward-based full inference; dense Walker rewards need that interface before this can
+be called a full-affine Walker run. A plain zero-shot PSM result does not validate
+that separate method or, by itself, isolate the frozen-flow interface.
+
+---
+
+## 2026-09-13 — interface audit, diagnostic corrections, freeze-phi final result
+
+[Full audit and Walker protocol](design/2026-09-13-psm-interface-audit.md).
+No production training code changed, no new long job launched, and existing uncommitted
+work was preserved. Historical policy evaluations below were revalidated from their
+reports; they were not rerun today.
+
+**Fresh implementation validation:** 97 tests passed with 2 checkpoint-gated skips; the
+two real-flow cases were then enabled using the local cube Stage-A checkpoint and passed,
+together with the default affine chain-task test. Total: **100 distinct PSMFlow tests
+passed**. The sibling Factored-FB PSM fixture suite passed **35 tests**; that fixture
+isolates network/loss transcription using injected actions and post-Torch-update phi, so
+it does not validate full original-PSM optimizer/sampler equivalence or Walker performance.
+Persisted outputs: `outputs/psm_interface_audit_20260913/`.
+
+**The freeze-phi job is complete.** Current Slurm accounting confirms job2494139
+COMPLETED/0:0. Its ten endpoint reports use 500 episodes/task, seed0, four workers, and
+absolute step500k (50k source +450k continuation). Configurations match except `train_phi`.
+
+| Arm | task1 | task2 | task3 | task4 | task5 | Five-task mean |
+|---|---:|---:|---:|---:|---:|---:|
+| Continue phi | .076 | .004 | .000 | .000 | .002 | **.0164** |
+| Freeze phi | .128 | .000 | .000 | .000 | .000 | **.0256** |
+| Same-flow BC | .056 | .174 | .026 | .006 | .100 | **.0724** |
+
+Source task1 was .844 at50k. Both arms lose most of that performance. Completion checks
+confirm frozen phi/optimizer preservation, synchronized target phi, unchanged flow,
+finite psi states, and matched RNG streams. Endpoint Gram deviations are .347 frozen
+and .350 control. Continuing phi movement is not necessary for this continuation's
+performance loss; freezing this basis was insufficient. This is one training seed,
+not an across-seed inference or a validated alternative basis experiment.
+
+**Three earlier causal interpretations need correction:**
+
+- D1b (`phi_readout_fixed`) holds w and scale, but reads the changing online phi each
+  step. It does not hold the reward function fixed between refits unless phi is frozen.
+  A small-agent probe changed the fitted reward by .0385 while keeping w/scale exact.
+- D2 (`synthetic_w`) still uses task-specific success masks in its TD target. The actual
+  preimage files contain 20,810/1M cube and 9,113/1M AntMaze zero masks; masks equal the
+  negative task rewards. Its loss is invariant to changing real rewards but changes
+  when masks change. This is synthetic-reward learning with task-specific termination,
+  not strictly task-agnostic reward-free pretraining. Its measured failures still stand.
+- The fitted-return tool evaluates each policy under its own phi/w/scale. Its historical
+  7.805x ratio compares different surrogate rewards and cannot demonstrate improvement
+  under one fixed surrogate. Freeze one reward evaluator and cross-score policies before
+  using that causal reading. The tool also refits w instead of reading D1b's held w.
+
+**Structural counterexample:** marginal behavior matching does not establish joint
+action/policy-index coverage. An exact Gaussian identity flow, fixed phi, and realizable
+affine model give projected-TD multiplier **1.086396 at gamma .9**, verified analytically
+and numerically. This establishes a possible interface failure, not the live network's
+root cause. The exact two-head minimum Bellman operator remains gamma-contractive in
+sup norm; the September8 disagreement-growth fit was not a proof to the contrary.
+Projection can break stability. Density minimum still loses mass and is not pessimistic
+for every signed reward. The existing P=1 uncertainty-helper NaN was reproduced; default
+P=2 is unaffected.
+
+**Walker:** environment construction/reset/step passed; no Walker RND buffer or Walker
+Stage-A/B artifacts were found in inspected project/home storage. The official PSM paper,
+released defaults, archived cube port, and current affine agent are different protocols.
+The audit specifies reference-equivalence and original-PSM positive-control gates, followed
+by a matched identity-decoder free/affine pair. Plain PSM versus full PSMFlow alone changes
+the policy family and extraction algorithm as well as the flow. No Walker run is claimed.
 
 ---
 

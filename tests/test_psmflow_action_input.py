@@ -222,10 +222,50 @@ def test_measure_action_input_defaults_backfill_and_guards():
         _agent(measure_action_input='unknown')
     with pytest.raises(AssertionError, match='requires psi_form=affine'):
         _agent(measure_action_input='action', psi_form='free')
-    with pytest.raises(AssertionError, match='requires policy_index=latent'):
-        _agent(measure_action_input='action', psi_form='affine', policy_index='task_vector')
     with pytest.raises(AssertionError, match='measure_u_samples=1'):
         _agent(
             measure_action_input='action', measure_u_samples=2,
             measure_u_source='jitter', measure_u_jitter_std=0.1,
         )
+    with pytest.raises(AssertionError, match='psi_dueling'):
+        _agent(measure_action_input='action', policy_index='task_vector',
+               train_actor=True, acting='actor', psi_dueling=True)
+
+
+def test_action_measure_with_the_task_vector_index_reads_the_actor_q_at_decoded_actions():
+    """Fix 3 (2026-09-15): action mode on the Section 10 index. The actor's Q is
+    psi(s, G(s, u_actor), w)^T w, the bootstrap is psi_bar(s', G(s', u+), w) at the actor's
+    u+, and one update is finite."""
+    agent = _agent(measure_action_input='action', psi_form='affine',
+                   policy_index='task_vector', train_actor=True, acting='actor')
+    batch = _batch(3)
+    sampled = agent.sample_step_inputs(batch, jax.random.PRNGKey(4))
+    obs, w = batch['observations'], sampled.task_w
+    u_a = jnp.clip(jax.random.normal(jax.random.PRNGKey(5), (B, ACT)), -1.0, 1.0)
+
+    Q, q_ens = agent._actor_q(obs, u_a, sampled)
+    ref_ens = (agent.psi(obs, w, agent.decode(obs, u_a)) * w).sum(-1)     # (P, B)
+    np.testing.assert_allclose(np.asarray(q_ens), np.asarray(ref_ens), rtol=1e-5, atol=1e-6)
+    q_mean, q_unc = targets_uncertainty(ref_ens, agent.config['num_parallel'])
+    np.testing.assert_allclose(
+        np.asarray(Q), np.asarray(q_mean - agent.config['actor_pessimism_penalty'] * q_unc),
+        rtol=1e-5, atol=1e-6)
+    # a raw-latent read of the head is a different number: the decode is load-bearing
+    assert not np.allclose(np.asarray(q_ens), np.asarray((agent.psi(obs, w, u_a) * w).sum(-1)))
+
+    # the bootstrap continues the actor's latent at s', decoded
+    next_obs = batch['next_observations']
+    r_next = jax.random.split(jax.random.PRNGKey(4), 7)[3]      # sample_step_inputs' split
+    u_plus = agent._deploy_latent(next_obs, w, jax.random.normal(r_next, (B, ACT)))
+    np.testing.assert_allclose(np.asarray(sampled.u_next), np.asarray(u_plus), rtol=1e-6)
+    boot = agent.psi_b(next_obs, w, sampled.u_next, params=agent.target_psi)
+    ref_boot = agent.psi(next_obs, w, agent.decode(next_obs, u_plus), params=agent.target_psi)
+    np.testing.assert_allclose(np.asarray(boot), np.asarray(ref_boot), rtol=1e-6)
+
+    stepped, info = agent.update(batch)
+    for k in ('psm_loss', 'orth_loss', 'actor_loss', 'actor_q'):
+        assert math.isfinite(float(info[k])), (k, info[k])
+    assert not _tree_allclose(agent.psi.params, stepped.psi.params, rtol=0, atol=0)
+    assert not _tree_allclose(agent.actor.params, stepped.actor.params, rtol=0, atol=0)
+    a = np.asarray(stepped.sample_actions(obs[0], seed=jax.random.PRNGKey(0)))
+    assert a.shape == (ACT,) and np.all(np.abs(a) <= 1.0 + 1e-5)

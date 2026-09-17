@@ -47,3 +47,9 @@ frame_stack: null
 dataset_fraction: 1.0    # episode-level seeded subsample of the training set (Idea 2b/2c)
 dataset_fraction_seed: 0
 balanced_sampling: 0
+
+dataset:
+  # Replace the training set's `rewards` with the `rewards` array of this npz, row for row
+  # (tools/relabel_reward_rhat.py writes r_hat = phi(s')^T w from a frozen checkpoint).
+  # The length must match; nothing else in the dataset changes. null = the dataset's own.
+  reward_override_path: null

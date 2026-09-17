@@ -12,6 +12,24 @@ def get_size(data):
     return max(jax.tree_util.tree_leaves(sizes))
 
 
+def apply_reward_override(dataset, path):
+    """Replace `dataset['rewards']` with the `rewards` array of the npz at `path`.
+
+    `cfg.dataset.reward_override_path`: the file is row-aligned with the training set (same
+    order, same length -- e.g. tools/relabel_reward_rhat.py's `r_hat = phi(s')^T w` over
+    every transition) and nothing else in the dataset changes. Returns a plain dict.
+    """
+    with np.load(path, allow_pickle=False) as z:
+        rewards = np.asarray(z['rewards'], np.float32).reshape(-1)
+    size = get_size(dataset)
+    assert rewards.shape[0] == size, (
+        f'reward override {path!r} has {rewards.shape[0]} rows but the dataset has {size}')
+    assert np.isfinite(rewards).all(), f'reward override {path!r} has non-finite entries'
+    dataset = dict(dataset)
+    dataset['rewards'] = rewards
+    return dataset
+
+
 @partial(jax.jit, static_argnames=('padding',))
 def random_crop(img, crop_from, padding):
     """Randomly crop an image.
@@ -50,6 +68,35 @@ def add_skill_targets(dataset_dict, window):
     end_of_episode = ends[np.searchsorted(ends, idx, side='left')]
     skill_idx = np.minimum(idx + window, end_of_episode)
     return observations[skill_idx]
+
+
+def hindsight_goal_idxs(idxs, terminal_locs, size, discount, random_frac, rng=None):
+    """Goal ROW for each sampled row, OGBench GCDataset convention (psmgoal, 2026-09-17).
+
+    Hindsight goal: offset d ~ Geometric(p = 1 - discount), d >= 1, so the goal row is
+    min(idx + d - 1, end_of_trajectory(idx)) and the goal STATE is `next_observations` at
+    that row -- d = 1 is the row's own s', the cap is the trajectory's final state, and a
+    goal never crosses a boundary in `terminal_locs` (rows where terminals > 0). A
+    `random_frac` of rows take a uniformly random row of the whole dataset instead.
+
+    Returns (goal_idxs, is_random), both (len(idxs),). `rng` defaults to numpy's global
+    stream, which is what `Dataset.sample` draws from.
+    """
+    r = np.random if rng is None else rng
+    idxs = np.asarray(idxs)
+    terminal_locs = np.asarray(terminal_locs)
+    pos = np.searchsorted(terminal_locs, idxs, side='left')
+    # A row past the last recorded terminal (a replay buffer's zero padding, or a dataset
+    # whose final row is not marked) ends at the last row.
+    has_end = pos < terminal_locs.shape[0]
+    ends = np.where(has_end, terminal_locs[np.minimum(pos, terminal_locs.shape[0] - 1)], size - 1)
+    dist = r.geometric(p=1.0 - float(discount), size=idxs.shape[0])
+    goal = np.minimum(idxs + dist - 1, ends)
+    is_random = r.uniform(size=idxs.shape[0]) < float(random_frac)
+    # np.random has `randint`, a Generator has `integers`; both are exclusive of `size`.
+    draw = r.integers if hasattr(r, 'integers') else r.randint
+    goal = np.where(is_random, draw(0, size, size=idxs.shape[0]), goal)
+    return goal.astype(np.int64), is_random
 
 
 def get_noise_preimage_dataset(dataset, num_clusters=1):
@@ -92,6 +139,11 @@ class Dataset(FrozenDict):
         self.return_preimage_noise = False  # Whether to sample preimage noise from the EM mixture; set outside the class.
         self.return_index = False  # Whether to emit the global row index as batch['index'] (PSM proto sampler); set outside the class.
         self.preimage_point_mode = False  # Serve the stored point preimage instead of mixture draws; set outside the class.
+        # psmgoal (2026-09-17): emit a hindsight goal state per row as batch['goals'], drawn by
+        # `hindsight_goal_idxs` at (goal_discount, goal_random_frac). Off by default.
+        self.return_goals = False
+        self.goal_discount = 0.98
+        self.goal_random_frac = 0.3
         # Cache for _valid_preimage_rows, keyed on the size it was computed at (a
         # ReplayBuffer grows). -1 means "not computed yet".
         self._preimage_valid_rows = None
@@ -170,6 +222,10 @@ class Dataset(FrozenDict):
         if self.return_next_actions:
             # WARNING: This is incorrect at the end of the trajectory. Use with caution.
             result['next_actions'] = self._dict['actions'][np.minimum(idxs + 1, self.size - 1)]
+        if self.return_goals:
+            goal_idxs, _ = hindsight_goal_idxs(idxs, self.terminal_locs, self.size,
+                                               self.goal_discount, self.goal_random_frac)
+            result['goals'] = self._dict['next_observations'][goal_idxs]
         if self.return_preimage_noise:
             # u for this transition: the exact backward-ODE preimage, or a draw from its
             # stored EM mixture (the point-vs-mixture ablation).
