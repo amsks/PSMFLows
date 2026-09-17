@@ -549,9 +549,11 @@ class TripleMultiplier(nn.Module):
 class RLUMeasure(nn.Module):
     """RLU PSM basis: phi(s,u,g) -> R^z_dim and b(s,u,g) -> R, plain MLPs on [s, u, g].
 
-    Single critic, no ensemble. Unlike `_TripleTower` there is NO `psm_norm` on phi and NO
-    `tanh` bound on b: RLU keeps the measure finite through the bootstrapped TD target and
-    the L2-normed coefficient, so the head is left free (RLU `PSM.forward`, agent/psm.py).
+    Single critic, no ensemble. RLU leaves the head free (no `psm_norm`, no `tanh` bound) and
+    relies on gridworld state repetition to couple the mesh and keep the measure finite. That
+    coupling is absent on continuous domains, where the head instead carries a joint LayerNorm
+    over [phi, b] (see `__call__`) -- lighter than `_TripleTower`'s sqrt(z_dim) sphere + tanh
+    anchor, but enough to stop the continuous diagonal runaway (2026-09-18).
     """
 
     z_dim: int
@@ -560,10 +562,22 @@ class RLUMeasure(nn.Module):
 
     @nn.compact
     def __call__(self, obs, u, g):
-        # PSM basis M=phi.w+b (arXiv 2411.19418 Eq. 5/6); RLU PSM.forward psm.py:191-196.
+        # PSM basis M=phi.w+b (arXiv 2411.19418 v2 Eq. 2 Bellman-flow + Cor. 4.2 phi^T w+b);
+        # RLU PSM.forward psm.py:191-196.
         x = _triple_trunk(obs, u, g, self.hidden_dim, self.hidden_layers)
-        phi = nn.Dense(self.z_dim, kernel_init=_ORTH1, name="phi_out")(x)   # no psm_norm (no anchor)
-        b = nn.Dense(1, kernel_init=_ORTH1, name="b_out")(x)[..., 0]        # no tanh bound (no anchor)
+        # Scale control (2026-09-18): LayerNorm the measure head. RLU leaves phi/b free and
+        # gridworld state repetition couples the mesh so the measure stays finite; on
+        # continuous cube/antmaze every (s,u,g) triple is distinct, the -(1-gamma) diagonal
+        # occupancy pull is uncoupled from the off-diagonal TD regressions, and the measure
+        # ran to ~1e4 by 15k steps. LayerNorm over the joint [phi, b] head pins it to unit
+        # scale per dim, bounding BOTH phi^T w and b (b alone would otherwise carry the
+        # runaway). NO learnable affine (use_scale/use_bias False): with the standard affine
+        # the diagonal pull grows the gamma scale and the measure still creeps (exp -> linear,
+        # ~340 at 20k); dropping it hard-bounds |M| ~ z_dim every forward pass. Lighter than
+        # f_psmflow's sqrt(D) sphere + tanh anchor (centre + unit-scale, not a fixed radius).
+        head = nn.LayerNorm(epsilon=1e-5, use_scale=False, use_bias=False, name="head_ln")(
+            nn.Dense(self.z_dim + 1, kernel_init=_ORTH1, name="head_out")(x))
+        phi, b = head[..., :self.z_dim], head[..., self.z_dim]
         return phi, b
 
 

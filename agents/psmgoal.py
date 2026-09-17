@@ -173,7 +173,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         M = self.mesh_M(obs, u, goals, w, params=basis_params)                    # (N, N)
         M_bar = self.mesh_M(next_obs, u_next, goals, w_t, params=self.target_basis)
         target_M = jax.lax.stop_gradient(M_bar)
-        # successor-measure Bellman fit, PSM Eq. 5/6; RLU discrete_psm.py:427-434:
+        # successor-measure Bellman fit, PSM Eq. 2 (Bellman-flow) + Cor. 4.2 (arXiv 2411.19418
+        # v2); RLU discrete_psm.py:427-434:
         # off-diagonal = 0.5*mean squared TD to gamma*target; diagonal = -(1-gamma) occupancy pull
         # (the measure of reaching your OWN next state s'_i).
         gamma = c["discount"]
