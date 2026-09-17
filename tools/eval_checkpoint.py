@@ -369,10 +369,11 @@ def _evaluate_shard(payload):
         zb = ds.sample(n_relabel)
         agent = agent.infer_eval_z(zb["next_observations"], zb["rewards"] + payload["reward_shift"])
     elif hasattr(agent, "infer_eval_goals"):
-        # psmgoal: the relabel batch read as a goal set (its rewarding next states).
+        # psmgoal (RLU): the relabel batch is a goal set (its rewarding next states) AND the
+        # (s, u) sample the coefficient Lagrangian runs on, so the whole batch is passed.
         n_relabel = min(ds.size, int(payload["relabel_size"]))
         zb = ds.sample(n_relabel)
-        agent = agent.infer_eval_goals(zb["next_observations"], zb["rewards"] + payload["reward_shift"])
+        agent = agent.infer_eval_goals(zb, zb["rewards"] + payload["reward_shift"])
 
     t0 = time.time()
     info, trajs, _ = evaluate(agent=agent, env=eval_env, config=config,

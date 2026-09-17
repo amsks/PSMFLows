@@ -234,15 +234,11 @@ def main(cfg: DictConfig):
                 dataset.return_preimage_noise = True
                 dataset.preimage_point_mode = bool(config.get('use_point_preimage', False))
             if config['agent_name'] == 'psmgoal':
-                # Hindsight goal per row as batch['goals'] (utils.datasets.hindsight_goal_idxs):
-                # geometric horizon at the agent's discount, goal_random_frac random states.
-                dataset.return_goals = True
-                dataset.goal_discount = float(config['discount'])
-                dataset.goal_random_frac = float(config['goal_random_frac'])
-                # Reference PSM proto stage (agent.proto.enabled): the proto policy is keyed
-                # on the dataset ROW, so the batch must carry it as batch['index'].
-                _proto_cfg = config.get('proto', None)
-                dataset.return_index = bool(_proto_cfg is not None and _proto_cfg.get('enabled', False))
+                # RLU port: basis goals are the batch's own next states used as an all-pairs
+                # state x goal mesh, so no hindsight-goal sampling is needed. The fixed
+                # z-indexed bootstrap policy is keyed on the dataset ROW, so the batch must
+                # carry it as batch['index'].
+                dataset.return_index = True
 
     # Create agent.
     example_batch = train_dataset.sample(1)
@@ -384,7 +380,9 @@ def main(cfg: DictConfig):
                 n_relabel = min(train_dataset.size, int(cfg.get('eval_relabel_size', 10000)))
                 z_batch = train_dataset.sample(n_relabel)
                 rew = z_batch['rewards'] + float(cfg.get('eval_reward_shift', 1.0))
-                eval_agent = agent.infer_eval_goals(z_batch['next_observations'], rew)
+                # RLU coefficient inference needs the batch's (s, u) to run the Lagrangian, not
+                # just the next states, so the whole relabel batch is passed.
+                eval_agent = agent.infer_eval_goals(z_batch, rew)
             eval_info, trajs, cur_renders = evaluate(
                 agent=eval_agent,
                 env=eval_env,

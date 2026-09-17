@@ -535,3 +535,57 @@ class TripleMultiplier(nn.Module):
     def __call__(self, obs, u, s_plus):
         x = _triple_trunk(obs, u, s_plus, self.hidden_dim, self.hidden_layers)
         return nn.softplus(nn.Dense(1, kernel_init=_ORTH1, name="l_out")(x)[..., 0])
+
+
+# ---------------------------------------------------------------------------
+# RLU (Proto Successor Measure, CalCharles/RLU agent/psm.py) on flow latents.
+# The faithful replica: a GENERAL measure phi(s,u,g), b(s,u,g) on the concatenated
+# triple (single critic, NO A^T f factorization and NO scale anchor -- RLU bounds the
+# measure through the TD target and the L2-normed coefficient, not through the head),
+# and a coefficient w(z) = sqrt(z_dim) * enc(z)/||enc(z)|| on the binary policy-index
+# code z (RLU `_L2` = psm_norm). docs/design/2026-09-17-psmgoal.md (RLU rewrite).
+# ---------------------------------------------------------------------------
+
+class RLUMeasure(nn.Module):
+    """RLU PSM basis: phi(s,u,g) -> R^z_dim and b(s,u,g) -> R, plain MLPs on [s, u, g].
+
+    Single critic, no ensemble. Unlike `_TripleTower` there is NO `psm_norm` on phi and NO
+    `tanh` bound on b: RLU keeps the measure finite through the bootstrapped TD target and
+    the L2-normed coefficient, so the head is left free (RLU `PSM.forward`, agent/psm.py).
+    """
+
+    z_dim: int
+    hidden_dim: int
+    hidden_layers: int = 2
+
+    @nn.compact
+    def __call__(self, obs, u, g):
+        # PSM basis M=phi.w+b (arXiv 2411.19418 Eq. 5/6); RLU PSM.forward psm.py:191-196.
+        x = _triple_trunk(obs, u, g, self.hidden_dim, self.hidden_layers)
+        phi = nn.Dense(self.z_dim, kernel_init=_ORTH1, name="phi_out")(x)   # no psm_norm (no anchor)
+        b = nn.Dense(1, kernel_init=_ORTH1, name="b_out")(x)[..., 0]        # no tanh bound (no anchor)
+        return phi, b
+
+
+class PolicyCoefficient(nn.Module):
+    """w(z) = sqrt(z_dim) * enc(z)/||enc(z)|| on the binary policy-index code z.
+
+    RLU's index coefficient: an MLP on the code z (width `max_log_seed`), L2-normed to the
+    sphere of radius sqrt(z_dim) (RLU `_L2`). Used during basis training; test-time inference
+    optimizes a FREE coefficient on the same sphere instead of this net.
+    """
+
+    z_dim: int
+    hidden_dim: int = 256
+    hidden_layers: int = 2
+
+    @nn.compact
+    def __call__(self, z):
+        h = PhiMap(z_dim=self.z_dim, hidden_dim=self.hidden_dim,
+                   hidden_layers=self.hidden_layers, norm=False, name="enc")(z)
+        # _L2 to the sqrt(z_dim) sphere every forward pass; RLU fb_modules.py:38-40. The eps is
+        # INSIDE the sqrt (not a max clamp) so the gradient is finite at h=0 -- the all-zero
+        # policy code gives enc(z)=0, where psm_norm's Jacobian is 0/0=NaN; torch F.normalize
+        # returns 0 there, and this matches that safely.
+        d = h.shape[-1]
+        return jnp.sqrt(float(d)) * h / jnp.sqrt(jnp.sum(h ** 2, axis=-1, keepdims=True) + 1e-8)
