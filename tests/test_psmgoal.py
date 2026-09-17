@@ -253,3 +253,86 @@ def test_infer_eval_goals_requires_a_rewarding_row():
     b = _batch(reward_rows=())
     with pytest.raises(ValueError):
         ag.infer_eval_goals(b, b["rewards"] + 1.0)
+
+
+# --------------------------------------------------------------- A/B goal_conditioned mode
+
+def _batch_g(**kw):
+    """A batch that also carries batch['goals'] (the hindsight mixture main.py provides)."""
+    b = _batch(**kw)
+    rng = np.random.default_rng(7)
+    b["goals"] = rng.standard_normal((b["observations"].shape[0], OB)).astype(np.float32)
+    return b
+
+
+def test_goal_head_h_on_sqrt_z_sphere():
+    ag = _agent()
+    g = jax.random.normal(jax.random.PRNGKey(0), (5, OB))
+    w = ag.goal_coef(g)
+    assert jnp.allclose(jnp.linalg.norm(w, axis=-1), jnp.sqrt(float(Z)), atol=1e-3)
+
+
+def test_defaults_do_not_train_goal_head_or_touch_it():
+    # Core defaults (train_goal_head=False): update() must leave goal_coef untouched, so the
+    # running RLU-core jobs are byte-identical.
+    ag = _agent()
+    b = _batch_g()
+    new, info = ag.update(b)
+    leaves0 = jax.tree_util.tree_leaves(ag.goal_coef.params)
+    leaves1 = jax.tree_util.tree_leaves(new.goal_coef.params)
+    assert all(jnp.array_equal(a, c) for a, c in zip(leaves0, leaves1))
+    assert "goal_obj" not in info  # the goal-head branch did not run
+
+
+def test_train_goal_head_updates_goal_coef_only():
+    ag = _agent(train_goal_head=True)
+    b = _batch_g()
+    new, info = ag.update(b)
+    assert "goal_obj" in info and "goal_pen" in info
+    # goal_coef moved
+    moved = any(not jnp.array_equal(a, c) for a, c in zip(
+        jax.tree_util.tree_leaves(ag.goal_coef.params),
+        jax.tree_util.tree_leaves(new.goal_coef.params)))
+    assert moved
+
+
+def test_goal_head_loss_grad_reaches_h_only():
+    # J+constraint gradient routes to goal_coef; phi/b are stop-gradded inside goal_head_loss.
+    ag = _agent(train_goal_head=True)
+    b = _batch_g()
+    perm = jnp.arange(b["observations"].shape[0])[::-1]
+    (_, _), g = jax.value_and_grad(ag.goal_head_loss, has_aux=True)(ag.goal_coef.params, b, perm)
+    assert any(jnp.any(x != 0) for x in jax.tree_util.tree_leaves(g))
+
+
+def test_amortized_coef_source_reads_h_of_goals():
+    ag = _agent(coef_source="amortized")
+    b = _batch(reward_rows=(0, 2, 5))
+    ev = ag.infer_eval_goals(b, b["rewards"] + 1.0)
+    # eval_w == project(mean_g h(g)) and is on the sphere
+    expect = ev._project(jnp.mean(ev.goal_coef(ev.eval_goals), axis=0))
+    assert jnp.allclose(ev.eval_w, expect, atol=1e-5)
+    assert jnp.allclose(jnp.linalg.norm(ev.eval_w), jnp.sqrt(float(Z)), atol=1e-3)
+
+
+def test_restore_tolerates_checkpoint_without_goal_coef(tmp_path):
+    # A core checkpoint written before the goal head existed has no 'goal_coef' field. The new
+    # agent must still restore it (keeping the fresh head) and act -- this is what keeps the
+    # RUNNING RLU-core jobs' eval500 safe.
+    import pickle
+    import flax
+    from utils.flax_utils import restore_agent
+
+    ag = _agent(seed=1)
+    saved = flax.serialization.to_state_dict(ag)
+    saved.pop("goal_coef")  # simulate a pre-goal-head checkpoint
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    with open(run_dir / "params_10.pkl", "wb") as f:
+        pickle.dump({"agent": saved}, f)
+    fresh = _agent(seed=2)
+    restored = restore_agent(fresh, str(run_dir), 10)
+    b = _batch(reward_rows=(1,))
+    ev = restored.infer_eval_goals(b, b["rewards"] + 1.0)
+    a = ev.sample_actions(jnp.asarray(b["observations"][0]), seed=jax.random.PRNGKey(0))
+    assert a.shape == (DA,) and jnp.all(jnp.abs(a) <= 1.0 + 1e-6)

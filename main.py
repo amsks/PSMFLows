@@ -239,6 +239,13 @@ def main(cfg: DictConfig):
                 # z-indexed bootstrap policy is keyed on the dataset ROW, so the batch must
                 # carry it as batch['index'].
                 dataset.return_index = True
+                # A/B goal_conditioned: the h(g) head trains on the hindsight-goal MIXTURE
+                # (geometric future + random_frac), so the batch must also carry batch['goals'].
+                # OFF by default (train_goal_head=false) -> core dataset path is unchanged.
+                if bool(config.get('train_goal_head', False)):
+                    dataset.return_goals = True
+                    dataset.goal_discount = float(config.get('goal_discount', 0.98))
+                    dataset.goal_random_frac = float(config.get('goal_random_frac', 0.3))
 
     # Create agent.
     example_batch = train_dataset.sample(1)

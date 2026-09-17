@@ -36,7 +36,18 @@ k_goals: 32                # size of the eval goal set G (rewarding relabel rows
 acting: gpi                # gpi (argmax over prior draws) | distill (DSRL latent actor)
 gpi_num_u: 64              # prior draws the gpi argmax scans per step
 num_actor_steps: 10000     # DSRL distillation steps (acting=distill)
-actor_temp: 0.0            # entropy weight in the distillation objective
+actor_temp: 0.0            # entropy weight (alpha) in the distillation objective
+q_coeff: 1.0               # distill: weight on the scale-normalised Q term
+bc_coeff: 0.0              # distill: prior-centre anchor weight (in-support pull)
+
+# --- A/B goal_conditioned mode (all OFF by default -> byte-identical to the RLU core) ---
+train_goal_head: false     # train h(g) by J(theta|g)+constraint during update()
+coef_source: lp            # lp (RLU Lagrangian inference) | amortized (use the h(g) head)
+lr_goal: 1.0e-4            # h(g) learning rate
+j_constraint_coef: 1.0     # hinge weight on non-negativity in J(theta|g)
+goal_coef: {hidden_dim: 256, hidden_layers: 2}   # h(g): goal state -> sqrt(D) sphere
+goal_discount: 0.98        # dataset hindsight-goal geometric horizon (main.py, train_goal_head only)
+goal_random_frac: 0.3      # dataset off-trajectory random-goal fraction (OGBench-style)
 
 # --- nets ---
 measure: {hidden_dim: 512, hidden_layers: 2}   # phi, b on [s, u, g]

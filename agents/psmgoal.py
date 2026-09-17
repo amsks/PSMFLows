@@ -15,6 +15,7 @@ from utils.flax_utils import TrainState, nonpytree_field
 from utils.networks import ActorVectorField
 from utils.psm_common import _plain_config, polyak_update
 from utils.psm_networks import (
+    GoalCoefficient,
     PolicyCoefficient,
     RLUMeasure,
     TanhGaussianLatentActor,
@@ -45,6 +46,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
     coef: TrainState            # w(z): binary policy code -> sqrt(D) sphere
     mult: TrainState            # l(s, u, g) >= 0, softplus (used at inference)
     actor: TrainState           # DSRL latent actor (used only for acting=distill)
+    goal_coef: TrainState       # h(g): goal state -> sqrt(D) sphere (A/B goal_conditioned mode;
+                                # always built for restore-safety, trained only if train_goal_head)
     target_basis: Any
     target_coef: Any
     flow_vf: Any                # FROZEN behaviour-flow velocity field
@@ -89,6 +92,14 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                                             hidden_layers=config["actor"]["hidden_layers"])
         actor = TrainState.create(actor_def, actor_def.init(r_a, ex_observations, ex_u)["params"],
                                   tx=optax.adam(config["lr_actor"]))
+        # h(g): goal state -> sqrt(D) sphere coefficient (A/B goal_conditioned mode). Always
+        # built so a checkpoint restore has the slot; trained only when train_goal_head.
+        rng, r_g = jax.random.split(rng)
+        gc = config.get("goal_coef", {"hidden_dim": 256, "hidden_layers": 2})
+        goal_coef_def = GoalCoefficient(z_dim=z_dim, hidden_dim=gc["hidden_dim"],
+                                        hidden_layers=gc["hidden_layers"])
+        goal_coef = TrainState.create(goal_coef_def, goal_coef_def.init(r_g, ex_observations)["params"],
+                                      tx=optax.adam(config.get("lr_goal", 1.0e-4)))
 
         flow_hidden = tuple(config["flow"]["hidden_dims"])
         vf_def = ActorVectorField(hidden_dims=flow_hidden, action_dim=action_dim,
@@ -110,7 +121,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         config["ob_dims"] = tuple(ex_observations.shape[1:])
         config["action_dim"] = action_dim
         ob_dim = int(ex_observations.shape[-1])
-        return cls(rng=rng, basis=basis, coef=coef, mult=mult, actor=actor,
+        return cls(rng=rng, basis=basis, coef=coef, mult=mult, actor=actor, goal_coef=goal_coef,
                    target_basis=copy.deepcopy(basis.params),
                    target_coef=copy.deepcopy(coef.params),
                    flow_vf=flow_vf, flow_onestep=flow_onestep,
@@ -191,6 +202,33 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                 "w_norm": jnp.mean(jnp.linalg.norm(w, axis=-1))}
         return loss, info
 
+    # --------------------------------------------------------- goal-conditioned head (A/B)
+    def goal_head_loss(self, goal_coef_params, batch, perm):
+        """A/B goal_conditioned: amortize the RLU per-goal coefficient into h(g).
+
+        J(theta|g) = mean_i M(s_i,u_i,g_i) at w*(g_i)=h(g_i), minus the non-negativity
+        constraint phi(s,u,s+)^T w*(g) + b >= 0 on off-goal negatives (permuted next states),
+        priced by the hinge (the learned multiplier stays inference-only). Gradient reaches
+        h(g) only; phi, b are stop-gradded. KEEP the constraint: without it h(g) -> E[r_g f] =
+        f(g), i.e. plain FB (the coefficient that ranked at chance). Goals g are the dataset's
+        hindsight mixture (`batch['goals']`, geometric-future + random_frac). Deviates from RLU
+        (RLU solves the LP per goal at inference; this amortizes it into a head)."""
+        c = self.config
+        obs = jnp.asarray(batch["observations"])
+        u = jnp.clip(jnp.asarray(batch["noise_preimage"]), -c["u_clip"], c["u_clip"])
+        goals = jnp.asarray(batch["goals"])                    # (N, ob) hindsight goal per row
+        next_obs = jnp.asarray(batch["next_observations"])
+        bp = jax.lax.stop_gradient(self.basis.params)
+        w_g = self.goal_coef(goals, params=goal_coef_params)   # (N, z), grad to h only
+        obj = jnp.mean(self.M(obs, u, goals, w_g, params=bp))  # value at own goal
+        cons = self.mesh_M(obs, u, next_obs[perm], w_g, params=bp)   # (N, N) M at off-goals
+        pen = jnp.mean(jax.nn.relu(-cons))                     # hinge on non-negativity
+        loss = -obj + float(c.get("j_constraint_coef", 1.0)) * pen
+        info = {"goal_obj": obj, "goal_pen": pen,
+                "goal_viol_frac": jnp.mean((cons < 0.0).astype(jnp.float32)),
+                "goal_w_norm": jnp.mean(jnp.linalg.norm(w_g, axis=-1))}
+        return loss, info
+
     # ------------------------------------------------------------------ update
     def apply_update(self, batch, z_bin, u_next):
         c = self.config
@@ -198,8 +236,16 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         (_, info), (g_b, g_c) = grad_fn(self.basis.params, self.coef.params, batch, z_bin, u_next)
         basis = self.basis.apply_gradients(grads=g_b)
         coef = self.coef.apply_gradients(grads=g_c)
+        goal_coef = self.goal_coef
+        if bool(c.get("train_goal_head", False)) and "goals" in batch:
+            perm = jax.random.permutation(jax.random.fold_in(self.rng, 55),
+                                          jnp.asarray(batch["observations"]).shape[0])
+            (_, gh_info), g_gc = jax.value_and_grad(self.goal_head_loss, has_aux=True)(
+                self.goal_coef.params, batch, perm)
+            goal_coef = self.goal_coef.apply_gradients(grads=g_gc)
+            info = {**info, **gh_info}
         new = self.replace(
-            basis=basis, coef=coef,
+            basis=basis, coef=coef, goal_coef=goal_coef,
             target_basis=polyak_update(basis.params, self.target_basis, c["tau"]),
             target_coef=polyak_update(coef.params, self.target_coef, c["tau"]))
         return new, info
@@ -352,6 +398,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         steps = int(c["num_actor_steps"]) if steps is None else int(steps)
         temp, scale = float(c["actor_temp"]), float(c["u_clip"])
 
+        q_coeff, bc_coeff = float(c.get("q_coeff", 1.0)), float(c.get("bc_coeff", 0.0))
+
         def actor_loss(params, o, noise):
             z_in = jnp.broadcast_to(self.eval_w, (o.shape[0], self.eval_w.shape[0]))
             mu, log_std = self.actor(o, z_in, params=params)
@@ -359,7 +407,11 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             q = jax.vmap(lambda oo, uu: jnp.mean(
                 self.mesh_M(oo[None], uu[None], self.eval_goals,
                             self.eval_w[None])))(o, u)
-            return jnp.mean(temp * logp - q)
+            # psi^T w has no natural return scale (cf. f_psmflow.dsrl_actor_loss), so normalise
+            # Q by stopgrad|Q| and add the SAC entropy term (temp*logp). bc anchors u to the
+            # prior centre (in-support). NOTE: the full flow-matching BC (an actor_vf) is deferred.
+            qscale = jax.lax.stop_gradient(jnp.abs(q).mean() + 1e-8)
+            return q_coeff * (-jnp.mean(q) / qscale) + temp * jnp.mean(logp) + bc_coeff * jnp.mean(u ** 2)
 
         actor = self.actor
         step = jax.jit(lambda a, o, n: a.apply_gradients(
@@ -394,7 +446,12 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         key = jax.random.fold_in(self.rng, 7)
         u = jnp.clip(jax.random.normal(jax.random.fold_in(key, 1), (n, int(c["action_dim"]))),
                      -c["u_clip"], c["u_clip"])
-        w = self.run_inference(obs, u, goals, key)
+        if str(c.get("coef_source", "lp")) == "amortized":
+            # A/B goal_conditioned: amortized coefficient from the trained goal head.
+            # w = normalize(mean_{g in G} h(g)) -- the design's sum-over-goals readout.
+            w = self._project(jnp.mean(self.goal_coef(goals), axis=0))
+        else:
+            w = self.run_inference(obs, u, goals, key)   # RLU Lagrangian inference (default)
         agent = self.replace(eval_goals=goals, eval_w=w)
         if c["acting"] == "distill":
             agent = agent.distill_actor(obs, jax.random.fold_in(self.rng, 11))
@@ -427,7 +484,17 @@ def get_config():
         "acting": "gpi",            # gpi (argmax over prior draws) | distill (DSRL actor)
         "gpi_num_u": 64,            # prior draws the gpi argmax scans
         "num_actor_steps": 10000,   # distillation steps (acting=distill)
-        "actor_temp": 0.0,          # entropy weight in the distillation objective
+        "actor_temp": 0.0,          # entropy weight (alpha) in the distillation objective
+        "q_coeff": 1.0,             # distill: weight on the (scale-normalised) Q term
+        "bc_coeff": 0.0,            # distill: prior-centre anchor weight (in-support pull)
+        # --- A/B goal_conditioned mode (all OFF by default -> byte-identical to the RLU core) ---
+        "train_goal_head": False,   # train h(g) by J(theta|g)+constraint during update()
+        "coef_source": "lp",        # lp (RLU Lagrangian inference) | amortized (use h(g))
+        "lr_goal": 1.0e-4,          # h(g) learning rate
+        "j_constraint_coef": 1.0,   # hinge weight on non-negativity in J(theta|g)
+        "goal_coef": {"hidden_dim": 256, "hidden_layers": 2},   # h(g) net
+        "goal_discount": 0.98,      # dataset hindsight-goal geometric horizon (main.py)
+        "goal_random_frac": 0.3,    # dataset off-trajectory random-goal fraction (OGBench-style)
         # --- nets ---
         "measure": {"hidden_dim": 512, "hidden_layers": 2},
         "coef": {"hidden_dim": 256, "hidden_layers": 2},
