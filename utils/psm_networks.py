@@ -575,7 +575,12 @@ class RLUMeasure(nn.Module):
         # the diagonal pull grows the gamma scale and the measure still creeps (exp -> linear,
         # ~340 at 20k); dropping it hard-bounds |M| ~ z_dim every forward pass. Lighter than
         # f_psmflow's sqrt(D) sphere + tanh anchor (centre + unit-scale, not a fixed radius).
-        head = nn.LayerNorm(epsilon=1e-5, use_scale=False, use_bias=False, name="head_ln")(
+        # 2026-09-18: RMSNorm (no mean subtraction) rather than LayerNorm. LayerNorm centres
+        # phi per sample, so E[phi] = a_bar (the LP objective's direction) is degenerate and the
+        # inferred coefficient is near-random -- the reason the LP arm scored below the naive
+        # baseline. RMSNorm bounds the magnitude the same way (|M| ~ z_dim) but keeps phi's mean,
+        # so a_bar stays a usable direction. use_scale=False keeps the hard bound.
+        head = nn.RMSNorm(epsilon=1e-5, use_scale=False, name="head_ln")(
             nn.Dense(self.z_dim + 1, kernel_init=_ORTH1, name="head_out")(x))
         phi, b = head[..., :self.z_dim], head[..., self.z_dim]
         return phi, b

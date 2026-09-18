@@ -131,15 +131,11 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                    flow_vf_def=vf_def, flow_onestep_def=onestep_def)
 
     # ------------------------------------------------------------------ the measure
-    def phi_b(self, obs, u, g, params=None):
-        """(phi(s,u,g), b(s,u,g)) from the (single-critic) basis. params=None -> online."""
-        return self.basis(obs, u, g, params=self.basis.params if params is None else params)
-
     def M(self, obs, u, g, w, params=None):
-        """M(s,u,g) = phi(s,u,g)^T w + b(s,u,g) -> (B,). w is (B, z_dim) or (z_dim,)."""
-        phi, b = self.phi_b(obs, u, g, params=params)
-        w = jnp.atleast_2d(w)
-        return (phi * w).sum(-1) + b
+        """M(s,u,g) = phi(s,u,g)^T w + b(s,u,g) -> (B,); the single-point measure that
+        test_mesh_matches_pointwise_measure checks mesh_M against. w is (B, z_dim) or (z_dim,)."""
+        phi, b = self.basis(obs, u, g, params=self.basis.params if params is None else params)
+        return (phi * jnp.atleast_2d(w)).sum(-1) + b
 
     def mesh_M(self, obs, u, goals, w_rows, params=None):
         """The state x goal mesh: M_ij = phi(s_i,u_i,g_j)^T w_i + b(s_i,u_i,g_j).
@@ -151,7 +147,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         obs_r = jnp.broadcast_to(obs[:, None], (N, G, obs.shape[-1])).reshape(N * G, -1)
         u_r = jnp.broadcast_to(u[:, None], (N, G, u.shape[-1])).reshape(N * G, -1)
         g_r = jnp.broadcast_to(goals[None], (N, G, goals.shape[-1])).reshape(N * G, -1)
-        phi, b = self.phi_b(obs_r, u_r, g_r, params=params)
+        # (phi, b) from the single-critic basis; params=None -> online params.
+        phi, b = self.basis(obs_r, u_r, g_r, params=self.basis.params if params is None else params)
         phi = phi.reshape(N, G, -1)
         b = b.reshape(N, G)
         return (phi * w_rows[:, None, :]).sum(-1) + b
@@ -362,21 +359,17 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                 a = a + self.flow_vf_def.apply({"params": self.flow_vf}, observations, a, t) / steps
         return jnp.clip(a, -1.0, 1.0)
 
-    def goal_Q(self, observations, u_cand):
-        """Q(s, u_m) = mean_{g in G} phi(s,u_m,g)^T eval_w_star + b(s,u_m,g), for a single s and
-        K candidate latents u_cand (K, d_a). Returns (K,)."""
-        K = u_cand.shape[0]
-        obs = jnp.broadcast_to(observations, (K, observations.shape[-1]))
-        w = jnp.broadcast_to(self.eval_w_star, (K, self.eval_w_star.shape[0]))
-        return jnp.mean(self.mesh_M(obs, u_cand, self.eval_goals, w), axis=1)
-
     def select_latent(self, observations, seed):
-        """acting=gpi: argmax over gpi_num_u clipped prior draws of the goal-averaged Q."""
+        """acting=gpi: argmax over gpi_num_u clipped prior draws of the goal-averaged Q,
+        Q(s, u_m) = mean_{g in G} phi(s,u_m,g)^T eval_w_star + b(s,u_m,g)."""
         c = self.config
         assert observations.ndim == 1, "select_latent acts on a single observation"
         K, d_a = int(c["gpi_num_u"]), c["action_dim"]
         u_cand = jnp.clip(jax.random.normal(seed, (K, d_a)), -c["u_clip"], c["u_clip"])
-        return u_cand[jnp.argmax(self.goal_Q(observations, u_cand))]
+        obs = jnp.broadcast_to(observations, (K, observations.shape[-1]))
+        w = jnp.broadcast_to(self.eval_w_star, (K, self.eval_w_star.shape[0]))
+        q = jnp.mean(self.mesh_M(obs, u_cand, self.eval_goals, w), axis=1)   # (K,)
+        return u_cand[jnp.argmax(q)]
 
     @jax.jit
     def sample_actions(self, observations, seed=None, temperature=1.0):
@@ -444,7 +437,10 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         sub = np.random.choice(np.arange(all_obs.shape[0]), size=n, replace=False)
         obs = jnp.asarray(all_obs[sub], jnp.float32)
         key = jax.random.fold_in(self.rng, 7)
-        u = jnp.clip(jax.random.normal(jax.random.fold_in(key, 1), (n, int(c["action_dim"]))),
+        # #1 (2026-09-18): the note's objective is E_{(s,u)~D}. Use the dataset preimages (the
+        # recorded actions' latents) for the sub-rows, not a prior draw over random actions --
+        # the prior-drawn version made the LP's a_bar = mean phi the wrong direction.
+        u = jnp.clip(jnp.asarray(np.asarray(batch["noise_preimage"])[sub], jnp.float32),
                      -c["u_clip"], c["u_clip"])
         if str(c.get("coef_source", "lp")) == "amortized":
             # A/B goal_conditioned: amortized coefficient from the trained goal head.

@@ -21,7 +21,7 @@ lr_measure: 1.0e-4         # phi, b
 lr_w: 1.0e-4            # w(z)
 lr_l: 3.0e-4               # the multiplier / RLU inference lr scale
 
-max_log_seed: 8            # policy-index code width (RLU proto family)
+max_log_seed: 16           # policy-index code width (RLU proto family = 2^16, was 8; capacity lift 2026-09-18)
 proto_seed: 0              # base key for the fixed z-indexed policy (a code constant, not the run seed)
 
 # --- Stage-2 coefficient inference (RLU infer_w) ---
@@ -50,7 +50,7 @@ goal_discount: 0.98        # dataset hindsight-goal geometric horizon (main.py, 
 goal_random_frac: 0.3      # dataset off-trajectory random-goal fraction (OGBench-style)
 
 # --- nets ---
-measure: {hidden_dim: 512, hidden_layers: 2}   # phi, b on [s, u, g]
+measure: {hidden_dim: 1024, hidden_layers: 2}   # phi, b on [s, u, g] (RLU hidden 1024, was 512; capacity lift 2026-09-18)
 w:    {hidden_dim: 256, hidden_layers: 2}   # w(z)
 l:    {hidden_dim: 256, hidden_layers: 2}   # l(s, u, g)
 actor:   {hidden_dim: 512, hidden_layers: 2}   # DSRL latent actor (acting=distill)
