@@ -1,5 +1,4 @@
-"""psmgoal: Goal conditioned PSM
-"""
+"""psmgoal: RLU Proto Successor Measure (arXiv 2411.19418) on frozen-flow latents."""
 
 import copy
 from typing import Any
@@ -92,8 +91,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                                             hidden_layers=config["actor"]["hidden_layers"])
         actor = TrainState.create(actor_def, actor_def.init(r_a, ex_observations, ex_u)["params"],
                                   tx=optax.adam(config["lr_actor"]))
-        # h(g): goal state -> sqrt(D) sphere coefficient (A/B goal_conditioned mode). Always
-        # built so a checkpoint restore has the slot; trained only when train_goal_head.
+        # h(g): goal -> sqrt(D) sphere. Always built so a restore has the slot; trained only
+        # when train_goal_head.
         rng, r_g = jax.random.split(rng)
         gc = config.get("w_star", {"hidden_dim": 256, "hidden_layers": 2})
         w_star_def = GoalCoefficient(z_dim=z_dim, hidden_dim=gc["hidden_dim"],
@@ -132,8 +131,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
 
     # ------------------------------------------------------------------ the measure
     def M(self, obs, u, g, w, params=None):
-        """M(s,u,g) = phi(s,u,g)^T w + b(s,u,g) -> (B,); the single-point measure that
-        test_mesh_matches_pointwise_measure checks mesh_M against. w is (B, z_dim) or (z_dim,)."""
+        """M(s,u,g) = phi(s,u,g)^T w + b -> (B,). Single-point measure; the mesh_M reference
+        used in tests. w is (B, z_dim) or (z_dim,)."""
         phi, b = self.basis(obs, u, g, params=self.basis.params if params is None else params)
         return (phi * jnp.atleast_2d(w)).sum(-1) + b
 
@@ -155,13 +154,9 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
 
     # ------------------------------------------------------------------ proto bootstrap
     def proto_bootstrap(self, z, index):
-        """u^+ = u_proto(row, z): the fixed z-indexed deterministic latent policy at each row.
-
-        A pure function of (z, dataset row index); the same clipped prior draw every
-        resample, so `G(s', u^+)` stays in-support. Returns (N, d_a).
-        """
-        # fixed z-indexed deterministic policy = RLU SamplingSeedActor (discrete_psm.py:137-171),
-        # emitting a clipped prior LATENT instead of a table action (utils/psm_proto.py).
+        """u^+: the fixed z-indexed policy's latent at each row. A clipped prior draw keyed on
+        (z, row), so G(s', u^+) stays in-support. RLU SamplingSeedActor, discrete_psm.py:137-171.
+        Returns (N, d_a)."""
         c = self.config
         seeds = proto_seed_ints(z, index, int(c["max_log_seed"]))
         base = jax.random.PRNGKey(int(c["proto_seed"]))
@@ -181,10 +176,9 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         M = self.mesh_M(obs, u, goals, w, params=basis_params)                    # (N, N)
         M_bar = self.mesh_M(next_obs, u_next, goals, w_t, params=self.target_basis)
         target_M = jax.lax.stop_gradient(M_bar)
-        # successor-measure Bellman fit, PSM Eq. 2 (Bellman-flow) + Cor. 4.2 (arXiv 2411.19418
-        # v2); RLU discrete_psm.py:427-434:
-        # off-diagonal = 0.5*mean squared TD to gamma*target; diagonal = -(1-gamma) occupancy pull
-        # (the measure of reaching your OWN next state s'_i).
+        # Successor-measure Bellman fit (PSM Eq. 2 + Cor. 4.2, arXiv 2411.19418 v2; RLU
+        # discrete_psm.py:427-434): off-diagonal = squared TD to gamma*target; diagonal =
+        # -(1-gamma) pull toward reaching your own next state.
         gamma = c["discount"]
         N = M.shape[0]
         off = 1.0 - jnp.eye(N)
@@ -201,15 +195,12 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
 
     # --------------------------------------------------------- goal-conditioned head (A/B)
     def goal_head_loss(self, w_star_params, batch, perm):
-        """A/B goal_conditioned: amortize the RLU per-goal coefficient into h(g).
+        """Amortize the per-goal coefficient into h(g) (A/B goal_conditioned mode).
 
-        J(theta|g) = mean_i M(s_i,u_i,g_i) at w*(g_i)=h(g_i), minus the non-negativity
-        constraint phi(s,u,s+)^T w*(g) + b >= 0 on off-goal negatives (permuted next states),
-        priced by the hinge (the learned multiplier stays inference-only). Gradient reaches
-        h(g) only; phi, b are stop-gradded. KEEP the constraint: without it h(g) -> E[r_g f] =
-        f(g), i.e. plain FB (the coefficient that ranked at chance). Goals g are the dataset's
-        hindsight mixture (`batch['goals']`, geometric-future + random_frac). Deviates from RLU
-        (RLU solves the LP per goal at inference; this amortizes it into a head)."""
+        J(theta|g) = mean_i M(s_i,u_i,g_i) at w*(g)=h(g), minus a hinge on the non-negativity
+        constraint phi^T w*(g)+b >= 0 over off-goal (permuted) next states. Grad reaches h only.
+        Keep the constraint: without it h(g) -> E[r_g f] = FB, which ranked at chance. Goals are
+        the hindsight mixture batch['goals']. RLU solves this LP per goal; here it is amortized."""
         c = self.config
         obs = jnp.asarray(batch["observations"])
         u = jnp.clip(jnp.asarray(batch["noise_preimage"]), -c["u_clip"], c["u_clip"])
@@ -283,10 +274,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         return r * w / jnp.maximum(jnp.linalg.norm(w), 1e-12)
 
     def _obj_and_constraint(self, w, l_params, obs, u, goals, perm):
-        """PSM Eq. 10 (corrected): obj = mean_g mean_s phi(s,u,g)^T w, and the non-negativity
-        constraint phi(s,u,g)^T w + b >= 0 on permuted off-goal samples, priced by a PER-TRIPLE
-        multiplier l(s,u,g) -- NOT the row-form lambda(s,a) of Eq. 10 as written, whose dual is
-        coarser and never binds. RLU psm.py:541-548 (obj+constraint), lmult(obs,action,next_goal)."""
+        """PSM Eq. 10: obj = mean phi(s,u,g)^T w, and the non-negativity constraint
+        phi^T w + b >= 0 on permuted off-goal samples, priced by the multiplier l(s,u,g)."""
         bp = jax.lax.stop_gradient(self.basis.params)
         obj = jnp.mean(self.mesh_M(obs, u, goals, jnp.broadcast_to(w, (obs.shape[0], w.shape[0])), params=bp))
         obs_p, u_p = obs[perm], u[perm]
@@ -325,8 +314,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             cons_sg = jax.lax.stop_gradient(cons)
 
             def l_loss(mp):
-                # dual ascent on the multiplier (RLU psm.py:560-565): descending mean(cons*l)
-                # raises l where cons = phi.w+b < 0 (violated), lowers it where satisfied.
+                # Dual ascent on l (RLU psm.py:560-565): minimizing mean(cons*l) raises l where
+                # the constraint is violated (cons < 0).
                 _, _, l = self._obj_and_constraint(state.w, mp, obs, u, goals, perm)
                 return jnp.mean(cons_sg * l)
 
@@ -384,9 +373,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         return self.decode(observations[None], u_star[None])[0]
 
     def distill_actor(self, obs, key, steps=None):
-        """acting=distill: train the DSRL latent actor to maximize Q = phi.eval_w_star + b over the
-        goal set. RLU distill_actor_ddpg/update_actor psm.py:569-603: minimize temp*log_prob - Q,
-        reparameterized draw. (Our repo's DSRL TanhGaussianLatentActor in place of RLU's DDPG.)"""
+        """Train the DSRL actor to maximize Q = phi^T eval_w_star + b over the goal set. Minimize
+        temp*log_prob - Q on a reparameterized draw. RLU distill_actor_ddpg, psm.py:569-603."""
         c = self.config
         steps = int(c["num_actor_steps"]) if steps is None else int(steps)
         temp, scale = float(c["actor_temp"]), float(c["u_clip"])
@@ -400,9 +388,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             q = jax.vmap(lambda oo, uu: jnp.mean(
                 self.mesh_M(oo[None], uu[None], self.eval_goals,
                             self.eval_w_star[None])))(o, u)
-            # psi^T w has no natural return scale (cf. f_psmflow.dsrl_actor_loss), so normalise
-            # Q by stopgrad|Q| and add the SAC entropy term (temp*logp). bc anchors u to the
-            # prior centre (in-support). NOTE: the full flow-matching BC (an actor_vf) is deferred.
+            # Q has no natural scale, so normalise by stopgrad|Q|; temp*logp is the entropy term,
+            # bc anchors u to the prior centre. Full flow-matching BC is deferred.
             qscale = jax.lax.stop_gradient(jnp.abs(q).mean() + 1e-8)
             return q_coeff * (-jnp.mean(q) / qscale) + temp * jnp.mean(logp) + bc_coeff * jnp.mean(u ** 2)
 
@@ -416,9 +403,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
 
     # ------------------------------------------------------------------ eval inference
     def infer_eval_goals(self, batch, rewards):
-        """Copy of this agent with the goal set G and the inferred coefficient w set from a
-        relabel batch. G = k_goals rewarding next states; w is RLU's Lagrangian coefficient
-        over the frozen basis. Picked up by main.py / eval_checkpoint via hasattr."""
+        """Set the goal set G and the eval coefficient from a relabel batch. G = k_goals
+        rewarding next states; the coefficient is the LP solution (or h(g) if amortized)."""
         c = self.config
         rewards = np.asarray(rewards).reshape(-1)
         rows = np.nonzero(rewards > REWARDING_THRESHOLD)[0]
@@ -428,18 +414,13 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         k = int(c["k_goals"])
         pick = np.random.choice(rows, size=k, replace=rows.size < k)
         goals = jnp.asarray(np.asarray(batch["next_observations"])[pick], jnp.float32)
-        # inference samples: real states s from the batch, with action latents u drawn from the
-        # flow prior. The prior decodes to the data action distribution (the frozen-flow
-        # invariant), so E_{(s,u)}[.] matches RLU's dataset-(s,a) objective in expectation while
-        # keeping both eval entry points identical and free of a preimage load.
         all_obs = np.asarray(batch["observations"])
         n = min(int(c["infer_batch"]), all_obs.shape[0])
         sub = np.random.choice(np.arange(all_obs.shape[0]), size=n, replace=False)
         obs = jnp.asarray(all_obs[sub], jnp.float32)
         key = jax.random.fold_in(self.rng, 7)
-        # #1 (2026-09-18): the note's objective is E_{(s,u)~D}. Use the dataset preimages (the
-        # recorded actions' latents) for the sub-rows, not a prior draw over random actions --
-        # the prior-drawn version made the LP's a_bar = mean phi the wrong direction.
+        # Inference uses E_{(s,u)~D}: the dataset preimages (recorded actions' latents) for the
+        # sub-rows, not prior draws (prior draws made the LP's a_bar the wrong direction).
         u = jnp.clip(jnp.asarray(np.asarray(batch["noise_preimage"])[sub], jnp.float32),
                      -c["u_clip"], c["u_clip"])
         if str(c.get("coef_source", "lp")) == "amortized":

@@ -538,22 +538,16 @@ class TripleMultiplier(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# RLU (Proto Successor Measure, CalCharles/RLU agent/psm.py) on flow latents.
-# The faithful replica: a GENERAL measure phi(s,u,g), b(s,u,g) on the concatenated
-# triple (single critic, NO A^T f factorization and NO scale anchor -- RLU bounds the
-# measure through the TD target and the L2-normed coefficient, not through the head),
-# and a coefficient w(z) = sqrt(z_dim) * enc(z)/||enc(z)|| on the binary policy-index
-# code z (RLU `_L2` = psm_norm). docs/design/2026-09-17-psmgoal.md (RLU rewrite).
+# RLU Proto Successor Measure (CalCharles/RLU agent/psm.py) on flow latents: a general measure
+# phi(s,u,g), b(s,u,g) on the triple (single critic, no A^T f, no head anchor) and a coefficient
+# w(z) = sqrt(z_dim) enc(z)/||enc(z)||. docs/design/2026-09-17-psmgoal.md.
 # ---------------------------------------------------------------------------
 
 class RLUMeasure(nn.Module):
     """RLU PSM basis: phi(s,u,g) -> R^z_dim and b(s,u,g) -> R, plain MLPs on [s, u, g].
 
-    Single critic, no ensemble. RLU leaves the head free (no `psm_norm`, no `tanh` bound) and
-    relies on gridworld state repetition to couple the mesh and keep the measure finite. That
-    coupling is absent on continuous domains, where the head instead carries a joint LayerNorm
-    over [phi, b] (see `__call__`) -- lighter than `_TripleTower`'s sqrt(z_dim) sphere + tanh
-    anchor, but enough to stop the continuous diagonal runaway (2026-09-18).
+    Single critic, no ensemble. A joint RMSNorm on the [phi, b] head bounds the measure (see
+    __call__); RLU leaves it free but that only stays finite on gridworld.
     """
 
     z_dim: int
@@ -565,21 +559,9 @@ class RLUMeasure(nn.Module):
         # PSM basis M=phi.w+b (arXiv 2411.19418 v2 Eq. 2 Bellman-flow + Cor. 4.2 phi^T w+b);
         # RLU PSM.forward psm.py:191-196.
         x = _triple_trunk(obs, u, g, self.hidden_dim, self.hidden_layers)
-        # Scale control (2026-09-18): LayerNorm the measure head. RLU leaves phi/b free and
-        # gridworld state repetition couples the mesh so the measure stays finite; on
-        # continuous cube/antmaze every (s,u,g) triple is distinct, the -(1-gamma) diagonal
-        # occupancy pull is uncoupled from the off-diagonal TD regressions, and the measure
-        # ran to ~1e4 by 15k steps. LayerNorm over the joint [phi, b] head pins it to unit
-        # scale per dim, bounding BOTH phi^T w and b (b alone would otherwise carry the
-        # runaway). NO learnable affine (use_scale/use_bias False): with the standard affine
-        # the diagonal pull grows the gamma scale and the measure still creeps (exp -> linear,
-        # ~340 at 20k); dropping it hard-bounds |M| ~ z_dim every forward pass. Lighter than
-        # f_psmflow's sqrt(D) sphere + tanh anchor (centre + unit-scale, not a fixed radius).
-        # 2026-09-18: RMSNorm (no mean subtraction) rather than LayerNorm. LayerNorm centres
-        # phi per sample, so E[phi] = a_bar (the LP objective's direction) is degenerate and the
-        # inferred coefficient is near-random -- the reason the LP arm scored below the naive
-        # baseline. RMSNorm bounds the magnitude the same way (|M| ~ z_dim) but keeps phi's mean,
-        # so a_bar stays a usable direction. use_scale=False keeps the hard bound.
+        # RMSNorm on the joint [phi, b] head bounds |M| ~ z_dim: the -(1-gamma) diagonal pull is
+        # unbounded on continuous domains. RMSNorm, not LayerNorm -- LayerNorm centres phi, so
+        # E[phi] (the LP objective's direction) goes degenerate. RLU fb_modules.py.
         head = nn.RMSNorm(epsilon=1e-5, use_scale=False, name="head_ln")(
             nn.Dense(self.z_dim + 1, kernel_init=_ORTH1, name="head_out")(x))
         phi, b = head[..., :self.z_dim], head[..., self.z_dim]
@@ -602,9 +584,7 @@ class PolicyCoefficient(nn.Module):
     def __call__(self, z):
         h = PhiMap(z_dim=self.z_dim, hidden_dim=self.hidden_dim,
                    hidden_layers=self.hidden_layers, norm=False, name="enc")(z)
-        # _L2 to the sqrt(z_dim) sphere every forward pass; RLU fb_modules.py:38-40. The eps is
-        # INSIDE the sqrt (not a max clamp) so the gradient is finite at h=0 -- the all-zero
-        # policy code gives enc(z)=0, where psm_norm's Jacobian is 0/0=NaN; torch F.normalize
-        # returns 0 there, and this matches that safely.
+        # _L2 to the sqrt(z_dim) sphere (RLU fb_modules.py:38-40). eps INSIDE the sqrt so the
+        # gradient is finite at h=0 (the all-zero code z gives enc(z)=0).
         d = h.shape[-1]
         return jnp.sqrt(float(d)) * h / jnp.sqrt(jnp.sum(h ** 2, axis=-1, keepdims=True) + 1e-8)
