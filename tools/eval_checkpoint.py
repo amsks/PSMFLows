@@ -354,9 +354,25 @@ def _evaluate_shard(payload):
 
     _, eval_env, train_dataset, _ = make_env_and_datasets(
         payload["env_name"], frame_stack=payload["frame_stack"])
-    ds = Dataset.create(**train_dataset)
     config = ml_collections.ConfigDict(_lists_to_tuples(payload["agent_config"]))
     name = config["agent_name"]
+    train_dataset = dict(train_dataset)
+    # psmgoal's coefficient inference reads the dataset preimages (noise_preimage). The plain
+    # eval dataset lacks them, so splice the preimage arrays from the npz (same rows / same env
+    # data as training, this env's task reward kept) and serve them the way main.py does.
+    _psmgoal_preimages = name == "psmgoal" and config.get("preimage_path")
+    if _psmgoal_preimages:
+        from utils.flow_inversion import load_augmented_dataset, repair_invalid_preimages
+        aug, _ = repair_invalid_preimages(load_augmented_dataset(config["preimage_path"]))
+        assert aug["observations"].shape[0] == train_dataset["observations"].shape[0], \
+            "preimage npz row count != eval dataset (wrong env or stale npz)"
+        for _k in aug:
+            if _k.startswith("noise_preimage"):
+                train_dataset[_k] = aug[_k]
+    ds = Dataset.create(**train_dataset)
+    if _psmgoal_preimages:
+        ds.return_preimage_noise = True
+        ds.preimage_point_mode = bool(config.get("use_point_preimage", False))
 
     ex = ds.sample(1)
     agent = agents[name].create(base_seed, ex["observations"], ex["actions"], config)
