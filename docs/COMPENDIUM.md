@@ -5,7 +5,18 @@ prior context can pick the work up. Theory, algorithm, code seams, every number 
 survived verification, and the live hypotheses. Discarded avenues appear only where knowing
 they are closed prevents re-running them.
 
-> **CURRENT PRIMARY (2026-09-04, amended 2026-09-05).** The project's algorithm is the
+> **MAIN IMPLEMENTATION (2026-09-22): `agent=psmgoal`.** The goal-indexed measure
+> `M(s,u,s+) = phi(s,u,s+)^T w + b(s,u,s+)` with Lagrangian coefficient inference
+> (`docs/design/2026-09-17-psmgoal.md`) is now the main PSMFlows agent, promoted as-is.
+> Its code differs from the written spec in three places: phi and b are one MLP on
+> `[s,u,s+]` (spec: `A(s,u)^T f(s+)`, `beta(s,u)^T f(s+)`); the policy index is a binary
+> code z with its own `w(z)` net (spec: `u'` through f); inference uses 32 sampled rewarding
+> goals (spec: all s+). Five-task cube, 500 episodes, 3 seeds: default `coef_source=lp` best
+> 0.118 (250k), `coef_source=regression` 0.301 ± 0.210 (@750k), BC 0.111. The affine agent
+> described in the block below is now `f_psmflow` (alias `psmflow`), kept as the comparator
+> at 0.284 five-task.
+>
+> **PREVIOUS PRIMARY (2026-09-04, amended 2026-09-05).** The project's algorithm is the
 > **paper-strict affine LatentFlowPSM**, and it is now the DEFAULT of `agent=psmflow`:
 > `psi_form=affine policy_index=latent train_actor=false acting=gpi`, i.e.
 > `psi(s,u,u') = A(s,u)^T w(u') + beta(s,u)` (Prop. `bilinear` literally), no actor, GPI

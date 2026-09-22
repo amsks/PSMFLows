@@ -44,11 +44,11 @@ EVAL_EPS="${EVAL_EPS:-50}"
 LOG_INT="${LOG_INT:-5000}"
 SAVE_INT="${SAVE_INT:-250000}"
 EXTRA="${EXTRA:-}"
-# Which agent to train. `psmflow` is the method (defaults = the paper-strict affine
-# LatentFlowPSM: psi_form=affine policy_index=latent train_actor=false acting=gpi, so a
-# plain submit runs the primary algorithm and EXTRA is only for ablations). `fql` with
-# agent.bc_only=true is Stage A / the BC control. Everything else moved to archive/.
-AGENT="${AGENT:-psmflow}"
+# Which agent to train. `psmgoal` is the method (main implementation since 2026-09-22; a
+# plain submit runs its configs/agent/psmgoal.yaml defaults and EXTRA is only for
+# ablations). `psmflow` (= f_psmflow) is the earlier affine LatentFlowPSM, kept as the
+# comparator. `fql` with agent.bc_only=true is Stage A / the BC control.
+AGENT="${AGENT:-psmgoal}"
 
 # Remember whether DISCOUNT came in from the caller's environment (even "") before the
 # per-env case block below fills in a default -- ${VAR+set} is unset-safe under `set -u`.

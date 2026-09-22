@@ -18,12 +18,21 @@ section with `git show 5249267:PAPER/main.tex`, and `PAPER/ICLR/` for the curren
 and the live hypotheses — **read it before proposing experiments**, it records which
 hypotheses are already settled negative.
 
-**The algorithm (2026-09-04).** `agent=psmflow` with NO flags is the paper-strict affine
-LatentFlowPSM: `psi_form=affine policy_index=latent train_actor=false acting=gpi`, i.e.
-`psi(s,u,u') = A(s,u)^T w(u') + beta(s,u)` (Prop. `bilinear` literally), no actor, GPI acting.
-cube @250k, 500 episodes: **0.532 / 0.620** (2 seeds) vs 0.083 free-psi, 0.230 latent actor,
-0.072 BC. Design: `docs/design/2026-09-04-affine-psi.md`. Two agents exist — `psmflow` and
-`fql` (Stage A + its inverse, and the BC control). **Everything else lives on the `archive`
+**The algorithm (2026-09-22).** `agent=psmgoal` is the main PSMFlows implementation:
+`M(s,u,s+) = phi(s,u,s+)^T w + b(s,u,s+)` over the frozen flow's latents, trained by squared
+TD on a state x goal mesh with a fixed z-indexed latent policy as the bootstrap, and a
+coefficient `w` inferred at test time by the Lagrangian
+`max_l min_w -E[(phi^T w + b) r(s+)] - sum l(s,u,s+) min(phi^T w + b, 0)`; acting is GPI over
+64 prior draws. Defaults in `configs/agent/psmgoal.yaml`; design
+`docs/design/2026-09-17-psmgoal.md`. Deviations of the code from the written spec, kept
+as-is: phi and b are one MLP on `[s, u, s+]` (not `A(s,u)^T f(s+)`, `beta(s,u)^T f(s+)`);
+the policy index is a binary code z with its own `w(z)` net (not `u'` through f); inference
+uses 32 sampled rewarding goals, not all s+. Five-task cube, 500 episodes, 3 seeds:
+default `coef_source=lp` best 0.118, `coef_source=regression` 0.301 ± 0.210, BC 0.111;
+`f_psmflow` (= `psmflow`, the 2026-09-04 affine agent, kept as the comparator) 0.284. The
+2026-09-04 headline 0.532/0.620 was one checkpoint of task 2 and must not be quoted. Agents
+on this branch: `psmgoal`, `f_psmflow`/`psmflow`, `f_psmgoal2p`, and `fql` (Stage A + its
+inverse, and the BC control). **Everything else lives on the `archive`
 branch and is off this branch**: psm, affine_psm, latent_affine_psm, latentrl, fb and the
 off-the-shelf baselines, plus the tools/scripts/tests/plans tied to them or to
 settled-negative hypotheses, and the `scripts/baselines/` launchers that drove them.
@@ -36,7 +45,7 @@ brings one file back. Do not revive anything without a reason.
 |---|---|---|---|
 | A behaviour flow | fits `G(s,u)` by flow matching | `main.py agent=fql agent.bc_only=true` | ~1 h |
 | B inversion | per transition, the `u` that decodes to the recorded action | `tools/precompute_preimages.py` | 4–19 h |
-| C representation | phi / psi / latent actor | `main.py agent=psmflow` | ~3 h |
+| C representation | phi, b, w (the measure) | `main.py agent=psmgoal` | ~3 h |
 
 A and B are **already published** for `cube-single-play`, `antmaze-medium-navigate`,
 `pointmaze-medium-navigate` (HF dataset `amsks/psmflows-preimages`, private). Normal work is
@@ -54,8 +63,8 @@ eval, regeneration.
 .venv/bin/ruff check .        # line-length 120, single quotes, py310
 
 # stage C training (Hydra; configs/config.yaml + configs/agent/<agent>.yaml).
-# No arm flags: the defaults ARE the affine paper-strict agent.
-CUDA_VISIBLE_DEVICES=0 .venv/bin/python main.py agent=psmflow env_name=$ENV \
+# No arm flags: the defaults ARE the main agent (psmgoal). agent=psmflow is the comparator.
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python main.py agent=psmgoal env_name=$ENV \
   agent.flow_ckpt_path=$PSM_DATA/flow/$NAME agent.flow_ckpt_epoch=500000 \
   agent.preimage_path=$PSM_DATA/preimages/$NAME.npz \
   offline_steps=500000 eval_interval=50000 eval_episodes=50 save_dir=$PSM_DATA/exp seed=0
@@ -64,7 +73,8 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python main.py agent=psmflow env_name=$ENV \
 FLOW_CKPT=... FLOW_EPOCH=500000 PREIMAGES=... SEEDS="0 1 2" GROUP=<name> \
   bash scripts/launch_psmflow.sh $ENV <GPU> 500000 offline
 
-# the only evals that count
+# the only evals that count (psmgoal also needs PSM_REPO exported)
+GPU=0 bash scripts/eval500.sh psmgoal cube <run_dir> <out_name>
 GPU=0 bash scripts/eval500.sh psmflow cube <run_dir> <out_name>
 GPU=0 bash scripts/eval500.sh bc      cube -        bc_control
 .venv/bin/python tools/make_tables.py     # regenerate docs/tables/results.md
@@ -86,14 +96,19 @@ Environment: `OGBENCH_DATASET_DIR`, `MUJOCO_GL=egl` (headless), `XLA_PYTHON_CLIE
 ## Architecture
 
 `main.py` is the single Hydra entry point for every agent in `agents/__init__.py`'s registry
-(`psmflow`, `fql`, `psm`, `fb`, `affine_psm`, `latentrl`, plus baselines). It converts the
+(`psmgoal`, `f_psmflow`/`psmflow`, `f_psmgoal2p`, `fql`). It converts the
 Hydra `agent` group into the `ml_collections.ConfigDict` the agents expect, builds the env +
 dataset, and for latent-space agents loads the preimage-augmented dataset.
 
 - `agents/fql.py` — the behaviour flow *and its inverse*. `compute_full_proposal_distribution_em`
   is stage B's core: implicit-Euler backward ODE for the point preimage, then EM for a
   Gaussian(-mixture) posterior over `u`.
-- `agents/psmflow.py` — the algorithm. `docs/reference/psmflow-symbols.md` carries the
+- `agents/psmgoal.py` — the algorithm (main since 2026-09-22). Ordered construction →
+  measure → proto bootstrap → loss → goal head → in-loop actor → update → inference →
+  acting. Non-default seams: `coef_source` (lp | amortized | regression), `acting`
+  (gpi | distill | sfbc), `train_actor`/`actor_objective`, `train_goal_head`, `use_dgd`.
+- `agents/f_psmflow.py` (alias `agents/psmflow.py`) — the earlier affine LatentFlowPSM, kept
+  as the comparator. `docs/reference/psmflow-symbols.md` carries the
   defaults and the complete code↔paper symbol map (phi, psi, A, beta, w(u'), w, u, u', M,
   Q, Lambda_K, P, kappa, pi_eta) plus the loss stabilisers; read it before touching the
   losses. The file is ordered construction → losses → update → acting → inference.

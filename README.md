@@ -11,22 +11,37 @@ temporal-difference backup is then evaluated where there is no data, and the err
 a representation shared by every downstream task.
 
 PSMFlows replaces the policy family. A behaviour-cloned conditional flow `G(s, u)` maps
-Gaussian noise to dataset actions and is then frozen; policies are indexed by the latent
-`u`, so `pi_{u'} = G(., u')` and every action the model evaluates, bootstraps or executes is
-a flow decode. The successor measure of that family is fitted in the affine form the
-write-up derives,
+Gaussian noise to dataset actions and is then frozen; every action the model evaluates,
+bootstraps or executes is a flow decode `G(s, u)` of a latent `u`.
+
+The main implementation is `agent=psmgoal` ([`agents/psmgoal.py`](agents/psmgoal.py),
+design [`docs/design/2026-09-17-psmgoal.md`](docs/design/2026-09-17-psmgoal.md)). Its
+successor measure is
 
 ```
-m(s, u, u', x) = psi(s, u, u')^T phi(x),    psi(s, u, u') = A(s, u)^T w(u') + beta(s, u),
+M^{pi_u'}(s, u, s+) = phi(s, u, s+)^T w(u') + b(s, u, s+)
 ```
 
-with `phi` a basis over future states, `A` and `beta` independent of the policy index `u'`,
-and `w(u')` the finite-dimensional coordinate of the policy it indexes. A reward is answered
-in closed form by `w = E_D[r(x) phi(x)]`, and acting is generalised policy improvement over
-`K` prior draws: decode `argmax_u max_{u'} psi(s, u, u')^T w`.
+fitted by squared TD on a state x goal mesh (goals = the batch's next states), bootstrapping
+from a fixed latent policy. A reward is answered by the Lagrangian
 
-The symbol map from these letters to the code is at the top of
-[`agents/psmflow.py`](agents/psmflow.py). The theory is in `PAPER/` (the technical report is
+```
+max_{l >= 0} min_w  - E_{(s,u)~D} sum_{s+} (phi^T w + b) r(s+)
+                    - sum_{(s,u,s+)} l(s,u,s+) min(phi^T w + b, 0)
+```
+
+with `w` renormalised to the sqrt(D) sphere each step, and acting is generalised policy
+improvement over 64 prior draws: decode `argmax_u sum_{s+} (phi(s,u,s+)^T w + b) r(s+)`.
+
+The code keeps three simplifications of that spec: `phi` and `b` are one MLP on
+`[s, u, s+]` rather than `A(s,u)^T f(s+)` and `beta(s,u)^T f(s+)`; the policy index is a
+binary code `z` with its own `w(z)` network (the RLU proto family) rather than `u'` through
+`f`; and inference sums over 32 sampled rewarding goal states rather than all `s+`.
+
+The earlier agent, `agent=psmflow` (= `f_psmflow`, the affine form
+`psi(s,u,u') = A(s,u)^T w(u') + beta(s,u)` with `w = E_D[r phi]`), is kept as the
+comparator; its symbol map is at the top of [`agents/f_psmflow.py`](agents/f_psmflow.py).
+The theory is in `PAPER/` (the technical report is
 kept outside the working tree; read it with `git show 5249267:PAPER/main.tex`) and
 transcribed in [`docs/COMPENDIUM.md`](docs/COMPENDIUM.md) §2.
 
@@ -36,7 +51,7 @@ transcribed in [`docs/COMPENDIUM.md`](docs/COMPENDIUM.md) §2.
 |---|---|---|---|
 | A behaviour flow | fits `G(s, u)` by flow matching on the dataset | `main.py agent=fql agent.bc_only=true` | ~1 h |
 | B inversion | finds, per transition, the `u` that decodes to the recorded action | `tools/precompute_preimages.py` | 4-19 h |
-| C representation | fits `phi`, `psi` and (optionally) the latent actor | `main.py agent=psmflow` | ~3 h |
+| C representation | fits the measure `phi`, `b`, `w` | `main.py agent=psmgoal` | ~3 h |
 
 Stages A and B are published for `cube-single-play`, `antmaze-medium-navigate` and
 `pointmaze-medium-navigate` on Hugging Face as `amsks/psmflows-preimages` (private; ask for
@@ -53,7 +68,7 @@ Stage-C training, once the artifacts are in `$PSM_DATA`:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 .venv/bin/python main.py \
-  agent=psmflow env_name=cube-single-play-singletask-v0 \
+  agent=psmgoal env_name=cube-single-play-singletask-v0 \
   agent.flow_ckpt_path=$PSM_DATA/flow/cube-single-play \
   agent.flow_ckpt_epoch=500000 \
   agent.preimage_path=$PSM_DATA/preimages/cube-single-play.npz \
@@ -65,7 +80,8 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python main.py \
 Evaluation (500 episodes; nothing else is reportable) and table regeneration:
 
 ```bash
-GPU=0 bash scripts/eval500.sh psmflow cube <run_dir> <out_name>
+PSM_REPO=$PWD GPU=0 bash scripts/eval500.sh psmgoal cube <run_dir> <out_name>
+GPU=0 bash scripts/eval500.sh psmflow cube <run_dir> <out_name>   # comparator
 GPU=0 bash scripts/eval500.sh bc      cube -         bc_control
 .venv/bin/python tools/make_tables.py [--logs DIR]
 ```
@@ -95,8 +111,14 @@ is private).
 
 ## Config seams
 
-Everything below is a key of `configs/agent/psmflow.yaml`. The defaults are the affine form
-of the write-up; the other values are ablations.
+`configs/agent/psmgoal.yaml` (the main agent) documents each of its keys inline. The seams
+that change the method: `coef_source` (`lp` Lagrangian inference, default | `amortized`
+goal head `w*(g) = h(g)/||h(g)||` | `regression` least-squares `w`), `acting` (`gpi` |
+`distill` | `sfbc`), `train_goal_head`, `train_actor` + `actor_objective`, `use_dgd`
+(learned multiplier `l` vs fixed hinge).
+
+Everything below is a key of `configs/agent/psmflow.yaml`, the comparator agent. Its
+defaults are the affine form of the write-up; the other values are ablations.
 
 | key | default | what it switches |
 |---|---|---|
@@ -116,14 +138,15 @@ head.
 ## Layout
 
 ```
-agents/psmflow.py        the algorithm: construction, losses, update, acting, inference
+agents/psmgoal.py        the algorithm (main): measure, TD loss, inference, acting
+agents/f_psmflow.py      the comparator affine agent (agents/psmflow.py is its alias)
 agents/fql.py            the behaviour flow and its inverse (stage B's core)
 utils/psm_networks.py    nn.Modules only: PhiMap, PsiMap, AffinePsiMap, the actors
 utils/psm_common.py      pure loss/ensemble/projection helpers
 utils/flow_inversion.py  preimage validity, repair, augmented-dataset IO
 tools/                   preimage precompute, checkpoint evaluation, diagnostics, figures
 scripts/                 launchers; scripts/slurm/ for a scheduler, one seed per job
-configs/                 Hydra config tree; agent/psmflow.yaml holds the knobs
+configs/                 Hydra config tree; agent/psmgoal.yaml holds the main agent's knobs
 ```
 
 ## Results
@@ -146,7 +169,7 @@ that is what the method has to beat.
 
 ## The `archive` branch
 
-Every agent, config, test, tool and plan that is not on the `fql` -> preimages -> `psmflow`
+Every agent, config, test, tool and plan that is not on the `fql` -> preimages -> `psmgoal` / `psmflow`
 path lives on the `archive` branch: the peer baselines, the raw-action measure agents, the
 settled-negative experiments and the `scripts/baselines/` launchers. It is kept because it is
 the negative result of record. Nothing on this branch imports it.
