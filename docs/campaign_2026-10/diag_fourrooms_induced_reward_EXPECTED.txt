@@ -1,0 +1,60 @@
+Expected outcomes, written before any run (2026-10-01, about 21:00).
+Experiment: tools/diag_fourrooms_induced_reward.py. Four-rooms 11x11 grid, 104 free cells,
+4 deterministic moves, uniform-random behaviour, discount 0.98, 8 goal cells, 200 start
+cells per goal, step limit 100, 3 seeds.
+
+Facts read from the cube artifacts before writing this file (they change what "replicate" means):
+  F1. The cube 0.876 scalar critic trained on a reward file whose meta.json says
+      readout=regression: r_hat = f(s')^T w, f = psmgoal state feature with goal and action
+      averaged out, w = least squares on the REAL reward over all 1M rows. Correlation with
+      the real reward 0.30. It is not the goal-set readout mean_g M(s', u', g).
+  F2. The reward file replaces only the rewards. The episode-end masks stay those of the
+      real task (OGBench: mask = 0 on success rows), and the reward keeps the -1/0 scale.
+  So each scalar critic on an induced reward is run in two forms: with the true episode-end
+  mask and -1/0 scale (the cube pipeline), and with no mask (the induced reward alone,
+  z-scored, sign from the affine fit). A control critic gets reward -1 on every row plus the
+  true mask. Both readouts are run: goal-set (mean_g M at the goal states, with w from the
+  regression path and from the Lagrangian path) and feature regression (F1).
+
+Block 1, exact M of the random policy (no learning):
+  - Greedy on exact M at the goal: success 1.00. Reason: the random policy's value for
+    "visit g" has no local maximum except g (each non-goal cell's value is 0.98 times the
+    average over its 4 moves), so greedy ascent always arrives. Steps a little above the
+    shortest path. Arrows along a shortest path in 85-100% of cells.
+  - Best-vs-second-best gap relative to the spread across cells: larger near the goal than far.
+  - Goal-set induced reward from exact M, then Q-iteration: success 1.00 with the mask;
+    0.9-1.00 without the mask (the reward peaks one step before the goal; the critic may
+    circle next to the goal, but it should pass through it).
+  - Feature-regression readout on exact M: equals the true reward (features are full rank).
+  - Control (-1 reward plus true mask): 1.00, shortest paths.
+  - Random policy: 0.15-0.35.
+
+Block 2, learned M, onehot (states repeat):
+  - Learned M close to exact M over rho (correlation above 0.9), M at the row's own next state
+    equal to M at another row in the same cell.
+  - M as critic with the training coefficient w(z): 0.5-0.95. Errors are in far cells where the
+    action gap is small relative to the fit error.
+  - M as critic with Lagrangian w: 0.4-0.9. With regression w: uncertain, 0.2-0.9; phi is
+    close to rank one, so M with a new w is b plus a multiple of one function, and the sign of
+    that multiple decides whether the action ranking is kept.
+  - Scalar critic, mask form (cube pipeline), any readout: 0.95-1.00. The control with
+    constant reward is also 0.95-1.00, so in this form the result is produced by the mask.
+  - Scalar critic, no mask: goal-set readout 0.7-1.00; feature readout 0.7-1.00.
+  - Gap between M-as-critic and the scalar critic: small to moderate.
+
+Block 3, learned M, xyphase (every state unique):
+  - M at the row's own next state near the head bound (65); M elsewhere 0.1-0.5; correlation
+    with exact M over rho below 0.5.
+  - M as critic (all three coefficients): 0.2-0.5, at or a little above the random floor.
+    Greedy action agrees with the true-reward critic in 25-45% of states (chance 25%,
+    more than one optimal action in many cells).
+  - Induced reward correlation with the true reward: goal-set readout 0.05-0.4; feature
+    readout 0.2-0.6.
+  - Scalar critic, mask form: 0.9-1.00, equal to the true-reward critic within 0.05, and the
+    constant-reward control is the same. Scalar critic, no mask: 0.2-0.7.
+  - So the cube pattern (M as critic near the floor, scalar critic on the induced reward near
+    the true-reward critic) is expected to appear in xyphase for the mask form, and the
+    control is expected to show that the mask carries it.
+
+Expected failures: Q-network on xyphase may not resolve small action gaps of the no-mask
+reward (values differ by less than the fit error); reported as measured, not tuned.

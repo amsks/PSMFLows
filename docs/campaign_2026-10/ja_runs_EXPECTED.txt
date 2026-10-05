@@ -1,0 +1,33 @@
+Joint actor runs, cube, written 2026-10-05 before launch.
+
+Setup. Goal-conditioned measure M = phi(s,u,s+)^T h(g) + b(s,u,s+), softmax loss, hindsight
+goals only (geometric, goal_random_frac 0, goal_cur_frac 0), as psmgoal_db_sm_cube, but the
+bootstrap latent at s' is the actor's move at (s', g) instead of the data's next latent. The
+actor is trained at a uniform future goal (fb_goals) on the shaped value (kernel-weighted
+softmax measure over the batch's next states) or on the point value M(s,u,g).
+
+Arms (3 seeds each, 500k steps, checkpoints 250k and 500k):
+  psmgoal_ja_fbc3_sh_cube  flowbc actor, fb_bc_coeff 3.0, shaped value
+  psmgoal_ja_fbc0_sh_cube  flowbc actor, fb_bc_coeff 0.0, shaped value
+  psmgoal_ja_dsrl_sh_cube  dsrl actor (tanh-Gaussian, no BC term, learned alpha), shaped value
+  psmgoal_ja_fbc3_pt_cube  flowbc actor, fb_bc_coeff 3.0, point value
+Readouts: hgoal_each (best of 64 prior draws by M, each goal at its own h(g)) and actor_rel
+(the actor fed one rewarding dataset state), five tasks, 500 episodes each.
+
+Reference numbers: data bootstrap psmgoal_db_sm_cube hgoal_each 0.68 (1 seed so far),
+squared 0.60. BC control 0.111.
+
+Expected outcomes:
+1. fbc3_sh: hgoal_each >= 0.68 five-task mean. actor_rel within 0.05 of its hgoal_each.
+   Actor |u| mean about 0.8 per dim (a prior draw's |u| mean), not 0.15 (the earlier tanh
+   actor pinned near u = 0 by the data-latent anchor).
+2. fbc0_sh and dsrl_sh: below fbc3_sh on both readouts. Risk of collapse: the actor chases a
+   bad early M and the bootstrap follows it. A collapse shows as hgoal_each at or below BC
+   (0.111) with the actor's Q rising while m_softmax_diag falls.
+3. fbc3_pt: below fbc3_sh. The point value at a far goal is flat in u.
+4. If every arm sits at or below the data bootstrap (0.68) with three seeds agreeing, the
+   actor in the bootstrap does not improve on the data's own next move on cube.
+
+Logged per step (train.csv): actor_u_absmean, actor_delta_norm / actor_bc_err (flowbc),
+actor_logp and actor_alpha (dsrl), actor_q, actor_p_own (softmax weight on the row's own
+next state).

@@ -1,0 +1,29 @@
+psmgoal data-bootstrap runs (docs/design/2026-10-03-psmgoal-data-bootstrap.md)
+Written 2026-10-03 before any training job was submitted.
+
+Groups: psmgoal_db_sq_cube, psmgoal_db_sm_cube, psmgoal_db_sq_antmaze, psmgoal_db_sm_antmaze
+Seeds 0 1 2, 500000 steps, checkpoints 250000 and 500000.
+Overrides (all groups): agent.policy_index=goal agent.bootstrap_source=data agent.train_actor=false
+  agent.goal_random_frac=0.0 agent.goal_cur_frac=0.0 agent.measure_loss={squared|softmax}
+Antmaze adds agent.goal_discount=0.99 (ENVKEY=antmaze sets agent.discount=0.99). No fb_hit_spec (no actor).
+
+Eval (500 episodes, five tasks, per checkpoint): hgoal and hgoal_each at 250k and 500k; lp at 250k.
+BC control beside every number: cube 0.111, antmaze 0.07-0.09.
+
+Expected outcomes
+- Cube softmax, hgoal: above 0.665 (the goal-label run with the stuck actor).
+- Cube squared, hgoal: above 0.405.
+- hgoal_each at or above hgoal, both envs, both losses.
+- Antmaze: unknown. Expect a gain over BC (0.07-0.09) but not a cube-like number.
+- Failure that refutes the idea: cube softmax hgoal at or below 0.665 with three seeds agreeing.
+
+Expected training signals (from the smoke)
+- No actor_* keys in train.csv (no actor is trained).
+- Squared: m_diag_mean near the head bound, m_offdiag_mean small; psm_loss finite.
+- Softmax: m_softmax_diag (weight on the own next state) below 1 and spread over columns.
+- Steps/second close to the gc runs without the actor step (gc sq: 8.2 h, sm: 9.7 h for 500k).
+
+Risks (from the audit)
+- 43.5% of cube rows have the goal in a later pick-place segment; M low and flat over u for far g.
+- With random goals off, h(g) never sees (s, g) from different trajectories.
+- Candidate u at test time are prior draws, not the data policy's moves.

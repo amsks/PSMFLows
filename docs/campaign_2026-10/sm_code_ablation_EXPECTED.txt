@@ -1,0 +1,24 @@
+Softmax loss without the goal label: expected outcomes
+Written 2026-10-02 before the training arm and the eval500 jobs were launched.
+
+Cells (five-task cube, 500 episodes per task, 3 seeds, readout: best of 64 prior u by M read
+with the trained coefficient, coef_source=trained = projected mean of w(z) over 256 fixed codes z):
+
+1. Squared loss + code label (existing checkpoints psmgoal_lift_cube_gc, steps 250000 and 500000).
+   Expected: at or near BC, 0.05 to 0.2 (BC is 0.111).
+   Reason: M is at its bound at the row's own next state and near zero at other states.
+
+2. Softmax loss + code label (new arm psmgoal_sm_code_cube, steps 250000 and 500000).
+   Expected: clearly above cell 1, between 0.3 and 0.6, and below the 0.665 of the
+   goal-labelled softmax run (psmgoal_gc_sm_cube, w = h(goal), 250k).
+
+Reading of the outcome:
+   If cell 2 matches 0.665, the goal label adds nothing beyond giving a usable trained w.
+
+Reference numbers already measured (five-task cube, 500 episodes, 3 seeds, 250k):
+   goal label + squared, w = h(goal): 0.405      goal label + squared, Lagrangian w: 0.000
+   goal label + softmax, w = h(goal): 0.665      goal label + softmax, Lagrangian w: 0.367
+   BC: 0.111
+
+The lp readout of the new arm (coef_source=lp) is run beside the trained readout as a second column;
+no prediction is stated for it.

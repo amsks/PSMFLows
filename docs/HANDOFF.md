@@ -18,7 +18,172 @@ hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RES
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
 Branch: `feat/inversion-integration` · Machine: `kisski` (GWDG, SLURM/H100) · prior: `midi-01` (UT CS)
-Date: **2026-09-17** (latest) · prior: 2026-09-16, 2026-09-15, 2026-09-14, 2026-09-11, 2026-09-10, 2026-09-09, 2026-09-08, 2026-09-07, 2026-09-06, 2026-09-05, 2026-09-04, 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+Date: **2026-10-05** (latest) · prior: 2026-09-23, 2026-09-17, 2026-09-16, 2026-09-15, 2026-09-14, 2026-09-11, 2026-09-10, 2026-09-09, 2026-09-08, 2026-09-07, 2026-09-06, 2026-09-05, 2026-09-04, 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+
+---
+
+## 2026-10-05 — psmgoal: goal-conditioned measure, softmax loss, data bootstrap (2026-10-01..05)
+
+Hand-over entry. No HANDOFF entry was written between 09-23 and this one; the dated detail is
+in the memory file `psmgoal-failing-point-audit` and in the two design docs
+`docs/design/2026-10-01-psmgoal-goal-conditioned.md`, `docs/design/2026-10-03-psmgoal-data-bootstrap.md`.
+All numbers below: cube-single-play five-task mean, 500 episodes per task, seeds 0 1 2 unless
+stated. BC control 0.111 (cube), 0.07-0.09 (antmaze). Eval JSONs: `$PSM_DATA/logs/<group>_sd00k_<step>_<readout>_task<t>.json`;
+`scripts/campaign_2026-10/agg_results.py` prints the table.
+
+### Three findings
+
+1. **The readout was the fault of the old psmgoal, not the measure.** The old agent
+   (`psmgoal_lift_cube_gc`, code label, squared loss) scored lp 0.001 and regression 0.301. Read
+   with the coefficient it was trained with (`coef_source=trained`, mean of w(z)) it scores 0.327
+   at 250k. Four-rooms gridworld (`tools/diag_fourrooms_induced_reward.py`): the exact M of the
+   random policy, greedy at the goal, succeeds 1.000; the learned M read with its training w
+   0.73 (repeating states) / 0.57 (unique states); the same M read with the Lagrangian w 0.04 /
+   0.13, regression w 0.08 / 0.24, random 0.25. M itself matched the exact M (corr 0.989).
+2. **The squared loss saturates on states that do not repeat.** Cube and antmaze: M at the row's
+   own next state 128.9-129.0 (the head bound 129), at other rows' next states 0.005-0.03; u
+   explains 0.06-0.9% of M's variance within a state. The target for M at the own next state is
+   (1-discount) x N / (rows indistinguishable from that next state); for the full 28-dim cube s+
+   that is 20,020. A 7x7 gridworld reproduces this on unique continuous states (sum over s+
+   0.147 vs 1) and recovers M on one-hot states (corr 0.98). The softmax loss (share of the own
+   next state among the batch's next states) removes the saturation: own-state weight 0.45-0.49
+   on cube, 0.08-0.09 on antmaze.
+3. **The policy inside the measure did not reach goals.** First-u simulator test
+   (`tools/diag_first_u_effect_bc.py`): hold the first latent u fixed, BC afterwards, 100
+   rollouts per (state, u). Share of success variance explained by the first u, bias-corrected:
+   0.0009 cube (15 states x 8 u), 0.0002 antmaze (12 anchors). So the measure of BC has nothing
+   to rank u by. Fix: index the policy by the goal (w = h(g)) and bootstrap from a goal policy
+   (an actor fed the goal, or the data's own next latent).
+
+### Cube 2x2, read with the trained coefficient, 250k / 500k
+
+| label | squared | softmax |
+|---|---|---|
+| code (`coef_source=trained`) | 0.327 / 0.240 (`psmgoal_lift_cube_gc`) | 0.524 / 0.383 (`psmgoal_sm_code_cube`) |
+| goal + actor bootstrap (`hgoal`) | 0.405 / 0.277 (`psmgoal_gc_sq_cube`) | 0.665 / 0.594 (`psmgoal_gc_sm_cube`) |
+
+Lagrangian (`lp`) on the same checkpoints: 0.000 (sq), 0.367 / 0.308 (sm goal), 0.119-0.265
+(sm code). Actor readouts (`actor_rel`, `actor_env`) 0.10-0.14 on every gc run; the actor sits
+near u = 0 (|u| 0.15-0.31 vs 0.8 for a prior draw) because `fb_bc_coeff=3` pulls to the
+dataset latent. Antmaze gc: hgoal 0.032-0.061 (sq), 0.044 / 0.121 (sm, seeds 0.008/0.185/0.170),
+lp 0.002-0.058, actor 0.09-0.10.
+
+### Data bootstrap (u' = the data's next latent, no actor), 250k / 500k
+
+| group | hgoal | hgoal_each | lp |
+|---|---|---|---|
+| `psmgoal_db_sq_cube` | 0.597 / 0.516 | 0.602 / 0.520 | 0.000 / - |
+| `psmgoal_db_sm_cube` | 0.412 / 0.446 | 0.619 / 0.646 | 0.26 (1 seed) / - |
+| `psmgoal_db_sq_antmaze` | 0.118 / 0.096 | 0.115 / 0.101 | - |
+| `psmgoal_db_sm_antmaze` | 0.095 / 0.051 | 0.086 / 0.118 (2 seeds) | - |
+
+Antmaze stays at the BC level under every arm.
+
+### Joint actor (data-bootstrap base, actor back in the bootstrap), 250k / 500k
+
+| group | hgoal_each | actor_rel |
+|---|---|---|
+| `psmgoal_ja_fbc3_sh_cube` (flowbc, bc 3.0, shaped value) | 0.669 / 0.655 | 0.106 / 0.103 |
+| `psmgoal_ja_fbc0_sh_cube` (bc 0.0; 2 seeds) | 0.021 / 0.033 | 0.001 / 0.003 |
+
+With the BC pull removed the measure collapses. With it the actor acts at BC level while the
+M readout equals the data bootstrap.
+
+### Smaller results
+
+| test | result |
+|---|---|
+| hold the chosen latent for 1 / 4 / 8 env steps (`gpi_hold`, db_sq 250k) | 0.60 / 0.44 / 0.14 |
+| uniform goal sampling (`psmgoal_dbu_sq_cube`, seed 0, 250k, hgoal) | 0.532 |
+| 10,000 inference goals on `psmgoal_lift_cube_gc` 750k, regression | 0.288 (32 goals: 0.301) |
+| 4 policies (`psmgoal_fewpol`, `max_log_seed=2`, 500k) | lp 0.001, regression 0.212 |
+| action from future (`tools/diag_action_from_future.py`), top-1 of 64, cube k=1/5/50/100 | 0.277 / 0.123 / 0.102 / 0.084 (no future 0.083, chance 0.016) |
+| same, antmaze, every k | 0.11 (no future 0.108) |
+| phi effective rank, every run 2026-10-01..05 | 1.0 |
+
+Action-from-future: under the data policy the first action is identifiable from the future
+only within a few steps on cube and not at all on antmaze.
+
+Correction to the 09-14 "scalar critic on the induced reward 0.876" finding:
+`dataset.reward_override_path` replaces rewards only; the critic kept the task's true episode-end
+mask. In four rooms a critic with reward -1 everywhere plus the true episode end scores 1.000.
+Cube without the mask is untested.
+
+Orthonormality: the 09-23 penalty raised the rank to 128 but scored 0.05 under the old (lp)
+readout. The arm `psmgoal_dbo_sq_cube` (data bootstrap, squared, `ortho_coef=1.0`) is queued
+to re-test it under the trained-coefficient readout.
+
+### Run groups and overrides (on top of `configs/agent/psmgoal.yaml`; antmaze adds `discount=0.99 goal_discount=0.99`, gc antmaze also `fb_hit_spec=0:2:0.5`)
+
+| group | overrides | status |
+|---|---|---|
+| `psmgoal_lift_cube_gc` | `train_goal_head=true coef_source=amortized` (09-18 defaults, 1M) | done |
+| `psmgoal_fewpol` | as above with `max_log_seed=2` | done |
+| `psmgoal_sm_code_cube` | `measure_loss=softmax` | done |
+| `psmgoal_gc_{sq,sm}_{cube,antmaze}` | `policy_index=goal train_actor=true actor_input=goal goal_cur_frac=0.2 measure_loss={squared,softmax}` | done |
+| `psmgoal_db_{sq,sm}_{cube,antmaze}` | `policy_index=goal bootstrap_source=data train_actor=false goal_random_frac=0 goal_cur_frac=0 measure_loss={squared,softmax}` | done; antmaze sm 500k hgoal_each 1 seed pending |
+| `psmgoal_dbu_{sq,sm}_cube` | db overrides + `goal_sampling=uniform` | sq seed 0 done; sq seeds 1 2, sm seeds 0 1 2 queued (2522684-89) |
+| `psmgoal_dbo_sq_cube` | db sq overrides + `ortho_coef=1.0` | queued (2522852-54) |
+| `psmgoal_ja_fbc3_sh_cube` | `policy_index=goal bootstrap_source=actor train_actor=true actor_input=goal goal_random_frac=0 goal_cur_frac=0 goal_sampling=geometric measure_loss=softmax acting=distill eval_redistill=false eval_goal_source=relabel actor_kind=flowbc fb_bc_coeff=3.0 actor_value_kind=shaped` | done |
+| `psmgoal_ja_fbc0_sh_cube` | same, `fb_bc_coeff=0.0` | 2 seeds done |
+| `psmgoal_ja_fbc03_sh_cube` | same, `fb_bc_coeff=0.3` | queued |
+| `psmgoal_ja_dsrl_sh_cube` | same, `actor_kind=dsrl fb_bc_coeff=0.0` | queued |
+| `psmgoal_ja_fbc3_pt_cube` | same as fbc3_sh, `actor_value_kind=point` | queued |
+
+Readouts (eval-time overrides, `scripts/slurm/launch_psmgoal_eval500.sh` ARMS):
+`hgoal` = `coef_source=amortized acting=gpi`; `hgoal_each` = `coef_source=hgoal_each acting=gpi`;
+`lp` = `coef_source=lp acting=gpi`; `trained` = `coef_source=trained acting=gpi` (code label);
+`actor_rel` = `acting=distill eval_redistill=false eval_goal_source=relabel`;
+`actor_env` = same with `eval_goal_source=env`; `hgoal_each_hold{4,8}` = hgoal_each with `gpi_hold={4,8}`.
+Campaign launchers and watchers: `scripts/campaign_2026-10/` (copies of `$PSM_DATA/gc_scripts`);
+expectation files and job lists: `docs/campaign_2026-10/`.
+
+### Not done
+
+- No HANDOFF entry between 09-23 and 10-05 until this one.
+- Antmaze is unsolved: every arm and readout sits at 0.03-0.12 against BC 0.07-0.09.
+- No actor acts well: actor readouts 0.10-0.14 on cube in every run; the bc 0 actor collapsed.
+- The Lagrangian readout (`lp`) is below `hgoal` on every run.
+- The MC-floor target (TD target = max(TD, MC return)) from the shared cube recipe is not derived.
+- Cube trained with s+ = cube position only is untested.
+
+### Resume on another cluster
+
+1. Clone the repo, branch `feat/inversion-integration`, set `PSM_DATA`, `PSM_REPO`,
+   `OGBENCH_DATASET_DIR`, `MUJOCO_GL=egl`, `HF_TOKEN`.
+2. Preimages and flows: `python scripts/hf_preimages.py pull --name cube-single-play --dest $PSM_DATA --with-flow`
+   (also `antmaze-medium-navigate`, `pointmaze-medium-navigate`, `scene-play-a40p0-ps0p70-ns12-N200`
+   with `--flow-name scene-play`). The pull repairs the sidecar path.
+3. Checkpoints of the 14 groups above (`params_*.pkl`, `flags.json`, `train.csv`, `eval.csv`):
+   HF dataset `amsks/psmflows-preimages`, file `runs/psmgoal_ckpts_2026-10-05.tar.gz`, unpack
+   into `$PSM_DATA/exp/PSMFLows/`. Eval JSONs and figures: `runs/psmgoal_eval_logs_2026-10-05.tar.gz`,
+   unpack into `$PSM_DATA/logs/`. Download with
+   `python -c "from huggingface_hub import hf_hub_download as d; d('amsks/psmflows-preimages', 'runs/psmgoal_ckpts_2026-10-05.tar.gz', repo_type='dataset', local_dir='$PSM_DATA')"`.
+4. Train: `scripts/slurm/train_psmflow.sbatch` with `GROUP`, `SEED`, `PREIMAGES`, `EXTRA=<overrides>`
+   (see `scripts/campaign_2026-10/ja_launch.sh`). Eval: `scripts/slurm/launch_psmgoal_eval500.sh`
+   with `GROUP`, `EPOCHS`, `ARMS`. Both assume SLURM; swap the `sbatch` lines for the target scheduler.
+
+---
+
+## 2026-09-23 — psmgoal F1 (orthogonality term): collapse removed, acting worse
+
+psmgoal became the main agent on 2026-09-22 (bca4b8e). `tools/diag_psmgoal_gram.py` found its
+phi collapsed to rank one (effective rank 1.01-1.02 of 128, all seeds, 250k-1M), which makes
+the Lagrangian's direction orthogonal to the least-squares w (cos 0.0000-0.0001). F1 adds
+`ortho_coef * ||mean phi phi^T - I||_F^2` on the TD mesh (default 0).
+
+Five-task cube, 500 episodes/task, 2 seeds per arm, per-seed means averaged:
+
+| arm | 250k lp / reg | 500k lp / reg |
+|---|---|---|
+| ortho 1 | 0.011 / 0.033 | 0.036 / 0.047 |
+| ortho 10 | 0.071 / 0.058 | 0.061 / 0.058 |
+| ortho 100 | 0.055 / 0.062 | 0.061 / 0.070 |
+| control, no ortho (3 seeds) | — / 0.079 | — / 0.176 |
+
+BC 0.111; control @750k regression 0.301. Mesh effective rank with F1: 127.7-127.9;
+cos(E[phi r], least squares) 0.75-0.98. F1 fixes the geometry and lowers acting below BC.
+Default stays `ortho_coef: 0`. Detail: `docs/design/2026-09-22-psmgoal-fixes.md` §4.
 
 ---
 

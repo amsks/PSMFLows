@@ -1,0 +1,41 @@
+psmgoal data-bootstrap ablations: uniform hindsight goals (training) and the held gpi latent (eval).
+Written 2026-10-04 before any job of this batch was submitted.
+Extends docs/design/2026-10-03-psmgoal-data-bootstrap.md (groups psmgoal_db_{sq,sm}_cube).
+
+A. Training groups: psmgoal_dbu_sq_cube, psmgoal_dbu_sm_cube. Seeds 0 1 2, 500000 steps,
+   checkpoints 250000 and 500000, --time=16:00:00.
+   Overrides = the db launches plus agent.goal_sampling=uniform:
+     agent.policy_index=goal agent.bootstrap_source=data agent.train_actor=false
+     agent.goal_random_frac=0.0 agent.goal_cur_frac=0.0 agent.measure_loss={squared|softmax}
+     agent.goal_sampling=uniform
+   Only difference from psmgoal_db_*_cube: the measure goal of row i is a uniform draw over the
+   row's own s' and every later state of its trajectory (future_goal_idxs) instead of the
+   geometric offset at goal_discount=0.98. The data bootstrap stays valid: from row i+1 the goal
+   is again uniform over the remaining future.
+   Eval: hgoal and hgoal_each at 250k and 500k; lp at 250k; five tasks, 500 episodes.
+   BC control beside every number: cube 0.111.
+
+B. Hold ablation on EXISTING checkpoints: psmgoal_db_sq_cube and psmgoal_db_sm_cube, seeds 0 1 2,
+   step 250000, readout hgoal_each (agent.coef_source=hgoal_each agent.acting=gpi) with
+   agent.gpi_hold=4 and agent.gpi_hold=8. The chosen latent is reused for H env steps, the
+   action is decoded at the current state each step. gpi_hold=1 is the existing per-step argmax
+   (the recorded hgoal_each numbers: sq sd000 250k tasks 1-5 = 0.562 0.552 0.584 0.616 0.614).
+   60 eval500 jobs, names <group>_<sd>_250000_hgoal_each_hold<H>_task<t>.
+
+Expected outcomes
+- Uniform goals raise the cube softmax and squared hgoal / hgoal_each scores over the db groups:
+  the test-time goals (rewarding states) are far from most rollout states, and the uniform draw
+  trains h(g) and the measure on far goals about 10x more often than the geometric draw
+  (goal_discount 0.98 puts most mass within 50 steps).
+- hgoal_each at or above hgoal, as in the db groups.
+- Hold H=4 on cube: about equal to or slightly above H=1 (the gpi argmax at 64 draws is noisy
+  step to step; holding averages that noise over 4 steps without losing much reactivity).
+- Hold H=8 on cube: below H=1 (pick-and-place needs direction changes within 8 steps).
+- Antmaze would gain more from the hold (one ant move changes little), but antmaze is not in
+  this launch.
+- Failure that refutes A: dbu softmax hgoal at or below db softmax hgoal with three seeds agreeing.
+- Failure that refutes B: hold4 below hold1 on both losses with three seeds agreeing.
+
+Expected training signals (smoke)
+- flags.json carries goal_sampling=uniform plus the data-bootstrap keys.
+- No actor_* keys in train.csv; psm_loss finite; steps/second as the db runs (6 h 21 min for 500k).

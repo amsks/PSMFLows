@@ -1,0 +1,40 @@
+diag_action_from_future -- expected outcomes, written 2026-10-02 before any run (smoke included).
+
+Setup: score MLP on [s, u, s+], 64 candidates (data latent + 63 clipped prior draws),
+chance top-1 accuracy 1/64 = 0.0156, maximum information log 64 = 4.16 nats.
+
+Requester's expectation (from the brief):
+  k=1 accuracy well above 0.5; near chance (below 0.05) by k=20 on cube;
+  antmaze similar or faster decay.
+
+Implementer's expectation (written before running):
+  cube-single-play, geometric-k model
+    k=1    accuracy 0.4 - 0.8      information 2.5 - 3.5 nats
+    k=2    0.3 - 0.6
+    k=5    0.15 - 0.35
+    k=10   0.08 - 0.20
+    k=20   0.04 - 0.10   (may stay above 0.05: play-data arm motion is smooth over tens of
+                          steps, so a state 20 steps ahead still tells the direction of the first action)
+    k=50   0.02 - 0.04
+    k=100, 200   within 0.005 of the random-s+ control
+  cube, k=1-only model at k=1: higher than the geometric model at k=1, 0.6 - 0.9.
+  antmaze-medium-navigate, geometric-k model
+    k=1    accuracy 0.3 - 0.7   (8 joint torques; the next state shows them through joint velocities)
+    k=5    below 0.10
+    k>=10  below 0.03, i.e. faster decay than cube (the gait changes torques every few steps)
+  antmaze, k=1-only model at k=1: 0.5 - 0.9.
+  Random-s+ control: at or slightly above chance, 0.015 - 0.03 on both envs. A value above
+    chance would not be a pipeline leak: the data latents (point preimages, std 1.03-1.06 before
+    the clip) are not distributed exactly like the clipped prior draws, so [s, u] alone can
+    separate them a little. The extra "floor" model (trained with a random s+) measures that level.
+  Score spread across candidates: largest at k=1, falling with k toward the control's spread.
+  Training-pair shares (pure geometric, before truncation at the trajectory end):
+    cube 0.98:    <=1 2.0%, 2-5 7.6%, 6-10 8.7%, 11-20 15.0%, 21-50 30.3%, >50 36.4%
+    antmaze 0.99: <=1 1.0%, 2-5 3.9%, 6-10 4.7%, 11-20  8.6%, 21-50 21.3%, >50 60.5%
+  Held-out loss: flat by 50k steps for the geometric model; the k=1-only model may still be
+    improving slowly at 100k steps.
+  Expected failure modes: (a) the plain MLP on standardised [s, u, s+] resolves the small
+    one-step change s+ - s poorly, so k=1 accuracy lands below 0.5 on one or both envs -- that
+    would be a limit of this score network (the same one the proposed loss would use), and the
+    information estimate is a lower bound in any case; (b) held-out loss rises late (overfit) for
+    the k=1-only model.

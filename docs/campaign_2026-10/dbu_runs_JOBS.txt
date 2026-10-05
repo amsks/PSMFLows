@@ -1,0 +1,6 @@
+psmgoal_dbu_sq_cube sd0 job 2522684
+psmgoal_dbu_sq_cube sd1 job 2522685
+psmgoal_dbu_sq_cube sd2 job 2522686
+psmgoal_dbu_sm_cube sd0 job 2522687
+psmgoal_dbu_sm_cube sd1 job 2522688
+psmgoal_dbu_sm_cube sd2 job 2522689
