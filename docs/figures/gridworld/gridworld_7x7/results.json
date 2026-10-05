@@ -1,0 +1,2718 @@
+{
+ "description": "Gridworld recovery test of psmgoal successor-measure loss (7x7, uniform-random data, 100k rows, 30k steps, batch 256, D=64, hidden 256, lr 1e-4, tau 0.01). Truth = Mtrue/rho' (psmgoal) or Mtrue/((1-gamma) rho') (FB); see EXPECTED.txt.",
+ "script": "/tmp/claude-10025/-mnt-home-amohan-git-Austin-PSMFLows/5bc6c9a1-edc2-4b31-ae61-862f8ba275de/scratchpad/gridworld_psm/gw_psm.py",
+ "runs": {
+  "A_plain_g0.9": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "onehot",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "plain",
+    "gamma": 0.9,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/A_plain_g0.9.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.9,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 16,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "plain"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.01832,
+   "rho_max": 0.02199,
+   "expected_scale": 1.0,
+   "corr": 0.5682716320175024,
+   "within_z_corr": 0.5685818605196338,
+   "z_specific_corr": -0.016901270191813558,
+   "slope_learned_on_true": 0.21658722537792396,
+   "rel_l2_raw": 0.8411984258335095,
+   "rel_l2_after_slope": 1.414659362002593,
+   "learned": {
+    "diag_mean": 8.994693756103516,
+    "offdiag_mean": 0.8408948183059692,
+    "rho_avg_mean": 1.0064196327067263,
+    "max": 13.797879219055176,
+    "min": -0.11270499229431152
+   },
+   "true": {
+    "diag_mean": 18.541689958655883,
+    "offdiag_mean": 0.6347910127734531,
+    "rho_avg_mean": 1.0,
+    "max": 54.58515283842795,
+    "min": -1.084202172485504e-15
+   },
+   "cap": null,
+   "frac_at_cap": null,
+   "diag_frac_at_cap": null,
+   "w_mean_pairwise_cos": 0.9999780058860779,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.9999595469928089,
+    "z_variance_share": 4.037574399262667e-05
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.3612002077921735,
+    "z_variance_share": 0.5992669803841217
+   },
+   "phi_eff_rank": 16.286024399377503,
+   "D": 64,
+   "action_share_learned": 0.35387086868286133,
+   "action_share_true": 0.526985105074465,
+   "train_log_last": {
+    "m_diag_mean": 8.785877227783203,
+    "m_offdiag_mean": 0.9888511896133423,
+    "ortho_loss": 54.62028503417969,
+    "phi_eff_rank": 15.868507385253906,
+    "psm_diag": -0.8785877227783203,
+    "psm_loss": -0.3104572296142578,
+    "psm_offdiag": 0.5681304931640625,
+    "td_target_absmean": 1.0032974481582642,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 9650.312508583069
+   }
+  },
+  "A_plain_g0.98": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "onehot",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "plain",
+    "gamma": 0.98,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/A_plain_g0.98.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.98,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 16,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "plain"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.01832,
+   "rho_max": 0.02199,
+   "expected_scale": 1.0,
+   "corr": 0.38151268721484016,
+   "within_z_corr": 0.3812696396249483,
+   "z_specific_corr": -0.003909242154676233,
+   "slope_learned_on_true": 0.06853360686850597,
+   "rel_l2_raw": 0.9514319981618248,
+   "rel_l2_after_slope": 2.829118116576759,
+   "learned": {
+    "diag_mean": 3.073134183883667,
+    "offdiag_mean": 0.9575536847114563,
+    "rho_avg_mean": 0.999866537209689,
+    "max": 4.603724002838135,
+    "min": 0.37712451815605164
+   },
+   "true": {
+    "diag_mean": 13.113754547639456,
+    "offdiag_mean": 0.7476423638356533,
+    "rho_avg_mean": 0.9999999999999991,
+    "max": 54.58515283842795,
+    "min": -1.2164384201338273e-16
+   },
+   "cap": null,
+   "frac_at_cap": null,
+   "diag_frac_at_cap": null,
+   "w_mean_pairwise_cos": 0.9999837279319763,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.9998081867067751,
+    "z_variance_share": 0.00023501625400967896
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.1866735740501158,
+    "z_variance_share": 0.7621430056516046
+   },
+   "phi_eff_rank": 6.777014962967093,
+   "D": 64,
+   "action_share_learned": 0.214040145277977,
+   "action_share_true": 0.4897274656588489,
+   "train_log_last": {
+    "m_diag_mean": 3.013895034790039,
+    "m_offdiag_mean": 1.003497838973999,
+    "ortho_loss": 57.73600769042969,
+    "phi_eff_rank": 6.606785774230957,
+    "psm_diag": -0.060277897864580154,
+    "psm_loss": -0.024148499593138695,
+    "psm_offdiag": 0.03612940013408661,
+    "td_target_absmean": 0.9982473850250244,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 9620.876262187958
+   }
+  },
+  "A_row_g0.9": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "onehot",
+    "noise": 0.05,
+    "keying": "row",
+    "head": "rms",
+    "gamma": 0.9,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/A_row_g0.9.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.9,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 16,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "rms"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.01832,
+   "rho_max": 0.02199,
+   "expected_scale": 1.0,
+   "corr": 0.9702650435542601,
+   "within_z_corr": 0.9702951355316936,
+   "z_specific_corr": 0.0009346027084064251,
+   "slope_learned_on_true": 0.8084322025990798,
+   "rel_l2_raw": 0.27384111494400937,
+   "rel_l2_after_slope": 0.24204896985046218,
+   "learned": {
+    "diag_mean": 9.000847816467285,
+    "offdiag_mean": 0.8384908437728882,
+    "rho_avg_mean": 1.0039895800980996,
+    "max": 14.025897026062012,
+    "min": -0.2678448259830475
+   },
+   "true": {
+    "diag_mean": 13.049254766002107,
+    "offdiag_mean": 0.7500630564948142,
+    "rho_avg_mean": 1.0,
+    "max": 17.662590457199865,
+    "min": 0.030515805845081137
+   },
+   "cap": 65.0,
+   "frac_at_cap": 0.0,
+   "diag_frac_at_cap": 0.0,
+   "w_mean_pairwise_cos": 0.9999735355377197,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.9999563187311146,
+    "z_variance_share": 0.00010062358342111111
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.9995059330990091,
+    "z_variance_share": 0.0004664323441551058
+   },
+   "phi_eff_rank": 1.1587569040894834,
+   "D": 64,
+   "action_share_learned": 0.35537290573120117,
+   "action_share_true": 0.4924332896138749,
+   "train_log_last": {
+    "m_diag_mean": 8.843033790588379,
+    "m_offdiag_mean": 1.0345900058746338,
+    "ortho_loss": 3526.32275390625,
+    "phi_eff_rank": 1.1590907573699951,
+    "psm_diag": -0.8843033909797668,
+    "psm_loss": -0.3180762529373169,
+    "psm_offdiag": 0.56622713804245,
+    "td_target_absmean": 1.0158512592315674,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 10949.010468244553
+   }
+  },
+  "A_row_g0.98": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "onehot",
+    "noise": 0.05,
+    "keying": "row",
+    "head": "rms",
+    "gamma": 0.98,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/A_row_g0.98.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.98,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 16,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "rms"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.01832,
+   "rho_max": 0.02199,
+   "expected_scale": 1.0,
+   "corr": 0.9767833433718172,
+   "within_z_corr": 0.978197466903985,
+   "z_specific_corr": -0.004847850889093054,
+   "slope_learned_on_true": 0.9632490091115439,
+   "rel_l2_raw": 0.12737015531578114,
+   "rel_l2_after_slope": 0.12660583818311222,
+   "learned": {
+    "diag_mean": 3.0772688388824463,
+    "offdiag_mean": 0.9679018259048462,
+    "rho_avg_mean": 1.010051328659924,
+    "max": 4.683198928833008,
+    "min": 0.32735568284988403
+   },
+   "true": {
+    "diag_mean": 4.013298206276277,
+    "offdiag_mean": 0.9381490519774697,
+    "rho_avg_mean": 1.0,
+    "max": 5.759353622684314,
+    "min": 0.37487081260648125
+   },
+   "cap": 65.0,
+   "frac_at_cap": 0.0,
+   "diag_frac_at_cap": 0.0,
+   "w_mean_pairwise_cos": 0.9999094009399414,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.9996135856549326,
+    "z_variance_share": 0.003222133032977581
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.9958089008217148,
+    "z_variance_share": 0.003959494031150604
+   },
+   "phi_eff_rank": 1.0403750896593984,
+   "D": 64,
+   "action_share_learned": 0.21511061489582062,
+   "action_share_true": 0.3092466834723405,
+   "train_log_last": {
+    "m_diag_mean": 3.030378818511963,
+    "m_offdiag_mean": 1.0248584747314453,
+    "ortho_loss": 3922.247314453125,
+    "phi_eff_rank": 1.0397368669509888,
+    "psm_diag": -0.06060757488012314,
+    "psm_loss": -0.02488148957490921,
+    "psm_offdiag": 0.03572608530521393,
+    "td_target_absmean": 1.0113329887390137,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 10864.86782336235
+   }
+  },
+  "A_state_g0.9": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "onehot",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "rms",
+    "gamma": 0.9,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/A_state_g0.9.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.9,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 16,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "rms"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.01832,
+   "rho_max": 0.02199,
+   "expected_scale": 1.0,
+   "corr": 0.5689802520637866,
+   "within_z_corr": 0.5692994699702233,
+   "z_specific_corr": 0.001928439467301319,
+   "slope_learned_on_true": 0.21556026928415192,
+   "rel_l2_raw": 0.8407283858577537,
+   "rel_l2_after_slope": 1.403107251722306,
+   "learned": {
+    "diag_mean": 8.982583999633789,
+    "offdiag_mean": 0.7995420694351196,
+    "rho_avg_mean": 0.9654159395607356,
+    "max": 14.138266563415527,
+    "min": -0.17446106672286987
+   },
+   "true": {
+    "diag_mean": 18.541689958655883,
+    "offdiag_mean": 0.6347910127734531,
+    "rho_avg_mean": 1.0,
+    "max": 54.58515283842795,
+    "min": -1.084202172485504e-15
+   },
+   "cap": 65.0,
+   "frac_at_cap": 0.0,
+   "diag_frac_at_cap": 0.0,
+   "w_mean_pairwise_cos": 0.9999611973762512,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.9999331407490594,
+    "z_variance_share": 0.0001370542886434123
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.3612002077921735,
+    "z_variance_share": 0.5992669803841217
+   },
+   "phi_eff_rank": 1.1539512857721925,
+   "D": 64,
+   "action_share_learned": 0.354544997215271,
+   "action_share_true": 0.526985105074465,
+   "train_log_last": {
+    "m_diag_mean": 8.855696678161621,
+    "m_offdiag_mean": 1.0272133350372314,
+    "ortho_loss": 3538.90478515625,
+    "phi_eff_rank": 1.1539057493209839,
+    "psm_diag": -0.88556969165802,
+    "psm_loss": -0.3092086911201477,
+    "psm_offdiag": 0.5763610005378723,
+    "td_target_absmean": 0.9994259476661682,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 10857.558834075928
+   }
+  },
+  "A_state_g0.98": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "onehot",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "rms",
+    "gamma": 0.98,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/A_state_g0.98.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.98,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 16,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "rms"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.01832,
+   "rho_max": 0.02199,
+   "expected_scale": 1.0,
+   "corr": 0.38132319638277296,
+   "within_z_corr": 0.38160604944772847,
+   "z_specific_corr": -0.0024673337378330372,
+   "slope_learned_on_true": 0.0690911201476847,
+   "rel_l2_raw": 0.9514476435045428,
+   "rel_l2_after_slope": 2.845875324360902,
+   "learned": {
+    "diag_mean": 3.0876569747924805,
+    "offdiag_mean": 0.9744304418563843,
+    "rho_avg_mean": 1.0165859389244776,
+    "max": 4.72137975692749,
+    "min": 0.3811172842979431
+   },
+   "true": {
+    "diag_mean": 13.113754547639456,
+    "offdiag_mean": 0.7476423638356533,
+    "rho_avg_mean": 0.9999999999999991,
+    "max": 54.58515283842795,
+    "min": -1.2164384201338273e-16
+   },
+   "cap": 65.0,
+   "frac_at_cap": 0.0,
+   "diag_frac_at_cap": 0.0,
+   "w_mean_pairwise_cos": 0.9998731017112732,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.9993074507759719,
+    "z_variance_share": 0.0032285889610648155
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.1866735740501158,
+    "z_variance_share": 0.7621430056516046
+   },
+   "phi_eff_rank": 1.0388962564705835,
+   "D": 64,
+   "action_share_learned": 0.21392865478992462,
+   "action_share_true": 0.4897274656588489,
+   "train_log_last": {
+    "m_diag_mean": 2.981003761291504,
+    "m_offdiag_mean": 0.9709890484809875,
+    "ortho_loss": 3922.407470703125,
+    "phi_eff_rank": 1.0381746292114258,
+    "psm_diag": -0.059620074927806854,
+    "psm_loss": -0.02391149289906025,
+    "psm_offdiag": 0.035708580166101456,
+    "td_target_absmean": 1.0057423114776611,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 10795.593285799026
+   }
+  },
+  "A_state_ls2_g0.9": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "onehot",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "rms",
+    "gamma": 0.9,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "log_seed": 2,
+    "out": "runs/A_state_ls2_g0.9.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.9,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 2,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "rms"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.0192,
+   "rho_max": 0.02131,
+   "expected_scale": 1.0,
+   "corr": 0.9804250565484428,
+   "within_z_corr": 0.980355761032453,
+   "z_specific_corr": 0.9809491383297406,
+   "slope_learned_on_true": 0.9771873118866328,
+   "rel_l2_raw": 0.1942220307567313,
+   "rel_l2_after_slope": 0.1973803982413746,
+   "learned": {
+    "diag_mean": 17.028095245361328,
+    "offdiag_mean": 0.5924533605575562,
+    "rho_avg_mean": 0.9321890489838686,
+    "max": 49.542198181152344,
+    "min": -3.413217782974243
+   },
+   "true": {
+    "diag_mean": 20.72009245881439,
+    "offdiag_mean": 0.5849931952852164,
+    "rho_avg_mean": 1.0,
+    "max": 52.083333333333336,
+    "min": 0.0
+   },
+   "cap": 65.0,
+   "frac_at_cap": 0.0,
+   "diag_frac_at_cap": 0.0,
+   "w_mean_pairwise_cos": 0.3702150285243988,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.48643467182957073,
+    "z_variance_share": 0.48175016045570374
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.5575626444143542,
+    "z_variance_share": 0.4154013449373038
+   },
+   "phi_eff_rank": 5.756360762092023,
+   "D": 64,
+   "action_share_learned": 0.5480400919914246,
+   "action_share_true": 0.5787664412384856,
+   "spike_rows": {
+    "M_exact_next_mean": 16.776592254638672,
+    "M_same_cell_other_row_mean": 16.776592254638672,
+    "M_random_row_mean": 0.9732828140258789,
+    "exact_over_same_cell": 1.0,
+    "true_same_cell_ratio_mean": 20.475591732325288
+   },
+   "zavg_policy": {
+    "corr_learned_vs_zavg_truth": 0.8369168019120631,
+    "slope_learned_vs_zavg_truth": 1.2286081710596177,
+    "corr_true_z_vs_zavg_truth": 0.6619209595279002
+   },
+   "train_log_last": {
+    "m_diag_mean": 16.57754135131836,
+    "m_offdiag_mean": 1.0062204599380493,
+    "ortho_loss": 649.028076171875,
+    "phi_eff_rank": 5.800489902496338,
+    "psm_diag": -1.6577541828155518,
+    "psm_loss": -1.380985140800476,
+    "psm_offdiag": 0.2767690122127533,
+    "td_target_absmean": 1.62557852268219,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 5270.279918909073
+   }
+  },
+  "A_state_ls2_g0.98": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "onehot",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "rms",
+    "gamma": 0.98,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "log_seed": 2,
+    "out": "runs/A_state_ls2_g0.98.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.98,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 2,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "rms"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.0192,
+   "rho_max": 0.02131,
+   "expected_scale": 1.0,
+   "corr": 0.6645541647397861,
+   "within_z_corr": 0.6587307610159064,
+   "z_specific_corr": 0.5949213898110919,
+   "slope_learned_on_true": 0.6427868117441887,
+   "rel_l2_raw": 0.7900152549771717,
+   "rel_l2_after_slope": 1.0962325006124078,
+   "learned": {
+    "diag_mean": 9.038625717163086,
+    "offdiag_mean": 0.6465590000152588,
+    "rho_avg_mean": 0.8292897720822596,
+    "max": 41.895137786865234,
+    "min": -16.78960609436035
+   },
+   "true": {
+    "diag_mean": 15.765324020148952,
+    "offdiag_mean": 0.6869161356692891,
+    "rho_avg_mean": 0.9999999999999991,
+    "max": 52.083333333333336,
+    "min": -1.173009285012901e-16
+   },
+   "cap": 65.0,
+   "frac_at_cap": 0.0,
+   "diag_frac_at_cap": 0.0,
+   "w_mean_pairwise_cos": 0.269035279750824,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.35370013377186815,
+    "z_variance_share": 0.6062172651290894
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.4238175282699383,
+    "z_variance_share": 0.539790196351644
+   },
+   "phi_eff_rank": 22.03033418955801,
+   "D": 64,
+   "action_share_learned": 0.3612023890018463,
+   "action_share_true": 0.530274580517017,
+   "spike_rows": {
+    "M_exact_next_mean": 8.833889961242676,
+    "M_same_cell_other_row_mean": 8.833889961242676,
+    "M_random_row_mean": 0.8388848304748535,
+    "exact_over_same_cell": 1.0,
+    "true_same_cell_ratio_mean": 15.478197412143851
+   },
+   "zavg_policy": {
+    "corr_learned_vs_zavg_truth": 0.401366894023767,
+    "slope_learned_vs_zavg_truth": 0.7137360982881826,
+    "corr_true_z_vs_zavg_truth": 0.24983929354975595
+   },
+   "train_log_last": {
+    "m_diag_mean": 8.584218978881836,
+    "m_offdiag_mean": 0.8759953379631042,
+    "ortho_loss": 122.40237426757812,
+    "phi_eff_rank": 22.012800216674805,
+    "psm_diag": -0.1716843694448471,
+    "psm_loss": -0.11289114505052567,
+    "psm_offdiag": 0.05879322811961174,
+    "td_target_absmean": 3.5335605144500732,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 5284.91410279274
+   }
+  },
+  "A_state_ls4_g0.98": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "onehot",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "rms",
+    "gamma": 0.98,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "log_seed": 4,
+    "out": "runs/A_state_ls4_g0.98.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.98,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 4,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "rms"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.0192,
+   "rho_max": 0.02131,
+   "expected_scale": 1.0,
+   "corr": 0.3470856743779331,
+   "within_z_corr": 0.357330595252081,
+   "z_specific_corr": 0.27880259147613096,
+   "slope_learned_on_true": 0.19270120166606214,
+   "rel_l2_raw": 0.9335993808699021,
+   "rel_l2_after_slope": 2.4333519608698446,
+   "learned": {
+    "diag_mean": 3.293393850326538,
+    "offdiag_mean": 0.7264273762702942,
+    "rho_avg_mean": 0.7907337015417554,
+    "max": 40.12247085571289,
+    "min": -12.785400390625
+   },
+   "true": {
+    "diag_mean": 14.761439882688508,
+    "offdiag_mean": 0.71049350629106,
+    "rho_avg_mean": 0.9999999999999991,
+    "max": 52.083333333333336,
+    "min": -1.173009285012901e-16
+   },
+   "cap": 65.0,
+   "frac_at_cap": 0.0,
+   "diag_frac_at_cap": 0.0,
+   "w_mean_pairwise_cos": 0.5947347283363342,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.20809866093435467,
+    "z_variance_share": 0.7741530537605286
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.2199141334578362,
+    "z_variance_share": 0.731624355504607
+   },
+   "phi_eff_rank": 1.4224323701034933,
+   "D": 64,
+   "action_share_learned": 0.12207981944084167,
+   "action_share_true": 0.5153375768222993,
+   "spike_rows": {
+    "M_exact_next_mean": 3.261789083480835,
+    "M_same_cell_other_row_mean": 3.261789083480835,
+    "M_random_row_mean": 0.8368445038795471,
+    "exact_over_same_cell": 1.0,
+    "true_same_cell_ratio_mean": 14.755732580068969
+   },
+   "zavg_policy": {
+    "corr_learned_vs_zavg_truth": 0.8263514644334133,
+    "slope_learned_vs_zavg_truth": 0.9638337219969858,
+    "corr_true_z_vs_zavg_truth": 0.3190177321745494
+   },
+   "train_log_last": {
+    "m_diag_mean": 3.507951259613037,
+    "m_offdiag_mean": 0.8391948938369751,
+    "ortho_loss": 2887.2978515625,
+    "phi_eff_rank": 1.4099464416503906,
+    "psm_diag": -0.07015902549028397,
+    "psm_loss": 0.041430022567510605,
+    "psm_offdiag": 0.11158904433250427,
+    "td_target_absmean": 1.6884411573410034,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 5188.47395324707
+   }
+  },
+  "A_state_zavg_g0.98": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "onehot",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "rms",
+    "gamma": 0.98,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "log_seed": 16,
+    "out": "runs/A_state_zavg_g0.98.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.98,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 16,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "rms"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.0192,
+   "rho_max": 0.02131,
+   "expected_scale": 1.0,
+   "corr": 0.3812016199042603,
+   "within_z_corr": 0.38112418007089943,
+   "z_specific_corr": 0.0010063883496703601,
+   "slope_learned_on_true": 0.06839916415022211,
+   "rel_l2_raw": 0.9515825529919877,
+   "rel_l2_after_slope": 2.8360371888336275,
+   "learned": {
+    "diag_mean": 3.072551727294922,
+    "offdiag_mean": 0.9591615796089172,
+    "rho_avg_mean": 1.0013074748315234,
+    "max": 4.72727108001709,
+    "min": 0.36529070138931274
+   },
+   "true": {
+    "diag_mean": 13.107109234187154,
+    "offdiag_mean": 0.7478225761457943,
+    "rho_avg_mean": 0.9999999999999992,
+    "max": 52.083333333333336,
+    "min": -1.1748812266690308e-16
+   },
+   "cap": 65.0,
+   "frac_at_cap": 0.0,
+   "diag_frac_at_cap": 0.0,
+   "w_mean_pairwise_cos": 0.9998863339424133,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.999383813295303,
+    "z_variance_share": 0.0023478283546864986
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.18610682588403188,
+    "z_variance_share": 0.7626133779098024
+   },
+   "phi_eff_rank": 1.0400887648288126,
+   "D": 64,
+   "action_share_learned": 0.21564257144927979,
+   "action_share_true": 0.49000740724242603,
+   "spike_rows": {
+    "M_exact_next_mean": 3.0695292949676514,
+    "M_same_cell_other_row_mean": 3.0695292949676514,
+    "M_random_row_mean": 0.9960716366767883,
+    "exact_over_same_cell": 1.0,
+    "true_same_cell_ratio_mean": 13.051994810793571
+   },
+   "zavg_policy": {
+    "corr_learned_vs_zavg_truth": 0.9796523547071192,
+    "slope_learned_vs_zavg_truth": 0.9577697392153106,
+    "corr_true_z_vs_zavg_truth": 0.3970124480885902
+   },
+   "train_log_last": {
+    "m_diag_mean": 3.1330487728118896,
+    "m_offdiag_mean": 0.9936622977256775,
+    "ortho_loss": 3913.612548828125,
+    "phi_eff_rank": 1.0402724742889404,
+    "psm_diag": -0.06266097724437714,
+    "psm_loss": -0.024761300534009933,
+    "psm_offdiag": 0.037899672985076904,
+    "td_target_absmean": 1.0125497579574585,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 5282.464487552643
+   }
+  },
+  "B_row_g0.9": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "xy",
+    "noise": 0.05,
+    "keying": "row",
+    "head": "rms",
+    "gamma": 0.9,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/B_row_g0.9.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.9,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 16,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "rms"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.01832,
+   "rho_max": 0.02199,
+   "expected_scale": 1.0,
+   "corr": 0.978932688643943,
+   "within_z_corr": 0.9789435354542706,
+   "z_specific_corr": 0.006871744873768737,
+   "slope_learned_on_true": 0.816190646598521,
+   "rel_l2_raw": 0.2537381946979466,
+   "rel_l2_after_slope": 0.21431333581425951,
+   "learned": {
+    "diag_mean": 9.302345275878906,
+    "offdiag_mean": 0.845051646232605,
+    "rho_avg_mean": 1.017139571589457,
+    "max": 13.509493827819824,
+    "min": -0.10079535841941833
+   },
+   "true": {
+    "diag_mean": 13.049254766002107,
+    "offdiag_mean": 0.7500630564948142,
+    "rho_avg_mean": 1.0,
+    "max": 17.662590457199865,
+    "min": 0.030515805845081137
+   },
+   "cap": 65.0,
+   "frac_at_cap": 0.0,
+   "diag_frac_at_cap": 0.0,
+   "w_mean_pairwise_cos": 0.9997653961181641,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.9998355940574785,
+    "z_variance_share": 0.00017566312453709543
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.9995059330990091,
+    "z_variance_share": 0.0004664323441551058
+   },
+   "phi_eff_rank": 1.9352774027561488,
+   "D": 64,
+   "action_share_learned": 0.3725399076938629,
+   "action_share_true": 0.4924332896138749,
+   "train_log_last": {
+    "m_diag_mean": 8.651705741882324,
+    "m_offdiag_mean": 1.0354944467544556,
+    "ortho_loss": 2098.0751953125,
+    "phi_eff_rank": 1.9442176818847656,
+    "psm_diag": -0.8651705980300903,
+    "psm_loss": -0.29575908184051514,
+    "psm_offdiag": 0.5694115161895752,
+    "td_target_absmean": 1.008183240890503,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 10348.09154009819
+   }
+  },
+  "B_row_g0.98": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "xy",
+    "noise": 0.05,
+    "keying": "row",
+    "head": "rms",
+    "gamma": 0.98,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/B_row_g0.98.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.98,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 16,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "rms"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.01832,
+   "rho_max": 0.02199,
+   "expected_scale": 1.0,
+   "corr": 0.9801557183763101,
+   "within_z_corr": 0.9819088347135669,
+   "z_specific_corr": 0.018769724048847632,
+   "slope_learned_on_true": 0.9450964832885979,
+   "rel_l2_raw": 0.1297092753113463,
+   "rel_l2_after_slope": 0.12434326907607465,
+   "learned": {
+    "diag_mean": 3.0916028022766113,
+    "offdiag_mean": 0.9516236186027527,
+    "rho_avg_mean": 0.9952100219770103,
+    "max": 4.385714054107666,
+    "min": 0.3857066333293915
+   },
+   "true": {
+    "diag_mean": 4.013298206276277,
+    "offdiag_mean": 0.9381490519774697,
+    "rho_avg_mean": 1.0,
+    "max": 5.759353622684314,
+    "min": 0.37487081260648125
+   },
+   "cap": 65.0,
+   "frac_at_cap": 0.0,
+   "diag_frac_at_cap": 0.0,
+   "w_mean_pairwise_cos": 0.9993072748184204,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.9989688129721109,
+    "z_variance_share": 0.0045375213958323
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.9958089008217148,
+    "z_variance_share": 0.003959494031150604
+   },
+   "phi_eff_rank": 1.1056149061921334,
+   "D": 64,
+   "action_share_learned": 0.2262558937072754,
+   "action_share_true": 0.3092466834723405,
+   "train_log_last": {
+    "m_diag_mean": 2.9384193420410156,
+    "m_offdiag_mean": 1.0175684690475464,
+    "ortho_loss": 3738.633056640625,
+    "phi_eff_rank": 1.1063488721847534,
+    "psm_diag": -0.0587683841586113,
+    "psm_loss": -0.024055039510130882,
+    "psm_offdiag": 0.034713346511125565,
+    "td_target_absmean": 1.0077828168869019,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 10303.221052408218
+   }
+  },
+  "B_state_g0.9": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "xy",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "rms",
+    "gamma": 0.9,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/B_state_g0.9.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.9,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 16,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "rms"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.01832,
+   "rho_max": 0.02199,
+   "expected_scale": 1.0,
+   "corr": 0.5697734107905339,
+   "within_z_corr": 0.5700894766884163,
+   "z_specific_corr": 0.014350803077865982,
+   "slope_learned_on_true": 0.21760062814280295,
+   "rel_l2_raw": 0.8404936653132586,
+   "rel_l2_after_slope": 1.4110796552987053,
+   "learned": {
+    "diag_mean": 9.302454948425293,
+    "offdiag_mean": 0.8404853343963623,
+    "rho_avg_mean": 1.012774482848204,
+    "max": 13.740429878234863,
+    "min": -0.20403262972831726
+   },
+   "true": {
+    "diag_mean": 18.541689958655883,
+    "offdiag_mean": 0.6347910127734531,
+    "rho_avg_mean": 1.0,
+    "max": 54.58515283842795,
+    "min": -1.084202172485504e-15
+   },
+   "cap": 65.0,
+   "frac_at_cap": 0.0,
+   "diag_frac_at_cap": 0.0,
+   "w_mean_pairwise_cos": 0.999383270740509,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.9976358341992203,
+    "z_variance_share": 0.0022556770127266645
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.3612002077921735,
+    "z_variance_share": 0.5992669803841217
+   },
+   "phi_eff_rank": 2.330987196918846,
+   "D": 64,
+   "action_share_learned": 0.38160407543182373,
+   "action_share_true": 0.526985105074465,
+   "train_log_last": {
+    "m_diag_mean": 8.58296012878418,
+    "m_offdiag_mean": 1.0106974840164185,
+    "ortho_loss": 1727.724853515625,
+    "phi_eff_rank": 2.3419957160949707,
+    "psm_diag": -0.8582960367202759,
+    "psm_loss": -0.30988699197769165,
+    "psm_offdiag": 0.5484090447425842,
+    "td_target_absmean": 1.0030524730682373,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 10354.04401087761
+   }
+  },
+  "B_state_g0.98": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "xy",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "rms",
+    "gamma": 0.98,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/B_state_g0.98.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.98,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 16,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "rms"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.01832,
+   "rho_max": 0.02199,
+   "expected_scale": 1.0,
+   "corr": 0.37728967437379235,
+   "within_z_corr": 0.37860767773563686,
+   "z_specific_corr": 0.012492144345274037,
+   "slope_learned_on_true": 0.06722938882930961,
+   "rel_l2_raw": 0.9525330092743228,
+   "rel_l2_after_slope": 2.8711196883245047,
+   "learned": {
+    "diag_mean": 3.0974061489105225,
+    "offdiag_mean": 0.955894410610199,
+    "rho_avg_mean": 0.9993475673240577,
+    "max": 4.513426303863525,
+    "min": 0.26305264234542847
+   },
+   "true": {
+    "diag_mean": 13.113754547639456,
+    "offdiag_mean": 0.7476423638356533,
+    "rho_avg_mean": 0.9999999999999991,
+    "max": 54.58515283842795,
+    "min": -1.2164384201338273e-16
+   },
+   "cap": 65.0,
+   "frac_at_cap": 0.0,
+   "diag_frac_at_cap": 0.0,
+   "w_mean_pairwise_cos": 0.9986454248428345,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.9785553942894766,
+    "z_variance_share": 0.02604346163570881
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.1866735740501158,
+    "z_variance_share": 0.7621430056516046
+   },
+   "phi_eff_rank": 1.2079926730326391,
+   "D": 64,
+   "action_share_learned": 0.23207075893878937,
+   "action_share_true": 0.4897274656588489,
+   "train_log_last": {
+    "m_diag_mean": 2.897709846496582,
+    "m_offdiag_mean": 0.9831815361976624,
+    "ortho_loss": 3406.90283203125,
+    "phi_eff_rank": 1.2101320028305054,
+    "psm_diag": -0.05795419588685036,
+    "psm_loss": -0.02381797507405281,
+    "psm_offdiag": 0.034136220812797546,
+    "td_target_absmean": 0.9844909310340881,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 10317.7912607193
+   }
+  },
+  "B_state_ls2_g0.98": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "xy",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "rms",
+    "gamma": 0.98,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "log_seed": 2,
+    "out": "runs/B_state_ls2_g0.98.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.98,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 2,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "rms"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.0192,
+   "rho_max": 0.02131,
+   "expected_scale": 1.0,
+   "corr": 0.19933190094230838,
+   "within_z_corr": 0.20267157218760545,
+   "z_specific_corr": 0.06707343093542546,
+   "slope_learned_on_true": 0.12181170249087357,
+   "rel_l2_raw": 1.0081594489993089,
+   "rel_l2_after_slope": 4.064857582897507,
+   "learned": {
+    "diag_mean": 2.983396291732788,
+    "offdiag_mean": 0.7273036241531372,
+    "rho_avg_mean": 0.7895030305485667,
+    "max": 18.27511978149414,
+    "min": -7.792781352996826
+   },
+   "true": {
+    "diag_mean": 15.765324020148952,
+    "offdiag_mean": 0.6869161356692891,
+    "rho_avg_mean": 0.9999999999999991,
+    "max": 52.083333333333336,
+    "min": -1.173009285012901e-16
+   },
+   "cap": 65.0,
+   "frac_at_cap": 0.0,
+   "diag_frac_at_cap": 0.0,
+   "w_mean_pairwise_cos": 0.3112774193286896,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.40369437065394354,
+    "z_variance_share": 0.5671907067298889
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.4238175282699383,
+    "z_variance_share": 0.539790196351644
+   },
+   "phi_eff_rank": 4.045933661958174,
+   "D": 64,
+   "action_share_learned": 0.14062361419200897,
+   "action_share_true": 0.530274580517017,
+   "spike_rows": {
+    "M_exact_next_mean": 2.9039647579193115,
+    "M_same_cell_other_row_mean": 2.9039316177368164,
+    "M_random_row_mean": 0.8347921371459961,
+    "exact_over_same_cell": 1.0000114440917969,
+    "true_same_cell_ratio_mean": 15.478197412143851
+   },
+   "zavg_policy": {
+    "corr_learned_vs_zavg_truth": 0.4860364803796434,
+    "slope_learned_vs_zavg_truth": 0.521387388218425,
+    "corr_true_z_vs_zavg_truth": 0.24983929354975595
+   },
+   "train_log_last": {
+    "m_diag_mean": 3.0026192665100098,
+    "m_offdiag_mean": 0.8700698614120483,
+    "ortho_loss": 881.2142333984375,
+    "phi_eff_rank": 4.172086238861084,
+    "psm_diag": -0.060052383691072464,
+    "psm_loss": 0.06177205964922905,
+    "psm_offdiag": 0.12182444334030151,
+    "td_target_absmean": 2.019852876663208,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 5171.743009090424
+   }
+  },
+  "B_state_spike_g0.98": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "xy",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "rms",
+    "gamma": 0.98,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/B_state_spike_g0.98.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.98,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 16,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "rms"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.0192,
+   "rho_max": 0.02131,
+   "expected_scale": 1.0,
+   "corr": 0.37541728616869036,
+   "within_z_corr": 0.3762620408228401,
+   "z_specific_corr": 0.005172261753682007,
+   "slope_learned_on_true": 0.06594554537605093,
+   "rel_l2_raw": 0.9533382799931828,
+   "rel_l2_after_slope": 2.892958890447712,
+   "learned": {
+    "diag_mean": 3.0534253120422363,
+    "offdiag_mean": 0.9470744132995605,
+    "rho_avg_mean": 0.9897127471915677,
+    "max": 4.423725605010986,
+    "min": 0.276311457157135
+   },
+   "true": {
+    "diag_mean": 13.107109234187154,
+    "offdiag_mean": 0.7478225761457943,
+    "rho_avg_mean": 0.9999999999999992,
+    "max": 52.083333333333336,
+    "min": -1.1748812266690308e-16
+   },
+   "cap": 65.0,
+   "frac_at_cap": 0.0,
+   "diag_frac_at_cap": 0.0,
+   "w_mean_pairwise_cos": 0.9985309839248657,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.9756100869604423,
+    "z_variance_share": 0.027905624359846115
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.18610682588403188,
+    "z_variance_share": 0.7626133779098024
+   },
+   "phi_eff_rank": 1.1945429771089286,
+   "D": 64,
+   "action_share_learned": 0.22988194227218628,
+   "action_share_true": 0.49000740724242603,
+   "spike_rows": {
+    "M_exact_next_mean": 2.818655014038086,
+    "M_same_cell_other_row_mean": 2.8149774074554443,
+    "M_random_row_mean": 0.9823955297470093,
+    "exact_over_same_cell": 1.001306414604187,
+    "true_same_cell_ratio_mean": 13.051994810793571
+   },
+   "train_log_last": {
+    "m_diag_mean": 2.827883720397949,
+    "m_offdiag_mean": 0.9787285923957825,
+    "ortho_loss": 3444.56298828125,
+    "phi_eff_rank": 1.19546639919281,
+    "psm_diag": -0.05655767396092415,
+    "psm_loss": -0.023199263960123062,
+    "psm_offdiag": 0.033358410000801086,
+    "td_target_absmean": 0.9850494265556335,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 5846.6508066654205
+   }
+  },
+  "Bdet_plain_g0.98": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "xyphase",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "plain",
+    "gamma": 0.98,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/Bdet_plain_g0.98.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.98,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 16,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "plain"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.0192,
+   "rho_max": 0.02131,
+   "expected_scale": 1.0,
+   "corr": 0.14948124959597808,
+   "within_z_corr": 0.1500952103300769,
+   "z_specific_corr": -0.0018111795864654485,
+   "slope_learned_on_true": 0.0415628780468356,
+   "rel_l2_raw": 0.9742177473190928,
+   "rel_l2_after_slope": 4.201783114913053,
+   "learned": {
+    "diag_mean": 1.4561537504196167,
+    "offdiag_mean": 0.6347358226776123,
+    "rho_avg_mean": 0.6509331808011686,
+    "max": 9.001102447509766,
+    "min": -10.91348934173584
+   },
+   "true": {
+    "diag_mean": 13.107109234187154,
+    "offdiag_mean": 0.7478225761457943,
+    "rho_avg_mean": 0.9999999999999992,
+    "max": 52.083333333333336,
+    "min": -1.1748812266690308e-16
+   },
+   "cap": null,
+   "frac_at_cap": null,
+   "diag_frac_at_cap": null,
+   "w_mean_pairwise_cos": 0.9999374151229858,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.9990488318295105,
+    "z_variance_share": 0.0017487602308392525
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.18610682588403188,
+    "z_variance_share": 0.7626133779098024
+   },
+   "phi_eff_rank": 3.2735896606218433,
+   "D": 64,
+   "action_share_learned": 0.5821153521537781,
+   "action_share_true": 0.49000740724242603,
+   "spike_rows": {
+    "M_exact_next_mean": 294.9909973144531,
+    "M_same_cell_other_row_mean": 2.0856142044067383,
+    "M_random_row_mean": 0.6394410133361816,
+    "exact_over_same_cell": 141.44082641601562,
+    "true_same_cell_ratio_mean": 13.051994810793571
+   },
+   "train_log_last": {
+    "m_diag_mean": 277.474609375,
+    "m_offdiag_mean": 0.7523949146270752,
+    "ortho_loss": 1774.4578857421875,
+    "phi_eff_rank": 3.7139816284179688,
+    "psm_diag": -5.549491882324219,
+    "psm_loss": 0.5810421109199524,
+    "psm_offdiag": 6.1305341720581055,
+    "td_target_absmean": 0.8161123991012573,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 5261.005122423172
+   }
+  },
+  "Bdet_row_g0.98": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "xyphase",
+    "noise": 0.05,
+    "keying": "row",
+    "head": "rms",
+    "gamma": 0.98,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/Bdet_row_g0.98.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.98,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 16,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "rms"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.0192,
+   "rho_max": 0.02131,
+   "expected_scale": 1.0,
+   "corr": 0.4212921304404643,
+   "within_z_corr": 0.4415148191702854,
+   "z_specific_corr": 0.002664249022427004,
+   "slope_learned_on_true": 0.12469319599388438,
+   "rel_l2_raw": 0.8784805017787565,
+   "rel_l2_after_slope": 0.5983130728388999,
+   "learned": {
+    "diag_mean": 0.2525811195373535,
+    "offdiag_mean": 0.1464274525642395,
+    "rho_avg_mean": 0.14857931063671506,
+    "max": 1.458101511001587,
+    "min": -1.0420501232147217
+   },
+   "true": {
+    "diag_mean": 4.010346739346194,
+    "offdiag_mean": 0.9380553802145187,
+    "rho_avg_mean": 0.9999999999999999,
+    "max": 5.795375255406718,
+    "min": 0.3937144374529202
+   },
+   "cap": 65.0,
+   "frac_at_cap": 0.0,
+   "diag_frac_at_cap": 0.0,
+   "w_mean_pairwise_cos": 0.9999786019325256,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.997887304087239,
+    "z_variance_share": 0.09121762216091156
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.9963165286902546,
+    "z_variance_share": 0.003479263276015809
+   },
+   "phi_eff_rank": 1.39898978785898,
+   "D": 64,
+   "action_share_learned": 0.5300635099411011,
+   "action_share_true": 0.31010046993157914,
+   "spike_rows": {
+    "M_exact_next_mean": 64.21710968017578,
+    "M_same_cell_other_row_mean": 0.40285393595695496,
+    "M_random_row_mean": 0.15135668218135834,
+    "exact_over_same_cell": 159.4054412841797,
+    "true_same_cell_ratio_mean": 4.006780804107119
+   },
+   "train_log_last": {
+    "m_diag_mean": 64.32032775878906,
+    "m_offdiag_mean": 0.13980574905872345,
+    "ortho_loss": 2925.779052734375,
+    "phi_eff_rank": 1.4106340408325195,
+    "psm_diag": -1.2864065170288086,
+    "psm_loss": -1.110162615776062,
+    "psm_offdiag": 0.1762438863515854,
+    "td_target_absmean": 0.13928428292274475,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 5964.938045501709
+   }
+  },
+  "Bdet_state_g0.9": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "xyphase",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "rms",
+    "gamma": 0.9,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/Bdet_state_g0.9.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.9,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 16,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "rms"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.0192,
+   "rho_max": 0.02131,
+   "expected_scale": 1.0,
+   "corr": 0.16745535205276668,
+   "within_z_corr": 0.1675238553481582,
+   "z_specific_corr": -0.004557806395114789,
+   "slope_learned_on_true": 0.005302781767398458,
+   "rel_l2_raw": 0.9950125371392378,
+   "rel_l2_after_slope": 4.723523733189419,
+   "learned": {
+    "diag_mean": 0.20394441485404968,
+    "offdiag_mean": 0.025579437613487244,
+    "rho_avg_mean": 0.029220043873190275,
+    "max": 6.760289192199707,
+    "min": -0.6444962024688721
+   },
+   "true": {
+    "diag_mean": 18.533727549009818,
+    "offdiag_mean": 0.6346610450496606,
+    "rho_avg_mean": 1.0,
+    "max": 52.083333333333336,
+    "min": -1.1265581173263891e-15
+   },
+   "cap": 65.0,
+   "frac_at_cap": 0.0,
+   "diag_frac_at_cap": 0.0,
+   "w_mean_pairwise_cos": 0.9999973177909851,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.9994305420076692,
+    "z_variance_share": 0.0010840264149010181
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.36071052414117066,
+    "z_variance_share": 0.5996940770533997
+   },
+   "phi_eff_rank": 3.0658575476501158,
+   "D": 64,
+   "action_share_learned": 0.6844184994697571,
+   "action_share_true": 0.5273326632371086,
+   "spike_rows": {
+    "M_exact_next_mean": 64.64440155029297,
+    "M_same_cell_other_row_mean": 0.29753103852272034,
+    "M_random_row_mean": 0.02654794044792652,
+    "exact_over_same_cell": 217.26943969726562,
+    "true_same_cell_ratio_mean": 18.48306252083744
+   },
+   "train_log_last": {
+    "m_diag_mean": 64.72883605957031,
+    "m_offdiag_mean": 0.03012966178357601,
+    "ortho_loss": 1292.127685546875,
+    "phi_eff_rank": 3.082857131958008,
+    "psm_diag": -6.472883701324463,
+    "psm_loss": -6.328917503356934,
+    "psm_offdiag": 0.14396598935127258,
+    "td_target_absmean": 0.06110860034823418,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 5885.742197036743
+   }
+  },
+  "Bdet_state_g0.98": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "xyphase",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "rms",
+    "gamma": 0.98,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/Bdet_state_g0.98.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.98,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 16,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "rms"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.0192,
+   "rho_max": 0.02131,
+   "expected_scale": 1.0,
+   "corr": 0.15706281709517284,
+   "within_z_corr": 0.16567639897563224,
+   "z_specific_corr": 0.00038313260050075123,
+   "slope_learned_on_true": 0.007209669908524802,
+   "rel_l2_raw": 0.993238942946502,
+   "rel_l2_after_slope": 4.140123547366815,
+   "learned": {
+    "diag_mean": 0.2344425618648529,
+    "offdiag_mean": 0.14527224004268646,
+    "rho_avg_mean": 0.147060129241691,
+    "max": 1.3663620948791504,
+    "min": -1.5018718242645264
+   },
+   "true": {
+    "diag_mean": 13.107109234187154,
+    "offdiag_mean": 0.7478225761457943,
+    "rho_avg_mean": 0.9999999999999992,
+    "max": 52.083333333333336,
+    "min": -1.1748812266690308e-16
+   },
+   "cap": 65.0,
+   "frac_at_cap": 0.0,
+   "diag_frac_at_cap": 0.0,
+   "w_mean_pairwise_cos": 0.9999752044677734,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.9976706823002999,
+    "z_variance_share": 0.10279449820518494
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.18610682588403188,
+    "z_variance_share": 0.7626133779098024
+   },
+   "phi_eff_rank": 1.3132758431575644,
+   "D": 64,
+   "action_share_learned": 0.4912202060222626,
+   "action_share_true": 0.49000740724242603,
+   "spike_rows": {
+    "M_exact_next_mean": 64.04617309570312,
+    "M_same_cell_other_row_mean": 0.4173707664012909,
+    "M_random_row_mean": 0.14804187417030334,
+    "exact_over_same_cell": 153.45150756835938,
+    "true_same_cell_ratio_mean": 13.051994810793571
+   },
+   "train_log_last": {
+    "m_diag_mean": 63.887306213378906,
+    "m_offdiag_mean": 0.13953456282615662,
+    "ortho_loss": 3122.8154296875,
+    "phi_eff_rank": 1.3241156339645386,
+    "psm_diag": -1.2777460813522339,
+    "psm_loss": -1.0725934505462646,
+    "psm_offdiag": 0.20515261590480804,
+    "td_target_absmean": 0.14091293513774872,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 5971.25984287262
+   }
+  },
+  "Bdet_state_ls2_g0.98": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "xyphase",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "rms",
+    "gamma": 0.98,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "log_seed": 2,
+    "out": "runs/Bdet_state_ls2_g0.98.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.98,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 2,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "rms"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.0192,
+   "rho_max": 0.02131,
+   "expected_scale": 1.0,
+   "corr": 0.14191613180313364,
+   "within_z_corr": 0.1459827807172424,
+   "z_specific_corr": 0.006570355687934332,
+   "slope_learned_on_true": 0.005416748345766654,
+   "rel_l2_raw": 0.9948686953907251,
+   "rel_l2_after_slope": 4.399347950063399,
+   "learned": {
+    "diag_mean": 0.2099359929561615,
+    "offdiag_mean": 0.07862383127212524,
+    "rho_avg_mean": 0.08179725941438651,
+    "max": 3.767960786819458,
+    "min": -2.3304800987243652
+   },
+   "true": {
+    "diag_mean": 15.765324020148952,
+    "offdiag_mean": 0.6869161356692891,
+    "rho_avg_mean": 0.9999999999999991,
+    "max": 52.083333333333336,
+    "min": -1.173009285012901e-16
+   },
+   "cap": 65.0,
+   "frac_at_cap": 0.0,
+   "diag_frac_at_cap": 0.0,
+   "w_mean_pairwise_cos": 0.9999943971633911,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.9839539520130873,
+    "z_variance_share": 0.0557531863451004
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.4238175282699383,
+    "z_variance_share": 0.539790196351644
+   },
+   "phi_eff_rank": 3.113391317193121,
+   "D": 64,
+   "action_share_learned": 0.46627360582351685,
+   "action_share_true": 0.530274580517017,
+   "spike_rows": {
+    "M_exact_next_mean": 64.05101013183594,
+    "M_same_cell_other_row_mean": 0.3119790852069855,
+    "M_random_row_mean": 0.08026584982872009,
+    "exact_over_same_cell": 205.3054656982422,
+    "true_same_cell_ratio_mean": 15.478197412143851
+   },
+   "zavg_policy": {
+    "corr_learned_vs_zavg_truth": 0.3390096755223425,
+    "slope_learned_vs_zavg_truth": 0.03195081680614132,
+    "corr_true_z_vs_zavg_truth": 0.24983929354975595
+   },
+   "train_log_last": {
+    "m_diag_mean": 64.17092895507812,
+    "m_offdiag_mean": 0.09479696303606033,
+    "ortho_loss": 1254.30859375,
+    "phi_eff_rank": 3.1635050773620605,
+    "psm_diag": -1.2834185361862183,
+    "psm_loss": -1.1671888828277588,
+    "psm_offdiag": 0.11622971296310425,
+    "td_target_absmean": 0.09542722254991531,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 5191.570606231689
+   }
+  },
+  "C_xy_plain_g0.9": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "xy",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "plain",
+    "gamma": 0.9,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/C_xy_plain_g0.9.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.9,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 16,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "plain"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.01832,
+   "rho_max": 0.02199,
+   "expected_scale": 1.0,
+   "corr": 0.5677936870880165,
+   "within_z_corr": 0.56815409071923,
+   "z_specific_corr": 0.011937761242264231,
+   "slope_learned_on_true": 0.21526859013943586,
+   "rel_l2_raw": 0.8417390166106239,
+   "rel_l2_after_slope": 1.4145191161067512,
+   "learned": {
+    "diag_mean": 9.203694343566895,
+    "offdiag_mean": 0.8251911401748657,
+    "rho_avg_mean": 0.9957442186106342,
+    "max": 13.601469039916992,
+    "min": -0.2781486511230469
+   },
+   "true": {
+    "diag_mean": 18.541689958655883,
+    "offdiag_mean": 0.6347910127734531,
+    "rho_avg_mean": 1.0,
+    "max": 54.58515283842795,
+    "min": -1.084202172485504e-15
+   },
+   "cap": null,
+   "frac_at_cap": null,
+   "diag_frac_at_cap": null,
+   "w_mean_pairwise_cos": 0.9994861483573914,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.998354880675132,
+    "z_variance_share": 0.001574836322106421
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.3612002077921735,
+    "z_variance_share": 0.5992669803841217
+   },
+   "phi_eff_rank": 4.81208050241009,
+   "D": 64,
+   "action_share_learned": 0.37197503447532654,
+   "action_share_true": 0.526985105074465,
+   "train_log_last": {
+    "m_diag_mean": 8.454435348510742,
+    "m_offdiag_mean": 1.002194881439209,
+    "ortho_loss": 61.71565246582031,
+    "phi_eff_rank": 4.834332466125488,
+    "psm_diag": -0.8454435467720032,
+    "psm_loss": -0.30709558725357056,
+    "psm_offdiag": 0.5383479595184326,
+    "td_target_absmean": 0.9998220205307007,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 8868.937823295593
+   }
+  },
+  "C_xy_plain_g0.98": {
+   "args": {
+    "loss": "psmgoal",
+    "enc": "xy",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "plain",
+    "gamma": 0.98,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/C_xy_plain_g0.98.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.98,
+    "tau": 0.01,
+    "lr_measure": 0.0001,
+    "lr_w": 0.0001,
+    "ortho_coef": 0.0,
+    "max_log_seed": 16,
+    "u_clip": 3.0,
+    "measure": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "w": {
+     "hidden_dim": 256,
+     "hidden_layers": 2
+    },
+    "head": "plain"
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.01832,
+   "rho_max": 0.02199,
+   "expected_scale": 1.0,
+   "corr": 0.37299390092854506,
+   "within_z_corr": 0.3733975064580648,
+   "z_specific_corr": 0.01659227791743782,
+   "slope_learned_on_true": 0.06638695118224158,
+   "rel_l2_raw": 0.9528389384327629,
+   "rel_l2_after_slope": 2.868688353433194,
+   "learned": {
+    "diag_mean": 3.036686420440674,
+    "offdiag_mean": 0.9392543435096741,
+    "rho_avg_mean": 0.982138443101,
+    "max": 4.490990161895752,
+    "min": 0.18714137375354767
+   },
+   "true": {
+    "diag_mean": 13.113754547639456,
+    "offdiag_mean": 0.7476423638356533,
+    "rho_avg_mean": 0.9999999999999991,
+    "max": 54.58515283842795,
+    "min": -1.2164384201338273e-16
+   },
+   "cap": null,
+   "frac_at_cap": null,
+   "diag_frac_at_cap": null,
+   "w_mean_pairwise_cos": 0.999472439289093,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.9731682448177944,
+    "z_variance_share": 0.02653237245976925
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.1866735740501158,
+    "z_variance_share": 0.7621430056516046
+   },
+   "phi_eff_rank": 4.331362270927104,
+   "D": 64,
+   "action_share_learned": 0.21694950759410858,
+   "action_share_true": 0.4897274656588489,
+   "train_log_last": {
+    "m_diag_mean": 2.854668617248535,
+    "m_offdiag_mean": 0.98686283826828,
+    "ortho_loss": 59.933528900146484,
+    "phi_eff_rank": 4.356938362121582,
+    "psm_diag": -0.05709337070584297,
+    "psm_loss": -0.023943424224853516,
+    "psm_offdiag": 0.033149946480989456,
+    "td_target_absmean": 0.9843953847885132,
+    "w_norm": 8.0,
+    "step": 29999,
+    "sec": 8844.782180547714
+   }
+  },
+  "FB_A_g0.9": {
+   "args": {
+    "loss": "fb",
+    "enc": "onehot",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "rms",
+    "gamma": 0.9,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/FB_A_g0.9.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.9,
+    "tau": 0.01,
+    "lr": 0.0001,
+    "ortho_coef": 1.0,
+    "hidden": 256
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.01832,
+   "rho_max": 0.02199,
+   "expected_scale": 10.000000000000002,
+   "corr": 0.5683058987494141,
+   "within_z_corr": 0.568587126274625,
+   "z_specific_corr": -0.011017683304894747,
+   "slope_learned_on_true": 0.21635123525053937,
+   "rel_l2_raw": 0.8409637427259441,
+   "rel_l2_after_slope": 1.4104236643089632,
+   "learned": {
+    "diag_mean": 90.03987121582031,
+    "offdiag_mean": 8.241666793823242,
+    "rho_avg_mean": 9.8958812320376,
+    "max": 140.49014282226562,
+    "min": -1.95103120803833
+   },
+   "true": {
+    "diag_mean": 185.41689958655888,
+    "offdiag_mean": 6.347910127734531,
+    "rho_avg_mean": 10.0,
+    "max": 545.8515283842796,
+    "min": -1.0842021724855043e-14
+   },
+   "cap": null,
+   "frac_at_cap": null,
+   "diag_frac_at_cap": null,
+   "w_mean_pairwise_cos": null,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.9996616712065057,
+    "z_variance_share": 0.00031887859222479165
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.36120020779217404,
+    "z_variance_share": 0.5992669803841216
+   },
+   "phi_eff_rank": 48.98013902391316,
+   "D": 64,
+   "action_share_learned": 0.3538605570793152,
+   "action_share_true": 0.5269851050744652,
+   "train_log_last": {
+    "m_diag_mean": 88.17933654785156,
+    "m_offdiag_mean": 9.835721015930176,
+    "ortho": -24.203266143798828,
+    "psm_loss": 8.284664154052734,
+    "step": 29999,
+    "sec": 107.49714469909668
+   }
+  },
+  "FB_A_g0.98": {
+   "args": {
+    "loss": "fb",
+    "enc": "onehot",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "rms",
+    "gamma": 0.98,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/FB_A_g0.98.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.98,
+    "tau": 0.01,
+    "lr": 0.0001,
+    "ortho_coef": 1.0,
+    "hidden": 256
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.01832,
+   "rho_max": 0.02199,
+   "expected_scale": 49.99999999999996,
+   "corr": 0.3804094516523079,
+   "within_z_corr": 0.3801584228692614,
+   "z_specific_corr": -0.014116705146953006,
+   "slope_learned_on_true": 0.06820901220479547,
+   "rel_l2_raw": 0.9513580272661433,
+   "rel_l2_after_slope": 2.814253000884629,
+   "learned": {
+    "diag_mean": 153.46392822265625,
+    "offdiag_mean": 47.18836975097656,
+    "rho_avg_mean": 49.30406539827623,
+    "max": 233.80101013183594,
+    "min": 18.121070861816406
+   },
+   "true": {
+    "diag_mean": 655.6877273819723,
+    "offdiag_mean": 37.382118191782624,
+    "rho_avg_mean": 49.99999999999993,
+    "max": 2729.257641921395,
+    "min": -6.0821921006691315e-15
+   },
+   "cap": null,
+   "frac_at_cap": null,
+   "diag_frac_at_cap": null,
+   "w_mean_pairwise_cos": null,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.9975484408141725,
+    "z_variance_share": 0.002306559821590781
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.18667357405011525,
+    "z_variance_share": 0.7621430056516051
+   },
+   "phi_eff_rank": 48.97803887839049,
+   "D": 64,
+   "action_share_learned": 0.2136124074459076,
+   "action_share_true": 0.4897274656588491,
+   "train_log_last": {
+    "m_diag_mean": 150.62335205078125,
+    "m_offdiag_mean": 49.4217414855957,
+    "ortho": -24.201519012451172,
+    "psm_loss": 42.497379302978516,
+    "step": 29999,
+    "sec": 109.41972231864929
+   }
+  },
+  "FB_A_ls2_g0.98": {
+   "args": {
+    "loss": "fb",
+    "enc": "onehot",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "rms",
+    "gamma": 0.98,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "log_seed": 2,
+    "out": "runs/FB_A_ls2_g0.98.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.98,
+    "tau": 0.01,
+    "lr": 0.0001,
+    "ortho_coef": 1.0,
+    "hidden": 256
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.0192,
+   "rho_max": 0.02131,
+   "expected_scale": 49.99999999999996,
+   "corr": 0.8750224229216399,
+   "within_z_corr": 0.8735222423055344,
+   "z_specific_corr": 0.8308224603175854,
+   "slope_learned_on_true": 0.7194842044981371,
+   "rel_l2_raw": 0.47992036448693703,
+   "rel_l2_after_slope": 0.5412247801052995,
+   "learned": {
+    "diag_mean": 555.52783203125,
+    "offdiag_mean": 35.8996696472168,
+    "rho_avg_mean": 46.859656497237694,
+    "max": 2309.7587890625,
+    "min": -411.6050109863281
+   },
+   "true": {
+    "diag_mean": 788.2662010074469,
+    "offdiag_mean": 34.34580678346442,
+    "rho_avg_mean": 49.99999999999991,
+    "max": 2604.1666666666647,
+    "min": -5.865046425064501e-15
+   },
+   "cap": null,
+   "frac_at_cap": null,
+   "diag_frac_at_cap": null,
+   "w_mean_pairwise_cos": null,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.4960234740440937,
+    "z_variance_share": 0.4745223820209503
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.423817528269938,
+    "z_variance_share": 0.5397901963516443
+   },
+   "phi_eff_rank": 46.026689724981416,
+   "D": 64,
+   "action_share_learned": 0.4797820746898651,
+   "action_share_true": 0.5302745805170171,
+   "spike_rows": {
+    "M_exact_next_mean": 544.7965698242188,
+    "M_same_cell_other_row_mean": 544.7965698242188,
+    "M_random_row_mean": 50.20280456542969,
+    "exact_over_same_cell": 1.0,
+    "true_same_cell_ratio_mean": 773.9098706071917
+   },
+   "zavg_policy": {
+    "corr_learned_vs_zavg_truth": 0.3763552858525064,
+    "slope_learned_vs_zavg_truth": 0.6949181520786042,
+    "corr_true_z_vs_zavg_truth": 0.24983929354975543
+   },
+   "train_log_last": {
+    "m_diag_mean": 524.268310546875,
+    "m_offdiag_mean": 45.2972297668457,
+    "ortho": -19.759353637695312,
+    "psm_loss": -16.280231475830078,
+    "step": 29999,
+    "sec": 356.55656027793884
+   }
+  },
+  "FB_B_g0.9": {
+   "args": {
+    "loss": "fb",
+    "enc": "xy",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "rms",
+    "gamma": 0.9,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/FB_B_g0.9.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.9,
+    "tau": 0.01,
+    "lr": 0.0001,
+    "ortho_coef": 1.0,
+    "hidden": 256
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.01832,
+   "rho_max": 0.02199,
+   "expected_scale": 10.000000000000002,
+   "corr": 0.5562567955286161,
+   "within_z_corr": 0.5566041535518509,
+   "z_specific_corr": -0.0024541447934409034,
+   "slope_learned_on_true": 0.20897370340621502,
+   "rel_l2_raw": 0.8475058051425495,
+   "rel_l2_after_slope": 1.45573157651886,
+   "learned": {
+    "diag_mean": 86.24771118164062,
+    "offdiag_mean": 8.456729888916016,
+    "rho_avg_mean": 10.03211087081763,
+    "max": 132.87709045410156,
+    "min": -6.369812965393066
+   },
+   "true": {
+    "diag_mean": 185.41689958655888,
+    "offdiag_mean": 6.347910127734531,
+    "rho_avg_mean": 10.0,
+    "max": 545.8515283842796,
+    "min": -1.0842021724855043e-14
+   },
+   "cap": null,
+   "frac_at_cap": null,
+   "diag_frac_at_cap": null,
+   "w_mean_pairwise_cos": null,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.9991728862773172,
+    "z_variance_share": 0.0007815734134055674
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.36120020779217404,
+    "z_variance_share": 0.5992669803841216
+   },
+   "phi_eff_rank": 47.38861787125221,
+   "D": 64,
+   "action_share_learned": 0.3506498634815216,
+   "action_share_true": 0.5269851050744652,
+   "train_log_last": {
+    "m_diag_mean": 77.04371643066406,
+    "m_offdiag_mean": 9.079296112060547,
+    "ortho": -27.825199127197266,
+    "psm_loss": 10.694561004638672,
+    "step": 29999,
+    "sec": 109.68978500366211
+   }
+  },
+  "FB_B_g0.98": {
+   "args": {
+    "loss": "fb",
+    "enc": "xy",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "rms",
+    "gamma": 0.98,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/FB_B_g0.98.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.98,
+    "tau": 0.01,
+    "lr": 0.0001,
+    "ortho_coef": 1.0,
+    "hidden": 256
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.01832,
+   "rho_max": 0.02199,
+   "expected_scale": 49.99999999999996,
+   "corr": 0.37075739718769024,
+   "within_z_corr": 0.37052281337059045,
+   "z_specific_corr": 0.004080444644518905,
+   "slope_learned_on_true": 0.0649844258754948,
+   "rel_l2_raw": 0.9550714389378843,
+   "rel_l2_after_slope": 2.9960725070913825,
+   "learned": {
+    "diag_mean": 136.65408325195312,
+    "offdiag_mean": 49.309600830078125,
+    "rho_avg_mean": 51.08205141470016,
+    "max": 206.9741973876953,
+    "min": 21.50786590576172
+   },
+   "true": {
+    "diag_mean": 655.6877273819723,
+    "offdiag_mean": 37.382118191782624,
+    "rho_avg_mean": 49.99999999999993,
+    "max": 2729.257641921395,
+    "min": -6.0821921006691315e-15
+   },
+   "cap": null,
+   "frac_at_cap": null,
+   "diag_frac_at_cap": null,
+   "w_mean_pairwise_cos": null,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.996536454046082,
+    "z_variance_share": 0.0033482692670077085
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.18667357405011525,
+    "z_variance_share": 0.7621430056516051
+   },
+   "phi_eff_rank": 46.39554025603706,
+   "D": 64,
+   "action_share_learned": 0.20448452234268188,
+   "action_share_true": 0.4897274656588491,
+   "train_log_last": {
+    "m_diag_mean": 133.4019012451172,
+    "m_offdiag_mean": 50.98430633544922,
+    "ortho": -21.280033111572266,
+    "psm_loss": 43.010372161865234,
+    "step": 29999,
+    "sec": 109.05899095535278
+   }
+  },
+  "FB_Bdet_g0.98": {
+   "args": {
+    "loss": "fb",
+    "enc": "xyphase",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "rms",
+    "gamma": 0.98,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "out": "runs/FB_Bdet_g0.98.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.98,
+    "tau": 0.01,
+    "lr": 0.0001,
+    "ortho_coef": 1.0,
+    "hidden": 256
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.0192,
+   "rho_max": 0.02131,
+   "expected_scale": 49.99999999999996,
+   "corr": 0.33182597663218294,
+   "within_z_corr": 0.3317053882539272,
+   "z_specific_corr": -0.003588000879758378,
+   "slope_learned_on_true": 0.06290962631833787,
+   "rel_l2_raw": 0.9569034794284597,
+   "rel_l2_after_slope": 3.0792749033235496,
+   "learned": {
+    "diag_mean": 117.42936706542969,
+    "offdiag_mean": 48.42500305175781,
+    "rho_avg_mean": 49.797704921654166,
+    "max": 213.5487060546875,
+    "min": 9.732402801513672
+   },
+   "true": {
+    "diag_mean": 655.3554617093572,
+    "offdiag_mean": 37.39112880728968,
+    "rho_avg_mean": 49.99999999999993,
+    "max": 2604.1666666666647,
+    "min": -5.874406133345149e-15
+   },
+   "cap": null,
+   "frac_at_cap": null,
+   "diag_frac_at_cap": null,
+   "w_mean_pairwise_cos": null,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.9979952813965242,
+    "z_variance_share": 0.0019557494670152664
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.1861068258840318,
+    "z_variance_share": 0.7626133779098021
+   },
+   "phi_eff_rank": 32.04871525385402,
+   "D": 64,
+   "action_share_learned": 0.2109263837337494,
+   "action_share_true": 0.49000740724242586,
+   "spike_rows": {
+    "M_exact_next_mean": 145.64195251464844,
+    "M_same_cell_other_row_mean": 116.46258544921875,
+    "M_random_row_mean": 49.50503158569336,
+    "exact_over_same_cell": 1.250547170639038,
+    "true_same_cell_ratio_mean": 652.5997405396779
+   },
+   "train_log_last": {
+    "m_diag_mean": 148.55746459960938,
+    "m_offdiag_mean": 50.046199798583984,
+    "ortho": -30.336910247802734,
+    "psm_loss": 27.398426055908203,
+    "step": 29999,
+    "sec": 394.0525257587433
+   }
+  },
+  "FB_Bdet_ls2_g0.98": {
+   "args": {
+    "loss": "fb",
+    "enc": "xyphase",
+    "noise": 0.05,
+    "keying": "state",
+    "head": "rms",
+    "gamma": 0.98,
+    "steps": 30000,
+    "D": 64,
+    "hidden": 256,
+    "batch": 256,
+    "ortho_coef": 1.0,
+    "seed": 0,
+    "log_seed": 2,
+    "out": "runs/FB_Bdet_ls2_g0.98.json"
+   },
+   "hparams": {
+    "z_dim": 64,
+    "discount": 0.98,
+    "tau": 0.01,
+    "lr": 0.0001,
+    "ortho_coef": 1.0,
+    "hidden": 256
+   },
+   "dataset_rows": 100000,
+   "rho_min": 0.0192,
+   "rho_max": 0.02131,
+   "expected_scale": 49.99999999999996,
+   "corr": 0.28311756069276994,
+   "within_z_corr": 0.2931764658689754,
+   "z_specific_corr": 0.14582521013571717,
+   "slope_learned_on_true": 0.1501741760753645,
+   "rel_l2_raw": 0.9531927843382451,
+   "rel_l2_after_slope": 2.8747211651991056,
+   "learned": {
+    "diag_mean": 165.98370361328125,
+    "offdiag_mean": 48.656288146972656,
+    "rho_avg_mean": 51.61724771081017,
+    "max": 849.35888671875,
+    "min": -464.5899658203125
+   },
+   "true": {
+    "diag_mean": 788.2662010074469,
+    "offdiag_mean": 34.34580678346442,
+    "rho_avg_mean": 49.99999999999991,
+    "max": 2604.1666666666647,
+    "min": -5.865046425064501e-15
+   },
+   "cap": null,
+   "frac_at_cap": null,
+   "diag_frac_at_cap": null,
+   "w_mean_pairwise_cos": null,
+   "z_distinct_learned": {
+    "pairwise_corr": 0.5329788100054992,
+    "z_variance_share": 0.4606510400772095
+   },
+   "z_distinct_true": {
+    "pairwise_corr": 0.423817528269938,
+    "z_variance_share": 0.5397901963516443
+   },
+   "phi_eff_rank": 30.053503172162667,
+   "D": 64,
+   "action_share_learned": 0.2849362790584564,
+   "action_share_true": 0.5302745805170171,
+   "spike_rows": {
+    "M_exact_next_mean": 176.41015625,
+    "M_same_cell_other_row_mean": 165.38243103027344,
+    "M_random_row_mean": 53.284080505371094,
+    "exact_over_same_cell": 1.0666801929473877,
+    "true_same_cell_ratio_mean": 773.9098706071917
+   },
+   "zavg_policy": {
+    "corr_learned_vs_zavg_truth": 0.570766817344113,
+    "slope_learned_vs_zavg_truth": 0.6158897734731162,
+    "corr_true_z_vs_zavg_truth": 0.24983929354975543
+   },
+   "train_log_last": {
+    "m_diag_mean": 167.6691436767578,
+    "m_offdiag_mean": 48.08418273925781,
+    "ortho": -25.685405731201172,
+    "psm_loss": 14.694169998168945,
+    "step": 29999,
+    "sec": 351.4576919078827
+   }
+  }
+ },
+ "fixed_point": "Population loss 0.5 E_{(s,a,s'),s+~rho'}[(M-gamma Mbar(s',pi,s+))^2] - (1-gamma) E[M(s,a,s')]; pointwise stationarity gives M(s,a,s+) = (1-gamma) P(s+|s,a)/rho'(s+) + gamma E M(s',pi(s'),s+), i.e. M = Mtrue/rho' with Mtrue=(1-gamma) sum_t gamma^t P(s_{t+1}=s+); E_{s+~rho'} M = 1. FB contrastive_loss fixed point: Mtrue/((1-gamma) rho').",
+ "findings": {
+  "tabular_loss_correct": "A_state_ls2_g0.9 (4 policies): corr 0.980, slope 0.977, z-specific corr 0.981.",
+  "policy_index_unlearnable_at_2^16": "A_state_zavg_g0.98: learned M matches the z-averaged policy measure (corr 0.980, slope 0.958); w cos 1.000; phi rank 1.04.",
+  "deterministic_continuous_spike": "Bdet_state_g0.98: mesh diag 63.9 (cap 65), mesh offdiag 0.14, E_rho M 0.15 (true 1); exact-next M / same-cell M = 153. Plain head: mesh diag 277, ratio 141.",
+  "fb_comparator": "FB_Bdet_g0.98: ratio 1.25, E_rho M 49.8 (true 50 = 1/(1-gamma)).",
+  "not_converged": "gamma=0.98 runs with learnable z (ls2, ls4) not converged at 30k steps (corr 0.665, 0.347)."
+ }
+}

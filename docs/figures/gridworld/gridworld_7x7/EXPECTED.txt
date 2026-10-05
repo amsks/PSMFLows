@@ -1,0 +1,23 @@
+Expected outcomes, written before any run (2026-10-01).
+
+Fixed point of psmgoal's loss (population form, columns s+ ~ rho' = next-state marginal):
+  d/dM(s,a,s+):  rho'(s+) [M - gamma E_{s'|s,a} Mbar(s', pi(s'), s+)] - (1-gamma) P(s+|s,a) = 0
+  => M(s,a,s+) = (1-gamma) P(s+|s,a)/rho'(s+) + gamma E M(s', pi, s+)
+  => M = Mtrue(s,a,s+)/rho'(s+), with Mtrue = (1-gamma) sum_t gamma^t P(s_{t+1}=s+). Scale constant 1.
+  => E_{s+~rho'} M(s,a,s+) = 1 for every (s,a).
+FB contrastive loss (-mean_diag(M - gamma T), one head): fixed point Mtrue/((1-gamma) rho').
+
+Arm A (one-hot, policy keyed on state): correct code should give corr > 0.95 with Mtrue/rho',
+  slope ~1, E_rho'[M] ~ 1, off-diagonal mean ~ gamma-ish (~0.9-1), diagonal ~ 49*(1-gamma)+gamma*M.
+  w(z) distinct across z. Not at the head cap (cap = D+1).
+Arm A with the policy keyed on the dataset ROW (what psmgoal does): the bootstrap action at a
+  state is a different random action for every row that lands there, so every z behaves like
+  the same near-uniform policy. Prediction: M matches the uniform-random-policy measure,
+  w(z) near-identical across z (cosine -> 1), M barely depends on z.
+Arm B (x,y + noise): prediction: partial recovery. Each noisy s' is unique, so the -(1-gamma)
+  diagonal pull is a point mass the MLP can try to fit as a spike at s+ = s'. Expect diagonal
+  inflated above truth (toward the cap), off-diagonal and E_rho'[M] below truth, corr lower.
+Arm C (B + plain linear head, no RMSNorm): if the spike is from the loss, diagonal grows past
+  D+1 without bound; the cap only limits it.
+FB comparator: recovers Mtrue/((1-gamma) rho') up to rank-D smoothing on both A and B; no spike
+  because M = psi^T phi(s+) cannot put a point mass at each s'.
