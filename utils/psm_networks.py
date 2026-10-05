@@ -9,6 +9,7 @@ arXiv 2411.19418):
   NoiseConditionedActor  pi_eta(s, w, eps) -> u, the flow-BC one-step latent actor
   FlowVectorField        v_xi(s, u_t, t), the actor's conditional-flow-matching field
   TanhGaussianLatentActor / LogAlpha   the DSRL-style latent actor and SAC's log alpha
+  LatentResidualActor    delta(s, g, eps), the psmgoal flowbc actor's correction to a prior draw
 
 These intentionally do NOT reuse utils/networks.MLP: the PSM reference uses a specific
 activation/norm sequence — `ntanh` (LayerNorm then tanh), `relu`, and a final
@@ -568,6 +569,90 @@ class RLUMeasure(nn.Module):
         return phi, b
 
 
+class FactorizedMeasure(nn.Module):
+    """psmgoal measure_form=factorized: phi(s,u,g) = A(s,u)^T f(g), b(s,u,g) = beta(s,u)^T f(g).
+
+    f: g -> R^f_dim on the sqrt(f_dim) sphere (PhiMap with norm). A(s,u) in R^{f_dim x z_dim}
+    and beta(s,u) in R^f_dim are two heads on one [s, u] trunk (the `_triple_trunk` stack).
+    No RMSNorm head: phi is a product, not a head output. Same call signature and output
+    shapes as `RLUMeasure` (phi (..., z_dim), b (...)); `operators` and `features` let the
+    agent build the state x goal mesh without evaluating A on every (row, goal) pair.
+    """
+
+    z_dim: int
+    f_dim: int
+    hidden_dim: int
+    hidden_layers: int = 2
+
+    def setup(self):
+        self.f_net = PhiMap(z_dim=self.f_dim, hidden_dim=self.hidden_dim,
+                            hidden_layers=self.hidden_layers, norm=True)
+        layers = [nn.Dense(self.hidden_dim, kernel_init=_ORTH1, name="trunk_in")]
+        layers += [nn.Dense(self.hidden_dim, kernel_init=_ORTH1, name=f"trunk_{i}")
+                   for i in range(self.hidden_layers - 1)]
+        self.trunk = layers
+        self.trunk_ln = nn.LayerNorm(epsilon=1e-5)
+        self.A_out = nn.Dense(self.f_dim * self.z_dim, kernel_init=_ORTH1)
+        self.beta_out = nn.Dense(self.f_dim, kernel_init=_ORTH1)
+
+    def operators(self, obs, u):
+        """(A (..., f_dim, z_dim), beta (..., f_dim)) on [s, u]."""
+        x = jnp.concatenate([obs, u], -1)
+        x = jnp.tanh(self.trunk_ln(self.trunk[0](x)))
+        for layer in self.trunk[1:]:
+            x = nn.relu(layer(x))
+        A = self.A_out(x).reshape(*x.shape[:-1], self.f_dim, self.z_dim)
+        return A, self.beta_out(x)
+
+    def features(self, g):
+        """f(g) (..., f_dim) on the sqrt(f_dim) sphere."""
+        return self.f_net(g)
+
+    def __call__(self, obs, u, g):
+        A, beta = self.operators(obs, u)
+        f = self.features(g)
+        return jnp.einsum('...kd,...k->...d', A, f), jnp.einsum('...k,...k->...', beta, f)
+
+
+class PsmgoalProjectedPhi(nn.Module):
+    """f(s) in R^z_dim: a FROZEN state feature projected from a psmgoal `RLUMeasure` basis.
+
+        f(s) = psm_norm( mean_{u in U} mean_{g in G} phi_part(RLUMeasure(s, u, g)) )
+
+    RLUMeasure(s, u, g) -> (phi[z_dim], b); only the phi head is used. `U` is a fixed set of
+    K_u prior action latents (drawn once, clipped to u_clip); `G` is a fixed set of K_g goal
+    states drawn once from the dataset MARGINAL -- reward-agnostic on purpose, so f stays
+    task-agnostic. Averaging over the fixed (u, g) mesh marginalises the goal-indexed measure
+    down to a pure function of s, then `psm_norm` puts it on the sqrt(z_dim) sphere (the same
+    radius as PhiMap's `project_z`), so f is a drop-in for `PhiMap`: f(obs) -> (..., z_dim).
+
+    Its only parameters are the wrapped `RLUMeasure`'s (submodule `measure`), so a psmgoal
+    checkpoint's `agent/basis/params` load straight in. `U` and `G` are constants, not params.
+    """
+
+    z_dim: int
+    measure_hidden_dim: int
+    measure_hidden_layers: int
+    U: jnp.ndarray              # (K_u, action_dim) fixed prior action latents
+    G: jnp.ndarray              # (K_g, ob_dim) fixed dataset-marginal goal states
+
+    @nn.compact
+    def __call__(self, obs):
+        measure = RLUMeasure(z_dim=self.z_dim, hidden_dim=self.measure_hidden_dim,
+                             hidden_layers=self.measure_hidden_layers, name="measure")
+        lead, d = obs.shape[:-1], obs.shape[-1]
+        obs2 = obs.reshape(-1, d)
+        n = obs2.shape[0]
+        Ku, du = self.U.shape
+        Kg, dg = self.G.shape
+        o = jnp.broadcast_to(obs2[:, None, None, :], (n, Ku, Kg, d)).reshape(n * Ku * Kg, d)
+        u = jnp.broadcast_to(self.U[None, :, None, :], (n, Ku, Kg, du)).reshape(n * Ku * Kg, du)
+        g = jnp.broadcast_to(self.G[None, None, :, :], (n, Ku, Kg, dg)).reshape(n * Ku * Kg, dg)
+        phi_part, _ = measure(o, u, g)
+        f = phi_part.reshape(n, Ku, Kg, self.z_dim).mean(axis=(1, 2))
+        return psm_norm(f).reshape(*lead, self.z_dim)
+
+
 class PolicyCoefficient(nn.Module):
     """w(z) = sqrt(z_dim) * enc(z)/||enc(z)|| on the binary policy-index code z.
 
@@ -588,3 +673,30 @@ class PolicyCoefficient(nn.Module):
         # gradient is finite at h=0 (the all-zero code z gives enc(z)=0).
         d = h.shape[-1]
         return jnp.sqrt(float(d)) * h / jnp.sqrt(jnp.sum(h ** 2, axis=-1, keepdims=True) + 1e-8)
+
+
+class LatentResidualActor(nn.Module):
+    """delta(s, g, eps): the flowbc actor's correction to a prior draw (psmgoal actor_kind=flowbc).
+
+    u = clip(eps + delta(s, g, eps), +-u_clip), eps ~ N(0, I). The trunk is
+    `NoiseConditionedActor`'s (goal in place of the coefficient) with a linear output in place
+    of the tanh. The output layer is zero-initialised, so delta == 0 at step 0 and the actor
+    starts as a behaviour-cloning sample u = eps. The output layer is named `out` so a caller
+    can read it (tests perturb its bias).
+    """
+
+    action_dim: int
+    hidden_dim: int = 512
+    hidden_layers: int = 2
+    embedding_layers: int = 2
+
+    @nn.compact
+    def __call__(self, obs, goal, eps):
+        g_embedding = _simple_embedding(jnp.concatenate([obs, goal, eps], -1),
+                                        self.hidden_dim, self.embedding_layers)
+        s_embedding = _simple_embedding(jnp.concatenate([obs, eps], -1),
+                                        self.hidden_dim, self.embedding_layers)
+        h = jnp.concatenate([s_embedding, g_embedding], -1)
+        for _ in range(self.hidden_layers):
+            h = nn.relu(nn.Dense(self.hidden_dim, kernel_init=_ORTH1)(h))
+        return nn.Dense(self.action_dim, kernel_init=nn.initializers.zeros, name="out")(h)

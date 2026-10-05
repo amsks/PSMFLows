@@ -212,6 +212,26 @@ def restore_agent(agent, restore_path, restore_epoch):
               'freshly-initialised values (valid only while those branches are disabled)')
         saved.update({k: current[k] for k in missing})
 
+    # A saved field whose weights no longer match this agent's shapes (a net was resized since
+    # the checkpoint) cannot be loaded: from_state_dict does not check leaf shapes, so it keeps
+    # the saved array and the next forward pass raises a shape error. When the branch owning
+    # that field was disabled at save time its weights are unusable anyway, so keep the fresh
+    # field and warn -- same policy as a missing field. (psmgoal's actor predates train_actor
+    # and was built at the wrong z-width; a continue run trains a fresh actor.)
+    def _shapes_match(a, b):
+        if isinstance(a, (dict, Mapping)) and isinstance(b, (dict, Mapping)):
+            return set(a) == set(b) and all(_shapes_match(a[k], b[k]) for k in a)
+        if isinstance(a, (dict, Mapping)) or isinstance(b, (dict, Mapping)):
+            return False
+        return getattr(a, 'shape', ()) == getattr(b, 'shape', ())
+
+    resized = [k for k in current if k in saved and not _shapes_match(saved[k], current[k])]
+    if resized:
+        print(f'WARNING: {restore_path} stores {resized} at a shape this agent no longer '
+              'uses; keeping their freshly-initialised values (the saved weights are unusable '
+              'at the new shape)')
+        saved.update({k: current[k] for k in resized})
+
     agent = flax.serialization.from_state_dict(agent, saved)
 
     print(f'Restored from {restore_path}')

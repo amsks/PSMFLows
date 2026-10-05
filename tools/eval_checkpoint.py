@@ -66,6 +66,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import utils.xla_guard  # noqa: F401  -- MUST precede jax (see module docstring)
 
+import jax
 import hydra
 import ml_collections
 import numpy as np
@@ -375,11 +376,44 @@ def _evaluate_shard(payload):
         ds.preimage_point_mode = bool(config.get("use_point_preimage", False))
 
     ex = ds.sample(1)
+
+    # f_psmgoal2p: the frozen projected basis f(s) averages the psmgoal measure over a FIXED
+    # set G of K_g dataset-marginal states. main.py draws G once from the training set by
+    # `basis_proj_seed`; `create` only sees a one-row example, so rebuild the SAME G here or
+    # the eval basis would differ from the trained one. Mirrors main.py exactly (same PRNGKey,
+    # same dataset row order) -- both are recorded in the run's flags.json.
+    if config.get("basis_restore_path", None):
+        _kg = int(config.get("basis_k_g", 32))
+        _gidx = np.asarray(jax.random.choice(
+            jax.random.PRNGKey(int(config.get("basis_proj_seed", 0))),
+            train_dataset["observations"].shape[0], shape=(_kg,), replace=False))
+        config["basis_goal_states"] = np.asarray(
+            train_dataset["observations"][_gidx], np.float32).tolist()
+
     agent = agents[name].create(base_seed, ex["observations"], ex["actions"], config)
+    # psmgoal actor_kind=flowbc (2026-10-05) deploys `delta`, not the tanh-Gaussian actor.
+    fresh_actor = None
+    if name == "psmgoal":
+        fresh_actor = (agent.delta.params if str(config.get("actor_kind", "tanh")) == "flowbc"
+                       else agent.actor.params)
     agent = restore_agent(agent, payload["restore_path"], payload["restore_epoch"])
+    # psmgoal: did the restore replace the actor's weights? restore_agent keeps the FRESH
+    # actor (warning only) when the saved one has another input width, e.g. an eval with the
+    # wrong actor_input; an actor readout would then run an untrained actor. False also when
+    # the saved actor was never trained and shares this process's init seed.
+    actor_restored = None
+    if fresh_actor is not None:
+        deployed = (agent.delta.params if str(config.get("actor_kind", "tanh")) == "flowbc"
+                    else agent.actor.params)
+        actor_restored = any(
+            not np.array_equal(np.asarray(a), np.asarray(b))
+            for a, b in zip(jax.tree_util.tree_leaves(fresh_actor),
+                            jax.tree_util.tree_leaves(deployed)))
 
     # Task vector, identical to main.py's eval block. fql/bc_only has no infer_eval_z
     # and acts straight off observations.
+    goal_pool_rows = None
+    t_infer = time.time()
     if hasattr(agent, "infer_eval_z"):
         n_relabel = min(ds.size, int(payload["relabel_size"]))
         zb = ds.sample(n_relabel)
@@ -389,8 +423,33 @@ def _evaluate_shard(payload):
         # (s, u) sample the coefficient Lagrangian runs on, so the whole batch is passed.
         n_relabel = min(ds.size, int(payload["relabel_size"]))
         zb = ds.sample(n_relabel)
-        agent = agent.infer_eval_goals(zb, zb["rewards"] + payload["reward_shift"])
+        # eval_goal_pool=dataset: the goal set is drawn from the rewarding rows of the WHOLE
+        # task dataset (a 10,000-row relabel batch holds about 200), so the dataset's next
+        # states and shifted rewards go along. relabel (default): nothing extra is passed.
+        pool_kw = {}
+        if str(config.get("eval_goal_pool", "relabel")) == "dataset":
+            pool_rew = np.asarray(train_dataset["rewards"]) + payload["reward_shift"]
+            pool_kw = {"goal_pool": {"next_observations": train_dataset["next_observations"],
+                                     "rewards": pool_rew}}
+            goal_pool_rows = int((pool_rew > 0.5).sum())   # agents/psmgoal.py REWARDING_THRESHOLD
+            if idx == 0:
+                print(f"psmgoal goal set: k_goals={int(config['k_goals'])} drawn without replacement "
+                      f"from {goal_pool_rows} rewarding rows of {pool_rew.shape[0]} dataset rows "
+                      f"(eval_goal_pool=dataset), coef_source={config.get('coef_source')}", flush=True)
+        if str(config.get("eval_goal_source", "relabel")) == "env":
+            # psmgoal actor readout fed the env's own task goal: the goal observation the
+            # singletask env returns on reset. Seeded with the BASE seed so every worker
+            # hands the actor the same goal; `evaluate` re-seeds the env below.
+            _, reset_info = eval_env.reset(seed=base_seed)
+            env_goal = reset_info.get("goal")
+            assert env_goal is not None, (
+                f"eval_goal_source=env: {payload['env_name']} returned no info['goal'] on reset")
+            agent = agent.infer_eval_goals(zb, zb["rewards"] + payload["reward_shift"],
+                                           env_goal=np.asarray(env_goal, np.float32), **pool_kw)
+        else:
+            agent = agent.infer_eval_goals(zb, zb["rewards"] + payload["reward_shift"], **pool_kw)
 
+    infer_seconds = round(time.time() - t_infer, 1)
     t0 = time.time()
     info, trajs, _ = evaluate(agent=agent, env=eval_env, config=config,
                               num_eval_episodes=int(payload["num_episodes"]),
@@ -407,6 +466,11 @@ def _evaluate_shard(payload):
         "per_episode_raw": per_ep,
         "stats_success": float(info["success"]) if "success" in info else 0.0,
         "seconds": round(time.time() - t0, 1),
+        "actor_restored": actor_restored,
+        # coefficient inference time, env steps taken, and the size of the dataset goal pool
+        "infer_seconds": infer_seconds,
+        "env_steps": int(sum(len(t["reward"]) for t in trajs)),
+        "goal_pool_rows": goal_pool_rows,
     }
 
 
@@ -500,9 +564,17 @@ def main(cfg):
         # `argmax` is the shipped rule. An ablation eval differs from the deployed one by
         # this string alone, so it has to be in the report, not only in the filename.
         sel = str(config.get("gpi_select", "argmax"))
-        if name == "psmgoal":
+        if name == "psmgoal" and config.get("acting") == "distill" and config.get("actor_input") == "goal":
+            # goal-fed actor readout (2026-10-01): no coefficient, no argmax over prior draws.
+            src = (f"psmgoal actor ({config.get('actor_kind', 'tanh')}) fed the goal state, goal from "
+                   f"{config.get('eval_goal_source')}")
+        elif name == "psmgoal":
             src = (f"psmgoal argmax over K={config.get('gpi_num_u')} u of the goal-averaged "
                    f"measure, K_g={config.get('k_goals')} rewarding goals")
+            if str(config.get("eval_goal_pool", "relabel")) == "dataset":
+                src += " of the task dataset"
+            if int(config.get("gpi_hold", 1) or 1) > 1:
+                src += f", latent held {int(config['gpi_hold'])} steps"
         elif config.get("acting") == "gpi":
             src = f"gpi {sel} over (u, u') pairs, K={config.get('gpi_num_u')}"
         elif config.get("acting") == "fixed_coeff":
@@ -521,6 +593,9 @@ def main(cfg):
                 f"(residual_eps={config.get('residual_eps')})")
 
     lo, hi = wilson(k, n)
+    env_steps = sum(int(r.get("env_steps", 0)) for r in results)
+    rollout_seconds = max(float(r["seconds"]) for r in results)
+    env_steps_per_second = round(env_steps / rollout_seconds, 2) if rollout_seconds > 0 else None
     report = {
         "env": cfg.env_name,
         "agent": name,
@@ -545,11 +620,37 @@ def main(cfg):
         "agent_config_source": prov,
         "gpi_select": config.get("gpi_select"),
         "gpi_num_u": config.get("gpi_num_u"),
+        # psmgoal gpi_hold (2026-10-04): env steps one gpi latent is held (utils/evaluation.py);
+        # 1 (or absent) is the per-step argmax every recorded number used.
+        "gpi_hold": config.get("gpi_hold"),
+        "goal_sampling": config.get("goal_sampling"),
         "k_goals": config.get("k_goals"),
+        # psmgoal goal set (2026-10-01): which rows it is drawn from (relabel batch | task
+        # dataset) and, for the dataset pool, how many rewarding rows that pool held.
+        "eval_goal_pool": config.get("eval_goal_pool"),
+        "goal_pool_rows": results[0].get("goal_pool_rows"),
         "constraint_coef": config.get("constraint_coef"),
         "gpi_topm": config.get("gpi_topm"),
         "gpi_index_seed": config.get("gpi_index_seed"),
         "policy_index": config.get("policy_index"),
+        # psmgoal readout switches (2026-10-01). One checkpoint is read four ways (coefficient
+        # from h or from the Lagrangian with acting=gpi; the actor fed a dataset goal or the
+        # env goal), and an eval at the wrong actor_input runs a freshly initialised actor
+        # without failing, so each of these has to be in the JSON. `actor_restored` is false
+        # when the restore left the actor at its fresh initialisation.
+        "coef_source": config.get("coef_source"),
+        "measure_loss": config.get("measure_loss"),
+        "measure_temp": config.get("measure_temp"),
+        "actor_input": config.get("actor_input"),
+        # psmgoal joint actor heads (2026-10-05): which actor the checkpoint trained and acts
+        # with, the value it climbed, its BC weight and what supplied the bootstrap move.
+        "actor_kind": config.get("actor_kind"),
+        "actor_value_kind": config.get("actor_value_kind"),
+        "fb_bc_coeff": config.get("fb_bc_coeff"),
+        "bootstrap_source": config.get("bootstrap_source"),
+        "eval_goal_source": config.get("eval_goal_source"),
+        "eval_redistill": config.get("eval_redistill"),
+        "actor_restored": results[0].get("actor_restored"),
         "train_actor": config.get("train_actor"),
         "fixed_index_coeff_path": config.get("fixed_index_coeff_path"),
         # Added 2026-09-06: three switches that change WHICH policy is being evaluated and
@@ -582,6 +683,11 @@ def main(cfg):
         "worker_episodes": shards,
         "worker_seeds": seeds,
         "worker_seconds": [r["seconds"] for r in sorted(results, key=lambda r: r["worker"])],
+        # Rollout speed: env steps over all workers / the longest worker's rollout seconds
+        # (workers run side by side). `worker_infer_seconds` is the coefficient inference.
+        "worker_infer_seconds": [r.get("infer_seconds") for r in sorted(results, key=lambda r: r["worker"])],
+        "env_steps": env_steps,
+        "env_steps_per_second": env_steps_per_second,
         "eval_seed_scheme": ("single process, evaluate(seed=cfg.seed)" if n_workers == 1
                              else "worker w of N: evaluate(seed=cfg.seed * N + w); "
                                   "z inferred from np.random.seed(cfg.seed) in every worker"),

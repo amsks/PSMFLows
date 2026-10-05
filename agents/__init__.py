@@ -25,5 +25,10 @@ agents = dict(
     fql=FQLAgent,
     f_psmflow=PSMFlowAgent,
     psmflow=PSMFlowAgent,  # backward-compat alias (renamed to f_psmflow on 2026-09-17)
+    # f_psmgoal2p (2026-09-21): the same PSMFlowAgent run 2P-DSRL, but with the frozen phi
+    # replaced by a state feature projected from a psmgoal RLUMeasure basis. It differs from
+    # f_psmflow only by config (basis_restore_path + the 2P-DSRL flags); see
+    # configs/agent/f_psmgoal2p.yaml and docs/design/2026-09-21-psmgoal-2p-dsrl.md.
+    f_psmgoal2p=PSMFlowAgent,
     psmgoal=PSMGoalAgent,
 )

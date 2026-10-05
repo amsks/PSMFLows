@@ -23,6 +23,49 @@ def supply_rng(f, rng=jax.random.PRNGKey(0)):
     return wrapped
 
 
+def gpi_hold_steps(agent):
+    """How many env steps the eval loop holds one gpi latent (psmgoal `gpi_hold`, 2026-10-04).
+
+    1 for every agent without `choose_latent` / `act_with_latent`, for acting other than gpi,
+    and for gpi_hold=1 -- all of which keep the per-step `sample_actions` path untouched.
+    """
+    if not (hasattr(agent, 'choose_latent') and hasattr(agent, 'act_with_latent')):
+        return 1
+    config = getattr(agent, 'config', None)
+    if config is None or str(config.get('acting', '')) != 'gpi':
+        return 1
+    return max(1, int(config.get('gpi_hold', 1)))
+
+
+class HeldLatentActor:
+    """acting=gpi with one chosen latent held for `hold` env steps.
+
+    At a step with no held latent (episode start, or the block of `hold` steps spent), a key
+    is split off `rng` and `agent.choose_latent(obs, key)` picks u; every step then returns
+    `agent.act_with_latent(obs, u)`, the decode at the CURRENT state. `evaluate` calls
+    `reset()` at every episode start, so a block never crosses an episode boundary.
+    """
+
+    def __init__(self, agent, hold, rng):
+        self.agent = agent
+        self.hold = int(hold)
+        self.rng = rng
+        self.u = None
+        self.steps_left = 0
+
+    def reset(self):
+        self.u = None
+        self.steps_left = 0
+
+    def __call__(self, observations, temperature=0):
+        if self.steps_left <= 0 or self.u is None:
+            self.rng, key = jax.random.split(self.rng)
+            self.u = self.agent.choose_latent(observations, key)
+            self.steps_left = self.hold
+        self.steps_left -= 1
+        return self.agent.act_with_latent(observations, self.u)
+
+
 def flatten(d, parent_key='', sep='.'):
     """Flatten a dictionary."""
     items = []
@@ -76,7 +119,13 @@ def evaluate(
     # stream drawn from OS entropy, so re-evaluating the same weights gave different
     # results: stochastic actors (flow decode, residual path) move by more than rounding.
     actor_key = seed if seed is not None else np.random.randint(0, 2**32)
-    actor_fn = supply_rng(agent.sample_actions, rng=jax.random.PRNGKey(actor_key))
+    # psmgoal gpi_hold > 1: the chosen latent is held for gpi_hold steps and the hold
+    # counter is reset at every episode start below. gpi_hold = 1 is the per-step path.
+    hold = gpi_hold_steps(agent)
+    if hold > 1:
+        actor_fn = HeldLatentActor(agent, hold, jax.random.PRNGKey(actor_key))
+    else:
+        actor_fn = supply_rng(agent.sample_actions, rng=jax.random.PRNGKey(actor_key))
     trajs = []
     stats = defaultdict(list)
 
@@ -91,6 +140,8 @@ def evaluate(
         should_render = i >= num_eval_episodes
 
         observation, info = env.reset()
+        if hold > 1:
+            actor_fn.reset()
         done = False
         step = 0
         render = []

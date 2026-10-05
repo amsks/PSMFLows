@@ -58,8 +58,8 @@ from utils.psm_common import (
     project_z, targets_uncertainty,
 )
 from utils.psm_networks import (
-    AffinePsiMap, FlowVectorField, LogAlpha, NoiseConditionedActor, PhiMap, PsiMap,
-    TanhGaussianLatentActor, tanh_gaussian_sample,
+    AffinePsiMap, FlowVectorField, LogAlpha, NoiseConditionedActor, PhiMap,
+    PsiMap, PsmgoalProjectedPhi, TanhGaussianLatentActor, tanh_gaussian_sample,
 )
 from utils.psm_proto import proto_latents, proto_seed_ints, sample_z_bin
 
@@ -562,8 +562,33 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         ex_u = jnp.zeros((ex_observations.shape[0], action_dim))
         ex_w = jnp.zeros((ex_observations.shape[0], z_dim))
 
-        phi_def = PhiMap(z_dim=z_dim, hidden_dim=config["phi"]["hidden_dim"],
-                         hidden_layers=config["phi"]["hidden_layers"], norm=True)
+        # `basis_restore_path` (2026-09-21, f_psmgoal2p): phi(s) is a FROZEN state feature
+        # projected from a psmgoal RLUMeasure basis instead of a fresh PhiMap. `None` (every
+        # f_psmflow run) leaves the PhiMap path below bitwise unchanged.
+        basis_restore_path = config.get("basis_restore_path", None)
+        if basis_restore_path:
+            assert not config.get("train_phi", True), (
+                "basis_restore_path is a FROZEN external basis; it requires train_phi=false")
+            assert not config.get("phi_restore_path", None), (
+                "basis_restore_path and phi_restore_path both set phi; pick one")
+            mcfg = config["measure"]
+            proj_u = _sample_projection_u(config.get("basis_proj_seed", 0),
+                                          int(config.get("basis_k_u", 8)), action_dim,
+                                          float(config["u_clip"]))
+            goal_states = config.get("basis_goal_states", None)
+            if goal_states is None:
+                # No dataset goal sample wired (tests/smokes): tile the example states.
+                # main.py supplies K_g dataset-marginal states for real runs.
+                k_g = int(config.get("basis_k_g", 8))
+                reps = -(-k_g // ex_observations.shape[0])
+                goal_states = jnp.tile(ex_observations, (reps, 1))[:k_g]
+            proj_g = jnp.asarray(goal_states, jnp.float32)
+            phi_def = PsmgoalProjectedPhi(
+                z_dim=z_dim, measure_hidden_dim=int(mcfg["hidden_dim"]),
+                measure_hidden_layers=int(mcfg["hidden_layers"]), U=proj_u, G=proj_g)
+        else:
+            phi_def = PhiMap(z_dim=z_dim, hidden_dim=config["phi"]["hidden_dim"],
+                             hidden_layers=config["phi"]["hidden_layers"], norm=True)
         if psi_form == "affine":
             af = config["affine"]
             psi_def = AffinePsiMap(output_dim=z_dim, hidden_dim=config["sf"]["hidden_dim"],
@@ -585,7 +610,13 @@ class PSMFlowAgent(flax.struct.PyTreeNode):
         # with the basis of a finished measure run (held fixed by train_phi=false). The
         # checkpoint's ONLINE phi goes into phi and, through the deepcopy below, target_phi;
         # its optimiser state is not carried. Nothing else is read from that checkpoint.
-        if config.get("phi_restore_path", None):
+        if basis_restore_path:
+            # Load the psmgoal checkpoint's `agent/basis/params` into the wrapped RLUMeasure
+            # (submodule `measure`). Frozen: train_phi=false keeps these params fixed and
+            # uses them as their own target throughout (see apply_update).
+            phi = phi.replace(params=_load_basis_params(
+                basis_restore_path, config.get("basis_restore_epoch", None), phi.params))
+        elif config.get("phi_restore_path", None):
             phi = phi.replace(params=_load_phi_params(
                 config["phi_restore_path"], config.get("phi_restore_epoch", None), phi.params))
         # psi's index slot: the policy latent u' (d_a wide) under policy_index='latent',
@@ -2406,6 +2437,42 @@ def _load_flow_params(ckpt_path, ckpt_epoch, config, ex_observations, ex_actions
         f'this env gives {expected} (obs {ob_dim} + action {action_dim} + t 1); '
         'the Stage-A checkpoint was trained on a different environment')
     return vf, onestep
+
+
+def _sample_projection_u(seed, k_u, action_dim, u_clip):
+    """The fixed set U of K_u prior action latents `PsmgoalProjectedPhi` averages over:
+    N(0, I) clipped to +-u_clip, drawn once from a code seed (NOT the run seed, so the
+    projection is a constant of the config)."""
+    key = jax.random.PRNGKey(int(seed))
+    return jnp.clip(jax.random.normal(key, (int(k_u), int(action_dim))), -u_clip, u_clip)
+
+
+def _load_basis_params(restore_path, restore_epoch, template):
+    """The psmgoal basis's ONLINE params from another run's `params_<epoch>.pkl`
+    (`restore_agent`'s glob convention: `restore_path` must match exactly one run directory).
+
+    Only `agent/basis/params` is read (the RLUMeasure of agents/psmgoal.py); it is loaded
+    into the `measure` submodule of `PsmgoalProjectedPhi`. The tree must have the template's
+    structure and leaf shapes, i.e. the same RLUMeasure `measure` block, z_dim and env.
+    """
+    import glob
+    import os
+    import pickle
+
+    candidates = glob.glob(str(restore_path))
+    assert len(candidates) == 1, (
+        f"basis_restore_path must match exactly one run directory; {restore_path!r} matched "
+        f"{len(candidates)}: {candidates}")
+    assert restore_epoch is not None, "basis_restore_path needs basis_restore_epoch"
+    path = os.path.join(candidates[0], f"params_{int(restore_epoch)}.pkl")
+    with open(path, "rb") as f:
+        saved = pickle.load(f)["agent"]["basis"]["params"]
+    loaded = flax.serialization.from_state_dict(template, {"measure": saved})
+    for want, got in zip(jax.tree_util.tree_leaves(template), jax.tree_util.tree_leaves(loaded)):
+        assert tuple(want.shape) == tuple(jnp.shape(got)), (
+            f"{path}: basis leaf shape {tuple(jnp.shape(got))} does not match this agent's "
+            f"{tuple(want.shape)}; the checkpoint's RLUMeasure block, z_dim or env differs")
+    return jax.tree_util.tree_map(lambda x: jnp.asarray(x, jnp.float32), loaded)
 
 
 def _load_phi_params(restore_path, restore_epoch, template):

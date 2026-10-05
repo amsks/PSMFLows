@@ -71,7 +71,7 @@ def main(cfg: DictConfig):
             # re-wrap it here or it stays a plain dict when p_aug/frame_stack are set.
             val_dataset = Dataset.create(**val_dataset)
 
-    if config['agent_name'] in ('psmflow', 'f_psmflow', 'psmgoal'):
+    if config['agent_name'] in ('psmflow', 'f_psmflow', 'f_psmgoal2p', 'psmgoal'):
         # These train on the preimage-augmented dataset (latents per transition).
         from utils.flow_inversion import load_augmented_dataset, repair_invalid_preimages
         assert config.get('preimage_path'), (
@@ -194,6 +194,12 @@ def main(cfg: DictConfig):
         # `preimage_valid` existed are covered too: a single NaN latent otherwise NaNs the
         # whole update, and at batch 1024 over 1M rows a poisoned row lands within ~100 steps.
         aug, _ = repair_invalid_preimages(aug)
+        # The npz carries the rewards/masks/terminals of the env it was inverted on (cube:
+        # task 2), and the per-task npz files are symlinks to it. The latents are task-free
+        # (same s, a on every task); the task signals are not, so take them from THIS env.
+        for _k in ('rewards', 'masks', 'terminals'):
+            if _k in train_dataset:
+                aug[_k] = np.asarray(train_dataset[_k])
         train_dataset = aug
         val_dataset = None  # val split has no preimages; skip validation logging at v1
 
@@ -228,7 +234,7 @@ def main(cfg: DictConfig):
         if dataset is not None:
             dataset.p_aug = cfg.p_aug
             dataset.frame_stack = cfg.frame_stack
-            if config['agent_name'] in ('psmflow', 'f_psmflow', 'psmgoal'):
+            if config['agent_name'] in ('psmflow', 'f_psmflow', 'f_psmgoal2p', 'psmgoal'):
                 # Emit u_0 / u_0' per transition: either a draw from the stored EM mixture
                 # or the exact backward-ODE point, per the point-vs-mixture ablation.
                 dataset.return_preimage_noise = True
@@ -242,13 +248,44 @@ def main(cfg: DictConfig):
                 # A/B goal_conditioned: the h(g) head trains on the hindsight-goal MIXTURE
                 # (geometric future + random_frac), so the batch must also carry batch['goals'].
                 # OFF by default (train_goal_head=false) -> core dataset path is unchanged.
-                if bool(config.get('train_goal_head', False)):
+                # policy_index=goal (2026-10-01) reads the same mixture as each row's MEASURE goal,
+                # with a goal_cur_frac share of rows taking their own s'.
+                _goal_index = str(config.get('policy_index', 'code')) == 'goal'
+                if bool(config.get('train_goal_head', False)) or _goal_index:
                     dataset.return_goals = True
                     dataset.goal_discount = float(config.get('goal_discount', 0.98))
                     dataset.goal_random_frac = float(config.get('goal_random_frac', 0.3))
+                    dataset.goal_cur_frac = float(config.get('goal_cur_frac', 0.0))
+                    # goal_sampling=uniform (2026-10-04): the measure goal is a uniform draw
+                    # over the row's own s' and every later state of its trajectory.
+                    dataset.goal_sampling = str(config.get('goal_sampling', 'geometric'))
+                # Factored-FB induced-reward actor: hindsight tasks are fit from a same-
+                # trajectory future goal, batch['fb_goals']. OFF by default (actor_value=none).
+                # policy_index=goal trains its actor at that same uniform-future goal
+                # (bootstrap_source=data with train_actor=false trains no actor and needs none).
+                _goal_actor = _goal_index and bool(config.get('train_actor', False))
+                if str(config.get('actor_value', 'none')) != 'none' or _goal_actor:
+                    dataset.return_fb_goals = True
+                # bootstrap_source=data (2026-10-03): the bootstrap latent is row i+1's preimage,
+                # batch['next_noise_preimage']; rows at a trajectory end or with an invalid next
+                # latent are not sampled (utils/datasets.py `_next_preimage_rows`).
+                if str(config.get('bootstrap_source', 'actor')) == 'data':
+                    dataset.return_next_preimage = True
 
     # Create agent.
     example_batch = train_dataset.sample(1)
+
+    # f_psmgoal2p: the projected psmgoal basis f(s) averages its measure over a FIXED set G
+    # of K_g dataset-marginal goal states. Draw them once here, deterministically from the
+    # training set by `basis_proj_seed` (reward-agnostic; NOT the rewarding goals), since
+    # `create` only sees a one-row example batch. Reproducible from the same dataset + seed.
+    if config.get('basis_restore_path', None):
+        k_g = int(config.get('basis_k_g', 32))
+        _idx = np.asarray(jax.random.choice(
+            jax.random.PRNGKey(int(config.get('basis_proj_seed', 0))),
+            train_dataset.size, shape=(k_g,), replace=False))
+        config['basis_goal_states'] = np.asarray(
+            train_dataset['observations'][_idx], np.float32).tolist()
 
     agent_class = agents[config['agent_name']]
     agent = agent_class.create(
@@ -389,7 +426,13 @@ def main(cfg: DictConfig):
                 rew = z_batch['rewards'] + float(cfg.get('eval_reward_shift', 1.0))
                 # RLU coefficient inference needs the batch's (s, u) to run the Lagrangian, not
                 # just the next states, so the whole relabel batch is passed.
-                eval_agent = agent.infer_eval_goals(z_batch, rew)
+                # eval_goal_pool=dataset draws the goal set from the whole dataset's rewarding rows.
+                pool_kw = {}
+                if str(config.get('eval_goal_pool', 'relabel')) == 'dataset':
+                    pool_kw = {'goal_pool': {
+                        'next_observations': train_dataset['next_observations'],
+                        'rewards': np.asarray(train_dataset['rewards']) + float(cfg.get('eval_reward_shift', 1.0))}}
+                eval_agent = agent.infer_eval_goals(z_batch, rew, **pool_kw)
             eval_info, trajs, cur_renders = evaluate(
                 agent=eval_agent,
                 env=eval_env,

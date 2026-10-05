@@ -1,0 +1,42 @@
+# f_psmgoal2p (2026-09-21): the 2P-DSRL recipe (frozen phi + co-trained affine psi + a
+# task-conditioned, Q-normalized, bc-0 dsrl_sac latent actor) run on a frozen phi that is
+# a state feature projected from a psmgoal RLUMeasure basis. It is the same PSMFlowAgent as
+# f_psmflow -- only the basis-load glue is new. docs/design/2026-09-21-psmgoal-2p-dsrl.md.
+#
+# Inherits every f_psmflow default, then overrides the 2P-DSRL flags and adds the
+# external-basis keys. The projected phi is FROZEN (train_phi=false).
+defaults:
+  - f_psmflow
+  - _self_
+
+agent_name: f_psmgoal2p
+
+# --- 2P-DSRL flags (mirror the existing 2P-DSRL arm exactly) ---
+psi_form: affine
+policy_index: task_vector
+train_actor: true
+acting: actor
+actor_mode: dsrl_sac
+u_clip: 3.0
+train_phi: false
+discount: 0.98
+actor:
+  bc_coeff: 0.0
+  target_entropy: -3.4657
+
+# --- frozen external basis (psmgoal RLUMeasure) ---
+# A psmgoal run directory (restore_agent glob; exactly one match) and the epoch of its
+# params_<epoch>.pkl. The checkpoint's agent/basis/params load into the wrapped RLUMeasure.
+basis_restore_path: null
+basis_restore_epoch: null
+# The projection f(s) = project_sphere( mean_{u in U} mean_{g in G} phi(s,u,g) ).
+basis_k_u: 8               # |U|: fixed prior action latents, clipped to u_clip
+basis_k_g: 32              # |G|: fixed dataset-marginal goal states (reward-agnostic)
+basis_proj_seed: 0         # seed for U and for the dataset G draw (a config constant)
+
+# RLUMeasure geometry of the frozen psmgoal basis. MUST match the checkpoint being loaded
+# (agents/psmgoal.py builds RLUMeasure from its own `measure` block); the shape assert in
+# _load_basis_params catches a mismatch.
+measure:
+  hidden_dim: 1024
+  hidden_layers: 2

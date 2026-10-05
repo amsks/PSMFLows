@@ -16,6 +16,16 @@ batch_size: 256            # the basis loss is a batch x batch mesh, so smaller 
 z_dim: 128                 # D: width of phi and of the coefficient
 discount: 0.98             # gamma
 tau: 0.01                  # Polyak rate of the phi, b, w(z) targets
+# F1 (2026-09-22, docs/design/2026-09-22-psmgoal-fixes.md): weight on the orthogonality term
+# ||mean_ij phi_ij phi_ij^T - I||_F^2 over the TD mesh. 0 = off (phi collapsed to rank one
+# without it). Logged every step: ortho_loss, phi_eff_rank.
+ortho_coef: 0.0
+# Measure form (2026-10-01). joint: phi, b = RLUMeasure on [s, u, g] (RMSNorm head).
+# factorized: phi = A(s,u)^T f(g), b = beta(s,u)^T f(g), f on the sqrt(f_dim) sphere, plus
+# f_ortho_coef * ||E[f f^T] - I||_F^2 over the batch's next states (ignored when joint).
+measure_form: joint
+f_dim: 128
+f_ortho_coef: 1.0
 
 lr_measure: 1.0e-4         # phi, b
 lr_w: 1.0e-4            # w(z)
@@ -31,23 +41,127 @@ use_dgd: true              # true: learned per-triple multiplier network; false:
 inf_coeff: 5.0             # hinge weight (use_dgd=false)
 infer_batch: 1024          # (s, u) samples per inference step
 k_goals: 32                # size of the eval goal set G (rewarding relabel rows)
+# Rows G is drawn from (eval only). relabel: the relabel batch's rewarding rows (about 2% of
+# eval_relabel_size rows), with replacement when fewer than k_goals. dataset: the task dataset's
+# rewarding rows, k_goals of them without replacement (k_goals up to 10000); the Lagrangian
+# then runs on phi and b computed once on the (infer_batch x k_goals) mesh -- the objective on
+# the per-pair mean over all goals, the constraint and l on 256 fixed random goal columns per
+# pair (all columns when k_goals <= 256) -- and acting scores the goal set in chunks.
+eval_goal_pool: relabel
 
 # --- acting ---
-acting: gpi                # gpi (argmax over prior draws) | distill (DSRL latent actor)
+acting: gpi                # gpi (argmax over prior draws) | distill (DSRL latent actor) | sfbc (actor draws reranked by the measure)
 gpi_num_u: 64              # prior draws the gpi argmax scans per step
+sfbc_num_u: 64             # acting=sfbc: candidate latents drawn from the trained actor, reranked by mean_g M
 num_actor_steps: 10000     # DSRL distillation steps (acting=distill)
 actor_temp: 0.0            # entropy weight (alpha) in the distillation objective
 q_coeff: 1.0               # distill: weight on the scale-normalised Q term
 bc_coeff: 0.0              # distill: prior-centre anchor weight (in-support pull)
 
+# --- FB-style in-loop actor+measure interleaving (all OFF-equivalent by default) ---
+train_actor: false         # co-train the DSRL actor during update(); when true it also supplies the TD backup u'
+train_basis: true          # step phi, b, w(z); false freezes the whole measure (FB frozen-basis, actor-only arm)
+eval_redistill: true       # acting=distill re-distills the actor at eval; false acts with the in-loop actor directly
+# in-loop actor loss (train_actor=true only): distill (DSRL, may go out-of-support) | awr | bc (both in-support)
+actor_objective: distill
+awr_beta: 3.0              # awr temperature: weight_i = clip(exp(adv_i/awr_beta), 0, awr_wmax)
+awr_wmax: 100.0           # awr weight ceiling
+awr_baseline_k: 32        # awr baseline V_i: number of clipped prior draws averaged
+
+# --- Factored-FB induced-reward actor (density-fb branch; all OFF by default) ---
+# actor_value != none (needs train_actor=true) replaces actor_objective's loss with
+#   Q(s,u,w) from the mesh M_ij = phi(s_i,u_i,s+_j)^T w_i + b_ij at the TASK vector w_i and the
+#   induced reward r_w(s+) = (f(s+) - mu)^T w / sqrt(D) over the batch's next-state pool:
+#   raw: Q = mean_j M_ij r_ij ; softmax: Q = sum_j softmax_j(M_ij/fb_value_temp) r_ij
+#   loss = -Q/sg|Q| + fb_bc_coeff * mean (u - u_data)^2
+# f(s+) = psm_norm(mean over fb_k_u prior u and fb_k_anchor fixed anchors of phi), read from a
+# slow EMA copy of the basis. Tasks: hindsight-goal centered ridge fits or random directions.
+# Test time: coef_source=ridge (ridge fit of the task reward on f); act with acting=distill
+# eval_redistill=false (the in-loop actor's mode).
+actor_value: none          # none | measure_reward_raw | measure_reward_softmax
+fb_value_temp: 1.0         # softmax arm temperature (reference measure_density_temp)
+fb_bc_coeff: 3.0           # in-support anchor toward the dataset preimage (reference FlowBC bc_coeff)
+fb_rand_frac: 0.5          # random-direction task fraction (reference z_rand_frac)
+fb_hit_spec: "19:22:0.4"   # hindsight kernel reward blocks a:b:eps (cube xyz, eps 0.4)
+fb_ridge_lambda_mult: 0.01 # lam = mult * tr(C)/D
+fb_cov_eig_floor: 1.0e-6   # eigenvalue floor on C, multiple of tr(C)/D
+fb_const_eps: 1.0e-6       # constant-reward fallback threshold
+fb_enc_tau: 0.0005         # EMA rate of the slow basis copy read by f
+fb_sigma_tau: 0.005        # EMA rate of f's mean / covariance
+fb_k_u: 8                  # f: prior latents averaged
+fb_k_anchor: 32            # f: anchor goal states averaged (first batch's next states)
+fb_proj_seed: 0            # f: code seed for the prior latents
+
 # --- A/B goal_conditioned mode (all OFF by default -> byte-identical to the RLU core) ---
 train_goal_head: false     # train h(g) by J(theta|g)+constraint during update()
-coef_source: lp            # lp (RLU Lagrangian inference) | amortized (use the h(g) head)
+# coef_source=trained (eval only, policy_index=code): the coefficient the measure was trained
+# with, w = the mean of w(z) over 256 policy codes z from a fixed key, projected to the
+# sqrt(D) sphere. No Lagrangian or regression is run. Under policy_index=goal it raises:
+# there coef_source=amortized is the trained coefficient.
+coef_source: lp            # lp (RLU Lagrangian inference) | amortized (h(g) head) | regression (lstsq on phi) | ridge (actor_value) | trained (mean of w(z))
 lr_goal: 1.0e-4            # h(g) learning rate
 j_constraint_coef: 1.0     # hinge weight on non-negativity in J(theta|g)
 w_star: {hidden_dim: 256, hidden_layers: 2}   # h(g): goal state -> sqrt(D) sphere
 goal_discount: 0.98        # dataset hindsight-goal geometric horizon (main.py, train_goal_head only)
 goal_random_frac: 0.3      # dataset off-trajectory random-goal fraction (OGBench-style)
+
+# --- goal-conditioned training (docs/design/2026-10-01-psmgoal-goal-conditioned.md; all OFF by default) ---
+# policy_index=goal (needs train_actor=true): each row carries a measure goal g (goal_cur_frac
+# its own s', goal_random_frac a random row, the rest a geometric-future state) and the measure
+# loss uses w = h(g) (online h in M, a Polyak copy of h in the target M). The bootstrap u' is
+# the actor's mode at (s', g). The actor is trained at a uniform-future goal on
+#   -q_coeff * Q/sg|Q| + actor_temp * logp + fb_bc_coeff * mean (u - u_data)^2
+# with Q the measure over the batch's next states weighted by the kernel reward around the
+# goal (fb_hit_spec): Q = sum_j M k (squared) or sum_j softmax_j(M/measure_temp) k (softmax).
+# measure_loss=softmax: cross-entropy between softmax_j(M_ij/measure_temp) and
+#   (1-discount) * onehot(j=i) + discount * softmax_j(Mbar_ij/measure_temp).
+# Test time, same checkpoint: coef_source=amortized (h over the rewarding states) or lp with
+# acting=gpi; or acting=distill eval_redistill=false to act with the actor, fed a rewarding
+# dataset state (eval_goal_source=relabel) or the env's task goal (eval_goal_source=env).
+policy_index: code         # code (w(z) on the binary policy code) | goal (w = h(g))
+measure_loss: squared      # squared | softmax
+measure_temp: 1.0          # softmax temperature, in the loss and the readouts
+actor_input: w             # w (the coefficient) | goal (the raw goal state)
+goal_cur_frac: 0.0         # share of rows whose measure goal is their own s'
+eval_goal_source: relabel  # relabel | env
+
+# --- data bootstrap (docs/design/2026-10-03-psmgoal-data-bootstrap.md; OFF by default) ---
+# bootstrap_source=data (needs policy_index=goal, goal_random_frac=0, goal_cur_frac=0): the
+# bootstrap latent is the data's next latent u_{i+1} (batch['next_noise_preimage'], row i+1's
+# preimage) in place of the actor's mode; no actor is trained (train_actor may be false). Rows
+# at a trajectory end or with an invalid next latent are not sampled. Test time: coef_source=
+# amortized (hgoal) or lp as above, or coef_source=hgoal_each (eval only): each of the k_goals
+# goals is scored with its own h(g_j) -- squared: mean_j M(s,u,g_j; h(g_j)); softmax: for each
+# j the share of g_j among [g_j + reference states] at w = h(g_j), averaged over j.
+bootstrap_source: actor    # actor | data
+
+# --- 2026-10-04 ablations (OFF by default) ---
+# goal_sampling (policy_index=goal): geometric = the hindsight goal at offset ~
+# Geometric(1 - goal_discount), as above; uniform = the row's own s' and every later state of
+# the same trajectory, equally likely (the fb_goals draw). Consistent with bootstrap_source=
+# data: seen from row i+1 the goal is again uniform over the remaining future.
+goal_sampling: geometric   # geometric | uniform
+# gpi_hold (acting=gpi, eval only): the latent chosen by the argmax over prior draws is
+# reused for gpi_hold env steps; the action is still decoded at the current state every
+# step. The hold counter is in the eval loop (utils/evaluation.py) and resets each episode.
+gpi_hold: 1
+
+# --- joint actor heads (2026-10-05; OFF by default) ---
+# actor_kind (policy_index=goal train_actor=true actor_input=goal): which actor supplies the
+# bootstrap move at (s', g) and is trained at the uniform-future goal batch['fb_goals'].
+#   tanh    the tanh-Gaussian actor, -q_coeff*Q/sg|Q| + actor_temp*logp + fb_bc_coeff*mean (u - u_data)^2
+#   flowbc  u = clip(eps + delta(s, g, eps)), eps ~ N(0, I) a prior draw, delta an MLP on [s, g, eps];
+#           -q_coeff*Q/sg|Q| + fb_bc_coeff*mean delta^2 (the anchor is eps: u = eps is a BC sample).
+#           Bootstrap: a fresh eps at (s', g). Acting: one eps per step.
+#   dsrl    the tanh-Gaussian actor with no BC term, -q_coeff*Q/sg|Q| + alpha*logp, alpha learned
+#           toward dsrl_actor.target_entropy (the f_psmflow dsrl_sac head). Needs fb_bc_coeff=0.
+#           Bootstrap and acting: the mode.
+# actor_value_kind: the Q the actor climbs. shaped = the kernel-weighted measure over the
+# batch's next states (fb_hit_spec); point = M(s,u,g) at the actor goal with w = h(g)
+# (softmax loss: the share of g among [g + the batch's next states]).
+actor_kind: tanh           # tanh | flowbc | dsrl
+actor_value_kind: shaped   # shaped | point
+dsrl_actor: {target_entropy: 0.0, init_alpha: 1.0, lr_alpha: 3.0e-4}   # actor_kind=dsrl: SAC's alpha
 
 # --- nets ---
 measure: {hidden_dim: 1024, hidden_layers: 2}   # phi, b on [s, u, g] (RLU hidden 1024, was 512; capacity lift 2026-09-18)

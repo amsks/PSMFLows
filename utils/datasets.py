@@ -70,14 +70,16 @@ def add_skill_targets(dataset_dict, window):
     return observations[skill_idx]
 
 
-def hindsight_goal_idxs(idxs, terminal_locs, size, discount, random_frac, rng=None):
+def hindsight_goal_idxs(idxs, terminal_locs, size, discount, random_frac, rng=None, cur_frac=0.0):
     """Goal ROW for each sampled row, OGBench GCDataset convention (psmgoal, 2026-09-17).
 
     Hindsight goal: offset d ~ Geometric(p = 1 - discount), d >= 1, so the goal row is
     min(idx + d - 1, end_of_trajectory(idx)) and the goal STATE is `next_observations` at
     that row -- d = 1 is the row's own s', the cap is the trajectory's final state, and a
     goal never crosses a boundary in `terminal_locs` (rows where terminals > 0). A
-    `random_frac` of rows take a uniformly random row of the whole dataset instead.
+    `random_frac` of rows take a uniformly random row of the whole dataset instead, and a
+    `cur_frac` of rows take their own row (goal = the row's own s'). The two shares are cut
+    from the same uniform draw, so they are disjoint and cur_frac = 0 draws nothing extra.
 
     Returns (goal_idxs, is_random), both (len(idxs),). `rng` defaults to numpy's global
     stream, which is what `Dataset.sample` draws from.
@@ -92,11 +94,31 @@ def hindsight_goal_idxs(idxs, terminal_locs, size, discount, random_frac, rng=No
     ends = np.where(has_end, terminal_locs[np.minimum(pos, terminal_locs.shape[0] - 1)], size - 1)
     dist = r.geometric(p=1.0 - float(discount), size=idxs.shape[0])
     goal = np.minimum(idxs + dist - 1, ends)
-    is_random = r.uniform(size=idxs.shape[0]) < float(random_frac)
+    share = r.uniform(size=idxs.shape[0])
+    is_random = share < float(random_frac)
     # np.random has `randint`, a Generator has `integers`; both are exclusive of `size`.
     draw = r.integers if hasattr(r, 'integers') else r.randint
     goal = np.where(is_random, draw(0, size, size=idxs.shape[0]), goal)
+    if float(cur_frac) > 0.0:
+        is_cur = (share >= float(random_frac)) & (share < float(random_frac) + float(cur_frac))
+        goal = np.where(is_cur, idxs, goal)
     return goal.astype(np.int64), is_random
+
+
+def future_goal_idxs(idxs, terminal_locs, size, rng=None):
+    """Goal ROW for each sampled row: uniform over the row itself and every later row of the
+    same trajectory, so the goal STATE `next_observations[goal]` ranges from the row's own s'
+    to the trajectory's final state. The Factored-FB actor-goal convention
+    (actor_p_trajgoal=1, actor_geom_sample=false). Used by psmgoal's actor_value arms."""
+    r = np.random if rng is None else rng
+    idxs = np.asarray(idxs)
+    terminal_locs = np.asarray(terminal_locs)
+    pos = np.searchsorted(terminal_locs, idxs, side='left')
+    has_end = pos < terminal_locs.shape[0]
+    ends = np.where(has_end, terminal_locs[np.minimum(pos, terminal_locs.shape[0] - 1)], size - 1)
+    span = ends - idxs + 1
+    goal = idxs + np.floor(r.uniform(size=idxs.shape[0]) * span).astype(np.int64)
+    return np.minimum(goal, ends).astype(np.int64)
 
 
 def get_noise_preimage_dataset(dataset, num_clusters=1):
@@ -144,10 +166,25 @@ class Dataset(FrozenDict):
         self.return_goals = False
         self.goal_discount = 0.98
         self.goal_random_frac = 0.3
+        self.goal_cur_frac = 0.0  # share of rows whose goal is their own s' (psmgoal policy_index=goal)
+        # psmgoal goal_sampling (2026-10-04): geometric (hindsight_goal_idxs, the default) |
+        # uniform (future_goal_idxs: the row's own s' and every later state of the trajectory,
+        # equally likely). uniform ignores goal_discount, goal_random_frac and goal_cur_frac.
+        self.goal_sampling = 'geometric'
+        # psmgoal actor_value arms: emit a same-trajectory uniform-future goal state per row
+        # as batch['fb_goals'] (`future_goal_idxs`). Off by default.
+        self.return_fb_goals = False
+        # psmgoal bootstrap_source=data (2026-10-03): emit row i+1's latent as
+        # batch['next_noise_preimage'] (the move the data made at s'_i). Rows are then drawn
+        # by `_next_preimage_rows`: no trajectory end (terminals > 0, no next row) and no row
+        # whose next latent is invalid. Off by default.
+        self.return_next_preimage = False
         # Cache for _valid_preimage_rows, keyed on the size it was computed at (a
         # ReplayBuffer grows). -1 means "not computed yet".
         self._preimage_valid_rows = None
         self._preimage_rows_size = -1
+        self._next_preimage_rows_cache = None
+        self._next_preimage_rows_size = -1
 
         # Compute terminal and initial locations.
         self.terminal_locs = np.nonzero(self['terminals'] > 0)[0]
@@ -178,8 +215,34 @@ class Dataset(FrozenDict):
             self._preimage_rows_size = self.size
         return self._preimage_valid_rows
 
+    def _next_preimage_rows(self):
+        """Rows i that have a next row i+1 in the same trajectory with a real latent.
+
+        Excluded: the last row of the buffer and every row with terminals > 0 (a trajectory
+        end: row i+1 starts another trajectory, so its latent is not the move made at s'_i);
+        rows whose own latent is invalid (as `_valid_preimage_rows`); and rows whose NEXT
+        latent is invalid (its stored value is 0, a wrong latent, not a missing one).
+        """
+        if self._next_preimage_rows_size != self.size:
+            from utils.flow_inversion import PREIMAGE_VALID_KEY  # local: avoids a cycle
+            n = self.size
+            ok = np.asarray(self._dict['terminals'][:n]) <= 0
+            ok[n - 1] = False
+            valid = self._dict.get(PREIMAGE_VALID_KEY)
+            if valid is not None:
+                v = np.asarray(valid[:n]) > 0.5
+                ok &= v
+                ok[:-1] &= v[1:]
+            self._next_preimage_rows_cache = np.nonzero(ok)[0]
+            self._next_preimage_rows_size = n
+        return self._next_preimage_rows_cache
+
     def get_random_idxs(self, num_idxs):
         """Return `num_idxs` random indices."""
+        if self.return_next_preimage:
+            # Same one randint draw as the valid-rows branch below, over a smaller row set.
+            rows = self._next_preimage_rows()
+            return rows[np.random.randint(rows.size, size=num_idxs)]
         if self.return_preimage_noise:
             rows = self._valid_preimage_rows()
             if rows is not None:
@@ -223,9 +286,16 @@ class Dataset(FrozenDict):
             # WARNING: This is incorrect at the end of the trajectory. Use with caution.
             result['next_actions'] = self._dict['actions'][np.minimum(idxs + 1, self.size - 1)]
         if self.return_goals:
-            goal_idxs, _ = hindsight_goal_idxs(idxs, self.terminal_locs, self.size,
-                                               self.goal_discount, self.goal_random_frac)
+            if str(self.goal_sampling) == 'uniform':
+                goal_idxs = future_goal_idxs(idxs, self.terminal_locs, self.size)
+            else:
+                goal_idxs, _ = hindsight_goal_idxs(idxs, self.terminal_locs, self.size,
+                                                   self.goal_discount, self.goal_random_frac,
+                                                   cur_frac=self.goal_cur_frac)
             result['goals'] = self._dict['next_observations'][goal_idxs]
+        if self.return_fb_goals:
+            fb_idxs = future_goal_idxs(idxs, self.terminal_locs, self.size)
+            result['fb_goals'] = self._dict['next_observations'][fb_idxs]
         if self.return_preimage_noise:
             # u for this transition: the exact backward-ODE preimage, or a draw from its
             # stored EM mixture (the point-vs-mixture ablation).
@@ -237,6 +307,19 @@ class Dataset(FrozenDict):
                     result['noise_preimage_mean'],
                     result['noise_preimage_cov'],
                     result['noise_preimage_weights'],
+                )
+        if self.return_next_preimage:
+            # u_{i+1}: the latent of the move the data made at s'_i. `get_random_idxs` only
+            # draws rows with a same-trajectory next row; the clip guards explicit idxs.
+            nxt = np.minimum(np.asarray(idxs) + 1, self.size - 1)
+            if self.preimage_point_mode:
+                result['next_noise_preimage'] = self._dict['noise_preimage_point'][nxt]
+            else:
+                from utils.flow_inversion import sample_preimage_noise  # local: avoids a cycle
+                result['next_noise_preimage'] = sample_preimage_noise(
+                    self._dict['noise_preimage_mean'][nxt],
+                    self._dict['noise_preimage_cov'][nxt],
+                    self._dict['noise_preimage_weights'][nxt],
                 )
         return result
 

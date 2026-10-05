@@ -56,7 +56,7 @@ main() {
   shift 4
   EXTRA=("$@")
 
-  case "$MODE" in psmflow|psmgoal|bc) ;; *) echo "unknown mode: $MODE" >&2; exit 1 ;; esac
+  case "$MODE" in psmflow|psmgoal|f_psmgoal2p|bc) ;; *) echo "unknown mode: $MODE" >&2; exit 1 ;; esac
 
   # Paths default to midi-01, where every earlier eval500 JSON was produced. On another
   # machine (KISSKI/SLURM) override them in the environment rather than editing this file:

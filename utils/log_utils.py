@@ -86,7 +86,7 @@ def setup_wandb(
     """Set up Weights & Biases for logging."""
     if mode is None:
         mode = os.environ.get('WANDB_MODE', 'online')
-    wandb_output_dir = tempfile.mkdtemp()
+    wandb_output_dir = os.environ.get('WANDB_DIR') or tempfile.mkdtemp()
     tags = [group] if group is not None else None
 
     init_kwargs = dict(
