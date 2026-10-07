@@ -18,7 +18,180 @@ hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RES
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
 Branch: `feat/inversion-integration` · Machine: `kisski` (GWDG, SLURM/H100) · prior: `midi-01` (UT CS)
-Date: **2026-10-05** (latest) · prior: 2026-09-23, 2026-09-17, 2026-09-16, 2026-09-15, 2026-09-14, 2026-09-11, 2026-09-10, 2026-09-09, 2026-09-08, 2026-09-07, 2026-09-06, 2026-09-05, 2026-09-04, 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+Date: **2026-10-07** (latest) · prior: 2026-10-05, 2026-09-23, 2026-09-17, 2026-09-16, 2026-09-15, 2026-09-14, 2026-09-11, 2026-09-10, 2026-09-09, 2026-09-08, 2026-09-07, 2026-09-06, 2026-09-05, 2026-09-04, 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+
+---
+
+## 2026-10-07 — psmgoal softmax: joint actor with point value reaches 0.80 on cube (2026-10-05..07)
+
+Hand-over entry for running on another cluster. Full tables (every cube arm at 250k and 500k,
+actor statistics, antmaze, what fails): `docs/results/2026-10-07-psmgoal-softmax.md`. All numbers:
+cube-single-play five-task mean, 500 episodes per task, seeds 0 1 2. BC control 0.111 (cube),
+0.07-0.09 (antmaze). Aggregated with `scripts/campaign_2026-10/agg_results.py`.
+
+### Results 10-05..07 (readout hgoal_each = best of 64 prior draws by M's share, per-goal h)
+
+| group | change from `psmgoal_ja_fbc3_sh_cube` | hgoal_each 250k / 500k | actor alone 250k / 500k |
+|---|---|---|---|
+| `psmgoal_ja_fbc3_pt_cube` | actor value = share on the goal (`actor_value_kind=point`) | **0.794 / 0.804** | 0.108 / 0.108 |
+| `psmgoal_ja_fbc03_sh_cube` | `fb_bc_coeff=0.3` | 0.758 / 0.706 | 0.132 / 0.117 |
+| `psmgoal_ja_fbc3_sh_cube` | (reference) | 0.669 / 0.655 | 0.106 / 0.103 |
+| `psmgoal_ja_dsrl_sh_cube` | DSRL actor, no BC term | 0.014 / 0.062 | 0.041 / 0.088 |
+| `psmgoal_ja_fbc0_sh_cube` (2 seeds) | `fb_bc_coeff=0.0` | 0.021 / 0.033 | 0.001 / 0.003 |
+
+| group | hgoal_each 250k / 500k | lp 250k / 500k |
+|---|---|---|
+| `psmgoal_db_sm_cube` (data bootstrap, softmax, geometric goals) | 0.619 / 0.646 | 0.26 (1 seed) / - |
+| `psmgoal_db_sq_cube` (data bootstrap, squared, geometric goals) | 0.602 / 0.520 | 0.000 / - |
+| `psmgoal_dbu_sm_cube` (uniform goals, softmax) | 0.506 / 0.501 | 0.285 / - |
+| `psmgoal_dbu_sq_cube` (uniform goals, squared) | 0.479 / 0.448 | 0.000 / - |
+| `psmgoal_dbo_sq_cube` (data bootstrap, squared, `ortho_coef=1.0`) | 0.068 / 0.039 | 0.031 / 0.061 |
+
+- The best agent is `psmgoal_ja_fbc3_pt_cube`: 0.794 ± 0.134 / 0.804 ± 0.104 (95% interval over
+  seeds). Its interval overlaps those of bc 0.3 shaped and bc 3 shaped.
+- The pre-launch expectation said the point value would score below the shaped value. It scored above.
+- The actor acting alone is at BC level (0.10-0.13) in every arm. The gain appears only when its
+  action is used as the bootstrap and acting is best-of-64 by the measure.
+- Actors without a BC term collapse (mean abs u 1.9-2.9 vs 0.8 for a prior draw).
+- Uniform goals score below geometric goals. Orthonormality raises phi's rank to 128 and acting
+  falls to 0.04-0.07. phi's rank is 1.0-1.14 in every other run.
+- Antmaze: every arm at BC level (0.03-0.12); no new antmaze run in 10-05..07.
+
+### Next runs, in order
+
+Common to runs 1-4: the training overrides of `psmgoal_ja_fbc3_pt_cube`,
+
+```
+BEST="agent.policy_index=goal agent.bootstrap_source=actor agent.train_actor=true agent.actor_input=goal agent.goal_random_frac=0.0 agent.goal_cur_frac=0.0 agent.goal_sampling=geometric agent.measure_loss=softmax agent.acting=distill agent.eval_redistill=false agent.eval_goal_source=relabel agent.actor_kind=flowbc agent.fb_bc_coeff=3.0 agent.actor_value_kind=point"
+```
+
+cube, 500k steps, checkpoints at 250k and 500k, 3 seeds. Scoring readouts at both checkpoints,
+five tasks, 500 episodes: `hgoal_each` (`agent.coef_source=hgoal_each agent.acting=gpi`) and,
+where an actor exists, `actor_rel` (`agent.acting=distill agent.eval_redistill=false agent.eval_goal_source=relabel`).
+Skip `lp`: each lp eval spends 25-60 min on inference and it has scored below h(goal) on every run.
+
+**1. Best-of-N bootstrap, no actor.** Purpose: test whether the measure needs the actor at all,
+or only a bootstrap action that scores well under the target measure.
+- Config: `$BEST` with `agent.train_actor=false agent.bootstrap_source=argmax agent.bootstrap_n=8`.
+- NEEDS CODE (`agents/psmgoal.py`):
+  - add `"argmax"` to `BOOTSTRAP_SOURCES`; add `bootstrap_n: 8` to `get_config()` and
+    `configs/agent/psmgoal.yaml`;
+  - in `_select_u_next`, before the `train_actor` branch: draw N clipped prior latents
+    u_n ~ clip(N(0, I), +-u_clip) at each s'_i (shape (N, B, d_a), a fixed `fold_in` key);
+    for each n compute the target-network share
+    p_n,i = exp(M_bar(s'_i, u_n,i, g_i)) / (exp(M_bar(s'_i, u_n,i, g_i)) + sum_j exp(M_bar(s'_i, u_n,i, s'_j)))
+    with M_bar read at `self.target_basis` and w_i = h(g_i) from `self.target_w_star`
+    (`self._coef(z, goals, target=True)`), `measure_temp` as the temperature, columns = the
+    batch's next states; this is the same quantity as `actor_value(..., point)` but on target
+    params; return u'_i = u_{argmax_n p_n,i}, stop-gradded. For `measure_loss=squared` use
+    M_bar(s'_i, u_n,i, g_i) directly;
+  - relax the asserts at `__init__` (lines ~271-288) so `bootstrap_source=argmax` is allowed with
+    `policy_index=goal` and `train_actor=false`; `main.py` needs no `fb_goals` when no actor trains;
+  - one test in `tests/test_psmgoal_fbtrick_defaults_off.py`: default stays `actor`, and with
+    `bootstrap_n=1` the output is a clipped prior draw.
+- Cost: N x the target mesh per step (8 x 256 x 257 target phi/b evaluations instead of
+  256 x 257), forward only. Expect the step to take about 2-3x longer.
+- Expected: if hgoal_each is within the seed interval of 0.80, the actor is not needed for the
+  bootstrap. If it is lower, the actor's BC-anchored small step matters: the plain argmax picks
+  latents the target measure overestimates.
+
+**2. BC 0.3 with the point value.** Purpose: combine the two changes that each raised the score.
+- Config: `$BEST` with `agent.fb_bc_coeff=0.3`. Group `psmgoal_ja_fbc03_pt_cube`. No code.
+- Expected: hgoal_each >= 0.80 at 250k and 500k; actor_rel 0.10-0.13; mean norm of Delta above
+  the bc 3 run's 0.03-0.05.
+
+**3. Actor as the proposal at test time** (eval only, on the existing `psmgoal_ja_fbc3_pt_cube`
+checkpoints). Purpose: draw the 64 candidates from the actor (64 eps through u = eps + Delta(s, g, eps))
+instead of from the prior, then pick the best by M's per-goal share.
+- `acting=sfbc` does NOT do this. `select_latent_sfbc` draws from the tanh-Gaussian `self.actor`
+  at `eval_w_star`, not from the flowbc `delta` net, does not feed a goal, and scores by the raw
+  goal-mean of M instead of the share.
+- NEEDS CODE: in `select_latent_sfbc` (or a new `acting=flowbc_gpi`), when `actor_kind=flowbc`:
+  eps_k ~ clip(N(0, I)), k = 1..64; goal g_k = `eval_goals[k mod 32]` (the 32 rewarding goals);
+  u_k = `flowbc_latent(obs, g_k, eps_k)[0]`; score with
+  `_hgoal_each_score(obs, u, self.eval_goals, self.eval_goal_w, self.eval_ref)`; return the
+  argmax. Eval with `agent.coef_source=hgoal_each agent.acting=<new>` so `infer_eval_goals` fills
+  `eval_goal_w`; add the dispatch in `sample_actions`.
+- Expected: within 0.05 of 0.80. The actor's Delta has mean norm 0.03-0.05 against a prior draw
+  of norm about 2, so its candidates are close to prior draws.
+
+**4. BC-weight sweep with the point value.** Purpose: test whether the size of the nudge Delta
+explains the gain.
+- Config: `$BEST` with `agent.fb_bc_coeff=1.0` (group `psmgoal_ja_fbc1_pt_cube`) and
+  `agent.fb_bc_coeff=10.0` (group `psmgoal_ja_fbc10_pt_cube`). No code.
+- Expected: mean norm of Delta falls as the BC weight rises. If the gain comes from the nudge,
+  hgoal_each at bc 10 falls toward the data-bootstrap level (0.62-0.65) and bc 1 sits at or above
+  0.80. If all three BC weights score alike, the nudge size does not explain it.
+
+**5. Antmaze with the best cube config.** Purpose: test whether the cube gain transfers.
+- Config: `$BEST` with `agent.goal_discount=0.99 agent.fb_hit_spec=0:2:0.5`; launch with
+  `ENVKEY=antmaze` (the sbatch sets `agent.discount=0.99`), `PREIMAGES=$PSM_DATA/preimages/antmaze-medium-navigate.npz`.
+  Group `psmgoal_ja_fbc3_pt_antmaze`. No code. `fb_hit_spec` is read only by the shaped value;
+  set it anyway so the run's `flags.json` matches the gc antmaze runs. Eval with `ENVKEY=antmaze`
+  and `--time=06:00:00`.
+- Expected: at BC level (0.07-0.12), as every antmaze arm so far. The softmax share on the own
+  next state is 0.08-0.09 on antmaze vs 0.45 on cube.
+- Option (NOT implemented): s+ = the ant's (x, y) as the measure's future-state input. Add a key
+  `splus_slice` (e.g. `"0:2"`) that slices the goal and column states before they enter phi and b
+  (`mesh_M`, `mesh_phi_b`, `M`, and h's input), in training (batch goals, next-state columns,
+  actor goals) and at eval (`eval_goals`, `eval_ref`, `eval_actor_goal`). Same idea as the untested
+  cube s+ = cube position (`19:22`).
+
+### How to launch (copy and edit the two path lines at the top of each script)
+
+Training, one job per arm with three seeds on one GPU (`scripts/campaign_2026-10/ja_launch.sh`):
+
+```
+COMMON="PSM_REPO=$REPO,PSM_DATA=$PSM_DATA,OGBENCH_DATASET_DIR=$OGBENCH_DATASET_DIR,ENVKEY=cube,PREIMAGES=$PSM_DATA/preimages/cube-single-play.npz,STEPS=500000,EVAL_INT=50000,EVAL_EPS=50,LOG_INT=5000,SAVE_INT=250000"
+sbatch --parsable --partition=<partition> --account=<account> --time=24:00:00 \
+  --job-name=${GROUP}_p3 --output=$PSM_DATA/logs/slurm/%x-%j.out --error=$PSM_DATA/logs/slurm/%x-%j.err \
+  --export="ALL,$COMMON,SEEDS=0 1 2,GROUP=$GROUP,EXTRA=$OVERRIDES" $REPO/scripts/slurm/train_psmflow_packed.sbatch
+```
+
+One seed per job: `scripts/slurm/train_psmflow.sbatch` with `SEED=$s` in place of `SEEDS`.
+Smoke the exact path for 200 steps first (`scripts/campaign_2026-10/ja_smoke.sh`) and re-read
+each run's `flags.json` after launch.
+
+Eval: copy `scripts/campaign_2026-10/ja_eval_watcher_cube.sh`, set its arm list, `TOTAL`, and the
+`OV` readouts. It polls `$PSM_DATA/exp/PSMFLows/<group>/sd00*/params_<step>.pkl` and submits one
+`scripts/slurm/eval500_packed.sbatch` job per (run, step, readout), which runs the five tasks
+in one allocation and writes `$PSM_DATA/logs/<group>_<sd>_<step>_<readout>_task<t>.json`. Run the
+watcher in a tmux session. Aggregate: `python scripts/campaign_2026-10/agg_results.py [<group substring>]`
+(edit `LOGS` at its top; its pattern covers groups named `psmgoal_{gc,db,dbu,dbo,ja}_*_{cube,antmaze}`).
+
+Cluster lessons (KISSKI): fair-share priority fell after about 300 eval jobs in a few days; the
+packed eval sbatch (5 tasks per job) cuts the job count by 5x. Give eval jobs `--nice=600` so they
+queue behind training. Lagrangian (`lp`) evals take 25-60 min of inference each and are the least
+informative readout; leave them out.
+
+### Resume on another cluster
+
+1. Clone the repo, branch `feat/inversion-integration`, set `PSM_DATA`, `PSM_REPO`,
+   `OGBENCH_DATASET_DIR`, `MUJOCO_GL=egl`, `HF_TOKEN`.
+2. Preimages and flows: `python scripts/hf_preimages.py pull --name cube-single-play --dest $PSM_DATA --with-flow`
+   (and `--name antmaze-medium-navigate` for run 5). The pull repairs the sidecar path.
+3. Checkpoints (`params_*.pkl`, `flags.json`, `train.csv`, `eval.csv`) from the HF dataset
+   `amsks/psmflows-preimages`, unpacked into `$PSM_DATA/exp/PSMFLows/`:
+   - `runs/psmgoal_ckpts_2026-10-05.tar.gz`: the groups of the 10-05 entry, including
+     `psmgoal_ja_fbc3_sh_cube`, `psmgoal_ja_fbc0_sh_cube`, `psmgoal_dbu_sq_cube` seed 0;
+   - `runs/psmgoal_ckpts_2026-10-07.tar.gz`: `psmgoal_ja_fbc3_pt_cube`, `psmgoal_ja_fbc03_sh_cube`,
+     `psmgoal_ja_dsrl_sh_cube`, `psmgoal_dbu_sq_cube` seeds 1 2, `psmgoal_dbu_sm_cube`, `psmgoal_dbo_sq_cube`.
+   Eval JSONs and figures, unpacked into `$PSM_DATA/logs/`: `runs/psmgoal_eval_logs_2026-10-07.tar.gz`
+   (all of `$PSM_DATA/logs/*.json` and `figures/` as of 10-07; supersedes the 10-05 logs tarball).
+   ```
+   for f in psmgoal_ckpts_2026-10-05 psmgoal_ckpts_2026-10-07 psmgoal_eval_logs_2026-10-07; do
+     python -c "from huggingface_hub import hf_hub_download as d; print(d('amsks/psmflows-preimages', 'runs/$f.tar.gz', repo_type='dataset', local_dir='$PSM_DATA'))"
+   done
+   mkdir -p $PSM_DATA/exp/PSMFLows $PSM_DATA/logs
+   tar -xzf $PSM_DATA/runs/psmgoal_ckpts_2026-10-05.tar.gz -C $PSM_DATA/exp/PSMFLows
+   tar -xzf $PSM_DATA/runs/psmgoal_ckpts_2026-10-07.tar.gz -C $PSM_DATA/exp/PSMFLows
+   tar -xzf $PSM_DATA/runs/psmgoal_eval_logs_2026-10-07.tar.gz -C $PSM_DATA/logs
+   ```
+   Each checkpoint's `flags.json` records `agent.flow_ckpt_path` and `agent.preimage_path` on
+   KISSKI (`/mnt/home/amohan/psm-data/...`); for eval on another machine pass the local paths
+   as overrides or symlink that prefix.
+4. The scripts in `scripts/campaign_2026-10/` hardcode `PSM_DATA`, `REPO`, the partition
+   `kisski-inference` and the account `general`; edit those lines.
 
 ---
 

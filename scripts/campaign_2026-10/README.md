@@ -1,10 +1,10 @@
-# Campaign scripts, 2026-10-01..05
+# Campaign scripts, 2026-10-01..07
 
 Copies of `$PSM_DATA/gc_scripts/` as used on the KISSKI SLURM cluster. Logic unchanged. Every
 script hardcodes `PSM_DATA=/mnt/home/amohan/psm-data` and `REPO=/mnt/home/amohan/git/Austin/PSMFLows`
 (the `PSM_REPO` checkout) at its top; edit those two lines for another machine. All of them call
 `sbatch` with `--partition=kisski-inference --account=general`. Results and expectations are
-summarised in `docs/HANDOFF.md` (2026-10-05 entry); the pre-launch expectation files and job
+summarised in `docs/HANDOFF.md` (2026-10-05 and 2026-10-07 entries) and `docs/results/2026-10-07-psmgoal-softmax.md`; the pre-launch expectation files and job
 lists are in `docs/campaign_2026-10/`.
 
 | script | what it does | groups |
@@ -20,7 +20,7 @@ lists are in `docs/campaign_2026-10/`.
 | `ja_arms_extra.txt` | the fifth arm added 2026-10-05 (`fb_bc_coeff=0.3`) | `psmgoal_ja_fbc03_sh_cube` |
 | `ja_launch.sh` | submits the joint-actor arms, 3 seeds, packed (3 seeds per GPU) or one job per seed | as above |
 | `ja_smoke.sh` | 200-step smoke of the joint-actor launch path and its eval readout | as above |
-| `ja_eval_watcher_cube.sh` | eval500 readouts hgoal_each and actor_rel | as above |
+| `ja_eval_watcher_cube.sh` | eval500 readouts hgoal_each and actor_rel, one packed job (five tasks) per (run, step, readout) | as above plus `psmgoal_ja_fbc03_sh_cube` |
 | `agg_results.py` | prints the five-task mean per (group, step, readout) from `$PSM_DATA/logs/*.json` | all groups above |
 
 Training jobs go through `scripts/slurm/train_psmflow.sbatch` (one seed) or
