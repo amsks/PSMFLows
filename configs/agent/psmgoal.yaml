@@ -133,7 +133,11 @@ eval_goal_source: relabel  # relabel | env
 # amortized (hgoal) or lp as above, or coef_source=hgoal_each (eval only): each of the k_goals
 # goals is scored with its own h(g_j) -- squared: mean_j M(s,u,g_j; h(g_j)); softmax: for each
 # j the share of g_j among [g_j + reference states] at w = h(g_j), averaged over j.
-bootstrap_source: actor    # actor | data
+# bootstrap_source=argmax (2026-10-07; needs policy_index=goal, train_actor=false): u' is the best
+# of bootstrap_n clipped prior draws at s', scored by the target measure on the row's goal (softmax:
+# the share of g among [g + the batch's next states]). No actor; bootstrap_n=1 is a plain BC draw.
+bootstrap_source: actor    # actor | data | argmax
+bootstrap_n: 8             # bootstrap_source=argmax: prior draws scored per row
 
 # --- 2026-10-04 ablations (OFF by default) ---
 # goal_sampling (policy_index=goal): geometric = the hindsight goal at offset ~
