@@ -16,7 +16,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from agents import agents
 from envs.env_utils import make_env_and_datasets
-from utils.datasets import Dataset, ReplayBuffer, add_skill_targets, apply_reward_override
+from utils.datasets import Dataset, ReplayBuffer, add_skill_targets, apply_reward_override, apply_row_drop
 from utils.evaluation import evaluate, flatten
 from utils.flax_utils import restore_agent, save_agent
 from utils.log_utils import CsvLogger, get_exp_name, get_wandb_video, setup_wandb
@@ -212,6 +212,15 @@ def main(cfg: DictConfig):
         _r_after = np.asarray(train_dataset['rewards'], np.float64)
         print(f'reward override from {_reward_override}: rewards mean/std '
               f'{_r_before.mean():.4f}/{_r_before.std():.4f} -> {_r_after.mean():.4f}/{_r_after.std():.4f}')
+
+    # Row drop (dataset.drop_rows_path, 2026-10-08 stitching test). After the reward override,
+    # which is written against the full row order.
+    _drop_rows = (cfg.get('dataset') or {}).get('drop_rows_path')
+    if _drop_rows:
+        _n_before = len(train_dataset['observations'])
+        train_dataset = apply_row_drop(train_dataset, _drop_rows)
+        print(f'row drop from {_drop_rows}: {_n_before} -> {len(train_dataset["observations"])} rows, '
+              f'{int(np.sum(np.asarray(train_dataset["terminals"]) > 0))} trajectory ends')
 
     # Initialize agent.
     random.seed(cfg.seed)

@@ -30,6 +30,27 @@ def apply_reward_override(dataset, path):
     return dataset
 
 
+def apply_row_drop(dataset, path):
+    """Keep only the rows where the `keep` array of the npz at `path` is True.
+
+    `cfg.dataset.drop_rows_path` (tools/make_stitch_mask.py): the mask is row-aligned with the
+    training set. Every row-aligned array is subset; each kept row whose next row is dropped
+    becomes a trajectory end (terminals = 1), so hindsight goals never span a cut. Its own
+    next_observations is its true next state and stays. Returns a plain dict.
+    """
+    with np.load(path, allow_pickle=False) as z:
+        keep = np.asarray(z['keep'], bool).reshape(-1)
+    size = get_size(dataset)
+    assert keep.shape[0] == size, f'row mask {path!r} has {keep.shape[0]} rows but the dataset has {size}'
+    out = {}
+    for k, v in dict(dataset).items():
+        v = np.asarray(v)
+        out[k] = v[keep] if v.ndim > 0 and v.shape[0] == size else v
+    cut = np.r_[~keep[1:], False][keep]
+    out['terminals'] = np.maximum(out['terminals'], cut.astype(out['terminals'].dtype))
+    return out
+
+
 @partial(jax.jit, static_argnames=('padding',))
 def random_crop(img, crop_from, padding):
     """Randomly crop an image.

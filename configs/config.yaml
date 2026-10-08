@@ -53,3 +53,6 @@ dataset:
   # (tools/relabel_reward_rhat.py writes r_hat = phi(s')^T w from a frozen checkpoint).
   # The length must match; nothing else in the dataset changes. null = the dataset's own.
   reward_override_path: null
+  # Keep only the rows where this npz's `keep` mask is True (tools/make_stitch_mask.py);
+  # kept rows before a cut become trajectory ends. null = every row.
+  drop_rows_path: null
