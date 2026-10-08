@@ -43,3 +43,6 @@ wandb/
 # JSON belong in the sweep directory under $PSM_DATA/hpo, not in the repo.
 smac3_output/
 hpo_trial.json
+
+# The paper draft is kept out of the repository.
+PAPER/ICLR/
