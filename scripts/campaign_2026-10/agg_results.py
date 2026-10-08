@@ -6,7 +6,7 @@ import re
 import sys
 
 LOGS = '/mnt/home/amohan/psm-data/logs'
-PAT = re.compile(r'(psmgoal_(?:gc|db|dbu|dbo|ja|sm_code)_[a-z0-9_]+?_(?:cube|antmaze))_(sd\d+)_(\d+)_([a-z_0-9]+?)_task(\d)\.json$')
+PAT = re.compile(r'(psmgoal_(?:gc|db|dbu|dbo|ja|sm_code)_[A-Za-z0-9_]+?_(?:cube|antmaze))_(sd\d+)_(\d+)_([a-z_0-9]+?)_task(\d)\.json$')
 
 
 def succ(p):
