@@ -32,7 +32,7 @@ set -euo pipefail
 
 : "${PSM_REPO:?PSM_REPO=<path to the PSMFLows checkout> required}"
 : "${PSM_DATA:?PSM_DATA=<scratch dir for the flow> required}"
-: "${ENVKEY:?ENVKEY=cube|antmaze|pointmaze|scene required}"
+: "${ENVKEY:?ENVKEY=cube|cubedouble|antmaze|pointmaze|scene required}"
 SEED="${SEED:-0}"
 STEPS="${STEPS:-500000}"
 EPOCH="${EPOCH:-$STEPS}"
@@ -52,6 +52,7 @@ case "$ENVKEY" in
   antmaze)   ENV_NAME=antmaze-medium-navigate-singletask-v0;        FLOW=antmaze-medium-navigate ;;
   pointmaze) ENV_NAME=pointmaze-medium-navigate-singletask-task1-v0; FLOW=pointmaze-medium-navigate ;;
   scene)     ENV_NAME=scene-play-singletask-v0;                     FLOW=scene-play ;;
+  cubedouble) ENV_NAME=cube-double-play-singletask-v0;             FLOW=cube-double-play ;;
   *) echo "unknown ENVKEY: $ENVKEY" >&2; exit 1 ;;
 esac
 

@@ -247,17 +247,23 @@ def run(cfg):
 
     c = agent.config
     K, d_a, u_clip = int(c["gpi_num_u"]), int(c["action_dim"]), float(c["u_clip"])
+    hgoal_each = str(c.get("coef_source", "lp")) == "hgoal_each"
 
     @jax.jit
     def score(ag, obs, key):
         # select_latent's exact candidate draw and score (same ops, same order).
         u_cand = jnp.clip(jax.random.normal(key, (K, d_a)), -u_clip, u_clip)
         o = jnp.broadcast_to(obs, (K, obs.shape[-1]))
-        w = jnp.broadcast_to(ag.eval_w_star, (K, ag.eval_w_star.shape[0]))
-        q = jnp.mean(ag.mesh_M(o, u_cand, ag.eval_goals, w), axis=1)
-        phi, b = ag.mesh_phi_b(o, u_cand, ag.eval_goals)
-        q_phiw = jnp.mean((phi * ag.eval_w_star[None, None, :]).sum(-1), axis=1)
-        q_b = jnp.mean(b, axis=1)
+        if hgoal_each:
+            # coef_source=hgoal_each: select_latent's per-goal score; no phi^T w / b split
+            q = ag._hgoal_each_score(o, u_cand, ag.eval_goals, ag.eval_goal_w, ag.eval_ref)
+            q_phiw = q_b = jnp.zeros_like(q)
+        else:
+            w = jnp.broadcast_to(ag.eval_w_star, (K, ag.eval_w_star.shape[0]))
+            q = jnp.mean(ag.mesh_M(o, u_cand, ag.eval_goals, w), axis=1)
+            phi, b = ag.mesh_phi_b(o, u_cand, ag.eval_goals)
+            q_phiw = jnp.mean((phi * ag.eval_w_star[None, None, :]).sum(-1), axis=1)
+            q_b = jnp.mean(b, axis=1)
         idx = jnp.argmax(q)
         acts = ag.decode(o, u_cand)                                   # all 64 decodes
         a_star = ag.decode(obs[None], u_cand[idx][None])[0]           # sample_actions' decode

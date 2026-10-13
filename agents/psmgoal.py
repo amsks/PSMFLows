@@ -173,6 +173,13 @@ ACTOR_KINDS = ("tanh", "flowbc", "dsrl")
 #: measure over the batch's next states; point = M(s,u,g) at the actor goal itself
 #: (softmax: the share of g among [g + the batch's next states]).
 ACTOR_VALUE_KINDS = ("shaped", "point")
+#: actor_goal_source: the goal the goal actor is trained at. future = a uniformly drawn later state
+#: of the row's trajectory (batch['fb_goals']); measure = the row's measure goal batch['goals'].
+ACTOR_GOAL_SOURCES = ("future", "measure")
+#: bootstrap_switch (actor_kind=flowbc): when the bootstrap latent is one clipped prior draw (a BC
+#: draw) instead of the actor's latent. prior_then_actor = before bootstrap_switch_step training
+#: steps; actor_then_prior = from that step on. The actor trains throughout.
+BOOTSTRAP_SWITCHES = ("none", "prior_then_actor", "actor_then_prior")
 #: fold_in constant of the fresh prior draw eps the flowbc bootstrap uses at (s', g).
 FLOWBC_BOOT_KEY = 103
 #: name of the flowbc actor's output layer in its params (zero-initialised).
@@ -317,6 +324,18 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                 "actor_kind=dsrl has no BC term: set fb_bc_coeff=0"
         if actor_value_kind == "point":
             assert policy_index == "goal", "actor_value_kind=point reads M(s,u,g) at w = h(g): needs policy_index=goal"
+        # design-decision ablations (2026-10-09)
+        actor_goal_source = str(config.get("actor_goal_source", "future"))
+        assert actor_goal_source in ACTOR_GOAL_SOURCES, f"actor_goal_source must be one of {ACTOR_GOAL_SOURCES}"
+        bootstrap_switch = str(config.get("bootstrap_switch", "none"))
+        assert bootstrap_switch in BOOTSTRAP_SWITCHES, f"bootstrap_switch must be one of {BOOTSTRAP_SWITCHES}"
+        if bootstrap_switch != "none":
+            assert actor_kind == "flowbc" and str(config.get("bootstrap_source", "actor")) == "actor", \
+                "bootstrap_switch swaps the flowbc actor's bootstrap latent: needs actor_kind=flowbc, bootstrap_source=actor"
+        if str(config["acting"]) == "flowbc_gpi":
+            assert actor_kind == "flowbc", "acting=flowbc_gpi draws its candidates from the flowbc actor"
+            assert str(config.get("coef_source", "lp")) == "hgoal_each", \
+                "acting=flowbc_gpi scores candidates per goal: needs coef_source=hgoal_each"
         rng = jax.random.PRNGKey(seed)
         rng, r_b, r_c, r_l, r_a, r_vf, r_os = jax.random.split(rng, 7)
         action_dim = ex_actions.shape[-1]
@@ -580,7 +599,16 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                     # the flowbc actor at (s', g) with a fresh prior draw eps
                     eps = jax.random.normal(jax.random.fold_in(self.rng, FLOWBC_BOOT_KEY),
                                             (next_obs.shape[0], int(c["action_dim"])))
-                    return self.flowbc_latent(next_obs, goals, eps)[0]
+                    u_actor = self.flowbc_latent(next_obs, goals, eps)[0]
+                    switch = str(c.get("bootstrap_switch", "none"))
+                    if switch == "none":
+                        return u_actor
+                    # the BC draw: the same eps, clipped, without the actor's delta
+                    u_prior = jnp.clip(eps, -c["u_clip"], c["u_clip"])
+                    # basis.step starts at 1 and counts updates, so it equals main.py's step
+                    early = self.basis.step < int(c["bootstrap_switch_step"])
+                    use_prior = early if switch == "prior_then_actor" else jnp.logical_not(early)
+                    return jnp.where(use_prior, u_prior, u_actor)
                 # tanh and dsrl: the tanh-Gaussian actor's mode
                 return self.actor_backup(next_obs, goals)
             return self.actor_backup(next_obs, self._coef(z, goals, target=True))
@@ -978,7 +1006,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         c = self.config
         obs = jnp.asarray(batch["observations"])
         pool = jnp.asarray(batch["next_observations"])
-        goals = jnp.asarray(batch["fb_goals"])
+        goals = jnp.asarray(batch["goals"] if str(c.get("actor_goal_source", "future")) == "measure"
+                            else batch["fb_goals"])
         noise = jax.random.normal(jax.random.fold_in(self.rng, 102),
                                   (obs.shape[0], int(c["action_dim"])))
         u_data = jnp.clip(jnp.asarray(batch["noise_preimage"]), -c["u_clip"], c["u_clip"])
@@ -1320,6 +1349,21 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         q = jnp.mean(self.mesh_M(obs, u_cand, self.eval_goals, w), axis=1)   # (K,)
         return u_cand[jnp.argmax(q)]
 
+    def select_latent_flowbc_gpi(self, observations, seed):
+        """acting=flowbc_gpi (2026-10-09, eval only): acting=gpi with the candidates drawn from the
+        flowbc actor instead of the prior. Candidate k: eps_k a clipped prior draw, fed the goal
+        g_k = eval_goals[k mod K_g]; u_k = clip(eps_k + delta(s, g_k, eps_k)). Scored as acting=gpi
+        under coef_source=hgoal_each (`_hgoal_each_score`); the argmax is returned."""
+        c = self.config
+        assert observations.ndim == 1, "select_latent_flowbc_gpi acts on a single observation"
+        K, d_a = int(c["gpi_num_u"]), c["action_dim"]
+        eps = jnp.clip(jax.random.normal(seed, (K, d_a)), -c["u_clip"], c["u_clip"])
+        obs = jnp.broadcast_to(observations, (K, observations.shape[-1]))
+        g = self.eval_goals[jnp.arange(K) % self.eval_goals.shape[0]]
+        u_cand = self.flowbc_latent(obs, g, eps)[0]
+        q = self._hgoal_each_score(obs, u_cand, self.eval_goals, self.eval_goal_w, self.eval_ref)
+        return u_cand[jnp.argmax(q)]
+
     @jax.jit
     def sample_actions(self, observations, seed=None, temperature=1.0):
         """The deployed action. acting=gpi decodes the argmax prior draw; acting=distill samples
@@ -1337,6 +1381,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                 u_star = self.config["u_clip"] * jnp.tanh(mu[0])
         elif self.config["acting"] == "sfbc":
             u_star = self.select_latent_sfbc(observations, seed)
+        elif self.config["acting"] == "flowbc_gpi":
+            u_star = self.select_latent_flowbc_gpi(observations, seed)
         else:
             u_star = self.select_latent(observations, seed)
         return self.decode(observations[None], u_star[None])[0]
@@ -1558,7 +1604,7 @@ def get_config():
         "k_goals": 32,              # size of the eval goal set G
         "eval_goal_pool": "relabel",    # rows G is drawn from: relabel (the relabel batch) | dataset (the task dataset)
         # --- acting ---
-        "acting": "gpi",            # gpi (argmax over prior draws) | distill (DSRL actor) | sfbc (actor draws reranked)
+        "acting": "gpi",            # gpi (argmax over prior draws) | distill (DSRL actor) | sfbc (actor draws reranked) | flowbc_gpi (flowbc actor draws reranked)
         "gpi_num_u": 64,            # prior draws the gpi argmax scans
         "sfbc_num_u": 64,           # acting=sfbc: actor draws reranked by the measure
         "num_actor_steps": 10000,   # distillation steps (acting=distill)
@@ -1625,6 +1671,13 @@ def get_config():
         # the value the goal actor climbs: shaped (kernel-weighted measure over the batch's
         # next states) | point (M(s,u,g) at the actor goal; softmax: g's share among g + pool)
         "actor_value_kind": "shaped",
+        # --- design-decision ablations (2026-10-09; OFF by default) ---
+        # future (uniform later state of the row's trajectory, batch['fb_goals']) | measure (batch['goals'])
+        "actor_goal_source": "future",
+        # actor_kind=flowbc: none | prior_then_actor | actor_then_prior (the BC draw before / from
+        # bootstrap_switch_step, the actor's latent otherwise)
+        "bootstrap_switch": "none",
+        "bootstrap_switch_step": 100000,
         # actor_kind=dsrl: SAC's alpha, the f_psmflow dsrl_sac head's values
         "dsrl_actor": {"target_entropy": 0.0, "init_alpha": 1.0, "lr_alpha": 3.0e-4},
         # --- nets ---

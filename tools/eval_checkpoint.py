@@ -569,7 +569,8 @@ def main(cfg):
             src = (f"psmgoal actor ({config.get('actor_kind', 'tanh')}) fed the goal state, goal from "
                    f"{config.get('eval_goal_source')}")
         elif name == "psmgoal":
-            src = (f"psmgoal argmax over K={config.get('gpi_num_u')} u of the goal-averaged "
+            draws = "flowbc actor draws (one goal each)" if config.get("acting") == "flowbc_gpi" else "u"
+            src = (f"psmgoal argmax over K={config.get('gpi_num_u')} {draws} of the goal-averaged "
                    f"measure, K_g={config.get('k_goals')} rewarding goals")
             if str(config.get("eval_goal_pool", "relabel")) == "dataset":
                 src += " of the task dataset"

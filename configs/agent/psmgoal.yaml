@@ -50,7 +50,7 @@ k_goals: 32                # size of the eval goal set G (rewarding relabel rows
 eval_goal_pool: relabel
 
 # --- acting ---
-acting: gpi                # gpi (argmax over prior draws) | distill (DSRL latent actor) | sfbc (actor draws reranked by the measure)
+acting: gpi                # gpi (argmax over prior draws) | distill (DSRL latent actor) | sfbc (actor draws reranked by the measure) | flowbc_gpi (flowbc actor draws, one per goal, reranked like gpi; coef_source=hgoal_each)
 gpi_num_u: 64              # prior draws the gpi argmax scans per step
 sfbc_num_u: 64             # acting=sfbc: candidate latents drawn from the trained actor, reranked by mean_g M
 num_actor_steps: 10000     # DSRL distillation steps (acting=distill)
@@ -162,6 +162,17 @@ gpi_hold: 1
 actor_kind: tanh           # tanh | flowbc | dsrl
 actor_value_kind: shaped   # shaped | point
 dsrl_actor: {target_entropy: 0.0, init_alpha: 1.0, lr_alpha: 3.0e-4}   # actor_kind=dsrl: SAC's alpha
+
+# --- design-decision ablations (2026-10-09; OFF by default) ---
+# actor_goal_source: the goal the goal actor is trained at. future = a uniformly drawn later state
+# of the row's trajectory (batch['fb_goals']); measure = the row's measure goal batch['goals']
+# (geometric hindsight, plus any goal_random_frac / goal_cur_frac share).
+actor_goal_source: future  # future | measure
+# bootstrap_switch (actor_kind=flowbc): the bootstrap latent is one clipped prior draw (a BC draw)
+# before (prior_then_actor) or from (actor_then_prior) bootstrap_switch_step training steps, and
+# the flowbc actor's latent otherwise. The actor trains throughout.
+bootstrap_switch: none     # none | prior_then_actor | actor_then_prior
+bootstrap_switch_step: 100000
 
 # --- nets ---
 measure: {hidden_dim: 1024, hidden_layers: 2}   # phi, b on [s, u, g] (RLU hidden 1024, was 512; capacity lift 2026-09-18)
