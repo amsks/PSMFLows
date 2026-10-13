@@ -122,11 +122,11 @@ def aggregate(paths, out_path):
         print(f'{k:16s} {v["mean"]:.3f}' + (f' ± {v["se"]:.3f}' if v['se'] is not None else ''))
 
 
-def run(cfg):
-    import jax
-    import jax.numpy as jnp
+def load_pair(cfg):
+    """Critics A (cfg.restore_path) and B (cfg.restore_path_b), built as tools/eval_checkpoint.py
+    builds them, with their eval goals inferred on the same relabel batch. Returns (ag, eval_env)
+    with ag = {'a': agent, 'b': agent}. Also used by diag_failure_stages.py and diag_segment_swap.py."""
     import ml_collections
-    import mujoco
     from omegaconf import OmegaConf
 
     from agents import agents
@@ -138,12 +138,6 @@ def run(cfg):
     from utils.flow_inversion import load_augmented_dataset, repair_invalid_preimages
 
     base_seed = int(cfg.seed)
-    n_ep = int(cfg.eval_episodes)
-    n_cand = int(cfg.get('n_cand', 8))
-    n_rep = int(cfg.get('n_rep', 2))
-    probe_ts = tuple(int(t) for t in cfg.get('probe_ts', PROBE_TS))
-    cont = str(cfg.get('cont', 'a'))
-    assert cont in ('a', 'b')
     run_b = cfg.get('restore_path_b', None)
     assert run_b, 'pass +restore_path_b=<critic B run>'
 
@@ -174,6 +168,44 @@ def run(cfg):
         a = agents['psmgoal'].create(base_seed, ex['observations'], ex['actions'], configs[side])
         a = restore_agent(a, rp, cfg.restore_epoch)
         ag[side] = a.infer_eval_goals(zb, rew)
+    return ag, eval_env
+
+
+class SimState:
+    """Snapshot and restore of the MuJoCo integration state of an OGBench manipulation env."""
+
+    def __init__(self, eval_env):
+        import mujoco
+        self.mujoco = mujoco
+        self.env = eval_env.unwrapped
+        self.model, self.data = self.env._model, self.env._data
+        self.spec = mujoco.mjtState.mjSTATE_INTEGRATION
+
+    def snapshot(self):
+        st = np.empty(self.mujoco.mj_stateSize(self.model, self.spec))
+        self.mujoco.mj_getState(self.model, self.data, st, self.spec)
+        return st, bool(self.env._success)
+
+    def restore(self, snap):
+        self.mujoco.mj_setState(self.model, self.data, snap[0], self.spec)
+        self.mujoco.mj_forward(self.model, self.data)
+        self.env._success = snap[1]
+        return self.env.compute_observation()
+
+
+def run(cfg):
+    import jax
+    import jax.numpy as jnp
+
+    base_seed = int(cfg.seed)
+    n_ep = int(cfg.eval_episodes)
+    n_cand = int(cfg.get('n_cand', 8))
+    n_rep = int(cfg.get('n_rep', 2))
+    probe_ts = tuple(int(t) for t in cfg.get('probe_ts', PROBE_TS))
+    cont = str(cfg.get('cont', 'a'))
+    assert cont in ('a', 'b')
+    run_b = cfg.get('restore_path_b', None)
+    ag, eval_env = load_pair(cfg)
 
     c = ag['a'].config
     K, d_a, u_clip = int(c['gpi_num_u']), int(c['action_dim']), float(c['u_clip'])
@@ -198,21 +230,9 @@ def run(cfg):
     def act(obs):
         return np.clip(np.asarray(policy.sample_actions(observations=obs, seed=next_key(), temperature=0)), -1, 1)
 
-    env = eval_env.unwrapped
-    model, data = env._model, env._data
-    spec = mujoco.mjtState.mjSTATE_INTEGRATION
+    sim = SimState(eval_env)
+    env, snapshot, restore = sim.env, sim.snapshot, sim.restore
     t_max = int(eval_env.spec.max_episode_steps) if eval_env.spec and eval_env.spec.max_episode_steps else 200
-
-    def snapshot():
-        st = np.empty(mujoco.mj_stateSize(model, spec))
-        mujoco.mj_getState(model, data, st, spec)
-        return st, bool(env._success)
-
-    def restore(snap):
-        mujoco.mj_setState(model, data, snap[0], spec)
-        mujoco.mj_forward(model, data)
-        env._success = snap[1]
-        return env.compute_observation()
 
     def branch(snap, first_action, horizon, record=False):
         """Restore, execute first_action, then act with the policy. Returns (success, k, obs list, actions)."""
