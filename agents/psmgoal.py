@@ -154,7 +154,9 @@ GOAL_COEF_SOURCES = ("hgoal_each",)
 #: data = the data's next latent u_{i+1} (batch['next_noise_preimage']), no actor trained.
 #: docs/design/2026-10-03-psmgoal-data-bootstrap.md. argmax = the best of bootstrap_n clipped
 #: prior draws at s', scored by the target measure on the row's goal (2026-10-07); no actor.
-BOOTSTRAP_SOURCES = ("actor", "data", "argmax")
+#: bc_mean = the target measure averaged over bootstrap_n clipped prior draws at s' (2026-10-13;
+#: softmax: the mean of their softmax rows); no actor.
+BOOTSTRAP_SOURCES = ("actor", "data", "argmax", "bc_mean")
 #: goal_sampling options (policy_index=goal, 2026-10-04). geometric = the hindsight goal at
 #: offset ~ Geometric(1 - goal_discount) (utils/datasets.py hindsight_goal_idxs); uniform =
 #: a uniform draw over the row's own s' and every later state of the same trajectory
@@ -280,10 +282,10 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             f"eval_goal_pool must be one of {EVAL_GOAL_POOLS}"
         bootstrap_source = str(config.get("bootstrap_source", "actor"))
         assert bootstrap_source in BOOTSTRAP_SOURCES, f"bootstrap_source must be one of {BOOTSTRAP_SOURCES}"
-        if bootstrap_source == "argmax":
-            assert policy_index == "goal", "bootstrap_source=argmax scores the row's goal: needs policy_index=goal"
+        if bootstrap_source in ("argmax", "bc_mean"):
+            assert policy_index == "goal", f"bootstrap_source={bootstrap_source} reads h(g): needs policy_index=goal"
             assert not bool(config.get("train_actor", False)), \
-                "bootstrap_source=argmax replaces the actor in the bootstrap: set train_actor=false"
+                f"bootstrap_source={bootstrap_source} replaces the actor in the bootstrap: set train_actor=false"
             assert int(config.get("bootstrap_n", 8)) >= 1, "bootstrap_n must be >= 1"
         if bootstrap_source == "data":
             # docs/design/2026-10-03-psmgoal-data-bootstrap.md: u' = u_{i+1} is a sample of the
@@ -299,9 +301,9 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         if coef_source in GOAL_COEF_SOURCES:
             assert policy_index == "goal", f"coef_source={coef_source} reads h(g) per goal: needs policy_index=goal"
         if policy_index == "goal":
-            assert bool(config.get("train_actor", False)) or bootstrap_source in ("data", "argmax"), \
+            assert bool(config.get("train_actor", False)) or bootstrap_source in ("data", "argmax", "bc_mean"), \
                 ("policy_index=goal bootstraps from the goal-fed actor: set train_actor=true "
-                 "(or bootstrap_source=data|argmax)")
+                 "(or bootstrap_source=data|argmax|bc_mean)")
             assert not bool(config.get("train_goal_head", False)), \
                 "policy_index=goal trains h by the measure loss; train_goal_head must be false"
             assert actor_value == "none", "policy_index=goal has its own actor loss; set actor_value=none"
@@ -495,6 +497,9 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
     def _argmax_bootstrap(self):
         return str(self.config.get("bootstrap_source", "actor")) == "argmax"
 
+    def _bc_mean_bootstrap(self):
+        return str(self.config.get("bootstrap_source", "actor")) == "bc_mean"
+
     def _hgoal_each(self):
         return str(self.config.get("coef_source", "lp")) == "hgoal_each"
 
@@ -599,12 +604,16 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         self.w(z, target_w) (matches the target measure); else the fixed z-indexed proto draw.
         policy_index=goal: the actor's mode at (s'_i, g_i), g_i the row's own measure goal.
         bootstrap_source=data: the data's next latent u_{i+1} (batch['next_noise_preimage'],
-        the move the data made at s'_i), clipped like the row's own u."""
+        the move the data made at s'_i), clipped like the row's own u.
+        bootstrap_source=bc_mean: all bootstrap_n clipped prior draws, (n, N, d); measure_loss
+        averages the target over them."""
         c = self.config
         if self._data_bootstrap():
             return jnp.clip(jnp.asarray(batch["next_noise_preimage"]), -c["u_clip"], c["u_clip"])
         if self._argmax_bootstrap():
             return self.argmax_bootstrap(batch)[0]
+        if self._bc_mean_bootstrap():
+            return self.prior_draws(jnp.asarray(batch["next_observations"]).shape[0])
         if bool(c.get("train_actor", False)):
             next_obs = jnp.asarray(batch["next_observations"])
             goals = jnp.asarray(batch["goals"]) if self._goal_index() else None
@@ -641,10 +650,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         c = self.config
         next_obs = jnp.asarray(batch["next_observations"])
         goals = jnp.asarray(batch["goals"])
-        n, N, d = int(c.get("bootstrap_n", 8)), next_obs.shape[0], int(c["action_dim"])
-        u_clip, temp = float(c["u_clip"]), float(c["measure_temp"])
-        eps = jnp.clip(jax.random.normal(jax.random.fold_in(self.rng, ARGMAX_BOOT_KEY), (n, N, d)),
-                       -u_clip, u_clip)
+        N, temp = next_obs.shape[0], float(c["measure_temp"])
+        eps = self.prior_draws(N)
         w_t = self._coef(None, goals, target=True)                               # (N, z)
 
         def score(u):
@@ -659,6 +666,27 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         best = jnp.argmax(scores, axis=0)                                         # (N,)
         u_next = eps[best, jnp.arange(N)]
         return jax.lax.stop_gradient(u_next), jax.lax.stop_gradient(scores)
+
+    def prior_draws(self, N):
+        """bootstrap_n clipped prior draws per row, (n, N, d), from the ARGMAX_BOOT_KEY stream that
+        bootstrap_source=argmax and bc_mean share (so bootstrap_n=1 is the same BC draw in both)."""
+        c = self.config
+        n, d, u_clip = int(c.get("bootstrap_n", 8)), int(c["action_dim"]), float(c["u_clip"])
+        eps = jax.random.normal(jax.random.fold_in(self.rng, ARGMAX_BOOT_KEY), (n, N, d))
+        return jax.lax.stop_gradient(jnp.clip(eps, -u_clip, u_clip))
+
+    def bc_mean_target(self, next_obs, eps, goals, w_t):
+        """bootstrap_source=bc_mean: the target measure at s' averaged over the BC draws eps
+        (n, N, d), as (N, N) target logits. Squared loss: mean_n M_bar(s', u_n, s+). Softmax loss:
+        temp * log mean_n softmax_j(M_bar_n / temp), so softmax_j(target / temp) is the mean of the
+        draws' softmax rows (the successor measure of the BC policy at s'), not the softmax of the
+        mean logit. n = 1 returns the single draw's target up to a per-row shift."""
+        Ms = jax.lax.map(lambda u: self.mesh_M(next_obs, u, goals, w_t, params=self.target_basis), eps)
+        if not self._softmax():
+            return Ms.mean(0)
+        temp = float(self.config["measure_temp"])
+        logp = jax.nn.log_softmax(Ms / temp, axis=-1)                          # (n, N, N)
+        return temp * (jax.nn.logsumexp(logp, axis=0) - jnp.log(eps.shape[0]))
 
     # ------------------------------------------------------------------ basis loss
     def measure_loss(self, basis_params, w_params, batch, z, u_next):
@@ -679,7 +707,10 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         w_t = self._coef(z, row_goals, target=True)              # (N, z), target
         phi, b = self.mesh_phi_b(obs, u, goals, params=basis_params)             # (N, N, z), (N, N)
         M = (phi * w[:, None, :]).sum(-1) + b                                     # (N, N)
-        M_bar = self.mesh_M(next_obs, u_next, goals, w_t, params=self.target_basis)
+        if u_next.ndim == 3:                                     # bootstrap_source=bc_mean
+            M_bar = self.bc_mean_target(next_obs, u_next, goals, w_t)
+        else:
+            M_bar = self.mesh_M(next_obs, u_next, goals, w_t, params=self.target_basis)
         target_M = jax.lax.stop_gradient(M_bar)
         if self._softmax():
             return self._softmax_measure_loss(M, target_M, phi, w)
@@ -1699,7 +1730,8 @@ def get_config():
         # actor (the goal-fed actor's mode at (s', g)) | data (the data's next latent u_{i+1};
         # needs policy_index=goal, goal_random_frac=0, goal_cur_frac=0; train_actor may be false)
         "bootstrap_source": "actor",
-        # bootstrap_source=argmax: number of clipped prior draws scored at s' (1 = a BC draw)
+        # bootstrap_source=argmax: number of clipped prior draws scored at s' (1 = a BC draw);
+        # bc_mean: number of draws the target is averaged over
         "bootstrap_n": 8,
         # --- 2026-10-04 ablations (OFF by default) ---
         # policy_index=goal: geometric (hindsight offset ~ Geometric(1 - goal_discount)) |

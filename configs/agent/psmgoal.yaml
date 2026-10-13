@@ -136,8 +136,10 @@ eval_goal_source: relabel  # relabel | env
 # bootstrap_source=argmax (2026-10-07; needs policy_index=goal, train_actor=false): u' is the best
 # of bootstrap_n clipped prior draws at s', scored by the target measure on the row's goal (softmax:
 # the share of g among [g + the batch's next states]). No actor; bootstrap_n=1 is a plain BC draw.
-bootstrap_source: actor    # actor | data | argmax
-bootstrap_n: 8             # bootstrap_source=argmax: prior draws scored per row
+# bootstrap_source=bc_mean (2026-10-13; same needs as argmax): the target is the mean over
+# bootstrap_n clipped prior draws of the target measure (softmax: the mean of their softmax rows).
+bootstrap_source: actor    # actor | data | argmax | bc_mean
+bootstrap_n: 8             # bootstrap_source=argmax: prior draws scored per row; bc_mean: draws averaged
 
 # --- 2026-10-04 ablations (OFF by default) ---
 # goal_sampling (policy_index=goal): geometric = the hindsight goal at offset ~
