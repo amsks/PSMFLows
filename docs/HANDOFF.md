@@ -18,7 +18,70 @@ hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RES
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
 Branch: `feat/inversion-integration` · Machine: `kisski` (GWDG, SLURM/H100) · prior: `midi-01` (UT CS)
-Date: **2026-10-07** (latest) · prior: 2026-10-05, 2026-09-23, 2026-09-17, 2026-09-16, 2026-09-15, 2026-09-14, 2026-09-11, 2026-09-10, 2026-09-09, 2026-09-08, 2026-09-07, 2026-09-06, 2026-09-05, 2026-09-04, 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+Date: **2026-10-15** (latest) · prior: 2026-10-07, 2026-10-05, 2026-09-23, 2026-09-17, 2026-09-16, 2026-09-15, 2026-09-14, 2026-09-11, 2026-09-10, 2026-09-09, 2026-09-08, 2026-09-07, 2026-09-06, 2026-09-05, 2026-09-04, 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+
+---
+
+## 2026-10-15 — the goal-indexed measure is not a successor measure; the critic's preferred latents are one Gaussian blob the actors do not reach
+
+Two eval-only diagnostics on `psmgoal_ja_fbc3_pt_cube` sd000 500k (critic A, 0.805) and
+`psmgoal_ja_fbcBC_pt_cube` sd000 500k (critic B, one prior draw in the bootstrap, 0.657). JSONs:
+`$PSM_DATA/logs/measure_fullness/fullness_fbc3pt_vs_fbcBC_sd000_500k.json`,
+`$PSM_DATA/logs/actor_mechanism/actor_mech_sd000_500k.json`. Tools `tools/diag_measure_fullness.py`,
+`tools/diag_actor_mechanism.py` (commits 3653614, deb9f66). Design decisions of the day: the form stays
+M = phi(s,u,s+)^T h(g) + b(s,u,s+); no factorized A^T f path, no g into phi, no cube-xyz s+.
+
+### Fullness: measure's occupancy vs rollout occupancy of the goal policy (42 probes per group)
+
+Probe states from deployed episodes (5 tasks x 2 episodes, steps 0..80); goal g = the task goal with the
+highest share, or a random dataset state; p(x|s,u;g) = softmax of M over 1024 fixed random dataset
+states; rho = discounted visitation of 8 rollouts of the g-policy (best-of-64 under h(g)) mapped to the
+nearest of the 1024 states (full standardized observation; cube-xyz variant also recorded).
+
+| goal | tv(p, rho) | tv(uniform, rho) | split-half noise | tv(p_B, rho) | spearman | p on nearest-to-next | rho on nearest-to-next | H(p) (max 6.93) |
+|---|---|---|---|---|---|---|---|---|
+| task | 0.965 ± 0.004 | 0.972 ± 0.003 | 0.160 ± 0.016 | 0.967 ± 0.004 | 0.08 | 0.001 | 0.200 | 6.79 |
+| random | 0.952 ± 0.004 | 0.956 ± 0.003 | 0.232 ± 0.019 | 0.954 ± 0.004 | 0.05 | 0.001 | 0.171 | 6.79 |
+
+- The measure's distribution over dataset states is flat (entropy 6.79 of 6.93). It is as far from the
+  rollout occupancy as the uniform distribution. It puts 1/1024 on the dataset state nearest the actual
+  next state. Critic B is identical. The measure carries no occupancy information about states other
+  than the exact goal it is indexed by; it is a goal detector, not a successor measure. This settles the
+  10-15 question in the user's favour.
+- Consequence: a reward-weighted readout (`coef_source=reward_gpi`, pushed 5f1c21d) has nothing to read;
+  the aws state-reward comparison is a confirmation run. Adding own-future states to the normalization
+  set (proposed 10-15) would supervise exact trained states only; the measure does not transfer to the
+  nearest dataset neighbour, so a full measure over 28-dim states is not expected from it either.
+
+### Actor mechanism (512 dataset states, hindsight goal, 2000 prior draws; point value q = share of g)
+
+| | critic A | critic B | random 5% control |
+|---|---|---|---|
+| top-5% set: mean norm / prior norm | 1.262 | 1.268 | 1.000 |
+| top-5% set: centroid distance from origin | 1.96 | 1.97 | 0.21 |
+| top-5% set: 2-means separation | 1.13 | 1.12 | 0.95 |
+| top-5% set: fraction in fitted Gaussian unit ball (exact Gaussian 0.587) | 0.600 | 0.599 | 0.579 |
+| within-state spread of q over 64 draws / across-state spread | 0.033 | 0.032 | |
+| q(actor latent) - q(base draw), relative | +1.4% (online = target) | +1.5% | |
+| actor outputs inside A's top set | 5.4% | | 4.2% (prior draws) |
+
+- The critic's preferred latents at a state are ONE Gaussian-shaped blob, centred ~2 units from the
+  prior's centre toward the clip, narrower than the prior; not multimodal, not a shell. A Gaussian actor
+  could represent it. The actors fail at inference because they do not go there: the flowbc actor moves
+  0.03-0.09 (lands in the top set 5.4% vs 4.2% for raw draws), the no-BC actors overshoot off-support.
+  Best-of-64 reaches the blob by sampling. Mechanism = reach, not shape (user's H1 refuted as stated).
+- Why the actor bootstrap gives 0.805 vs 0.657 remains open: no A-specific optimism (B rates the actor's
+  latent equally higher), no sharpening (within/across spread equal). A's share level is higher
+  (q 0.15 vs 0.107). cos(actor step, dq/du) = 0.30.
+
+### Also today
+- `coef_source=reward_gpi` + `tools/eval_state_reward.py` (5f1c21d): state-reward task, GPI over goal
+  indices; smoke passed; six-run comparison handed to aws.
+- Third machine `aws` joined (8 x L4, 3 free): parity 0.820 vs kisski 0.818 at 250k; guide
+  `docs/plans/2026-10-15-aws-setup.md`, pins `requirements-kisski.txt`; mailbox folder `mailbox/aws/`.
+- Density FB code read (Factored-FB `density-fb`): goal arm 0.91 on cube but 0.06-0.16 through reward
+  inference; the z arm (ridge task vector, 50% random indices, F(s,a,z) nonlinear in z, B on cube xyz)
+  is the arm that generalizes (0.85 reward route).
 
 ---
 
