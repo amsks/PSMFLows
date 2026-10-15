@@ -81,6 +81,7 @@ awr_baseline_k: 32        # awr baseline V_i: number of clipped prior draws aver
 actor_value: none          # none | measure_reward_raw | measure_reward_softmax
 fb_value_temp: 1.0         # softmax arm temperature (reference measure_density_temp)
 fb_bc_coeff: 3.0           # in-support anchor toward the dataset preimage (reference FlowBC bc_coeff)
+bootstrap_delta_scale: 1.0 # factor on the flowbc actor's step in the TD target only (acting, actor loss unscaled); 1.0 = off
 fb_rand_frac: 0.5          # random-direction task fraction (reference z_rand_frac)
 fb_hit_spec: "19:22:0.4"   # hindsight kernel reward blocks a:b:eps (cube xyz, eps 0.4)
 fb_ridge_lambda_mult: 0.01 # lam = mult * tr(C)/D

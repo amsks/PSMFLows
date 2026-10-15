@@ -692,7 +692,12 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                     # the flowbc actor at (s', g) with a fresh prior draw eps
                     eps = jax.random.normal(jax.random.fold_in(self.rng, FLOWBC_BOOT_KEY),
                                             (next_obs.shape[0], int(c["action_dim"])))
-                    u_actor = self.flowbc_latent(next_obs, goals, eps)[0]
+                    u_actor, d_actor = self.flowbc_latent(next_obs, goals, eps)
+                    # bootstrap_delta_scale (2026-10-15): scale the actor's step in the TD target
+                    # ONLY (acting and the actor loss keep the unscaled step). 1.0 = unchanged.
+                    m = float(c.get("bootstrap_delta_scale", 1.0))
+                    if m != 1.0:
+                        u_actor = jnp.clip(eps + m * d_actor, -c["u_clip"], c["u_clip"])
                     switch = str(c.get("bootstrap_switch", "none"))
                     if switch == "none":
                         return u_actor
@@ -1845,6 +1850,7 @@ def get_config():
         "actor_value": "none",      # none | measure_reward_raw | measure_reward_softmax
         "fb_value_temp": 1.0,       # softmax arm: p_j = softmax_j(M_j / temp)
         "fb_bc_coeff": 3.0,         # in-support anchor weight on mean (u - u_data)^2
+        "bootstrap_delta_scale": 1.0,  # factor on the flowbc actor's step in the TD target only
         "fb_rand_frac": 0.5,        # fraction of rows whose task is a random sqrt(D) direction
         "fb_hit_spec": "19:22:0.4",  # kernel reward blocks a:b:eps (cube: cube xyz, eps 0.4)
         "fb_ridge_lambda_mult": 0.01,   # lam = mult * tr(C)/D
