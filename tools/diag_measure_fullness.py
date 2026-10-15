@@ -294,7 +294,7 @@ def run(cfg):
         obs_seq, act_seq, a, success, term = [], [], a0, False, False
         for t in range(T):
             ob, _, term, _, info = env.step(a)
-            obs_seq.append(np.asarray(ob, np.float32))
+            obs_seq.append(np.asarray(ob))
             if record:
                 act_seq.append(np.asarray(a))
             success = success or bool(info['success'])
