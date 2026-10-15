@@ -91,6 +91,32 @@ def add_skill_targets(dataset_dict, window):
     return observations[skill_idx]
 
 
+def trajectory_ends(idxs, terminal_locs, size):
+    """The last row of each sampled row's trajectory, (len(idxs),): the first entry of
+    `terminal_locs` (rows where terminals > 0) at or after the row. A row past the last recorded
+    terminal (a replay buffer's zero padding, or a dataset whose final row is not marked) ends
+    at the last row."""
+    idxs = np.asarray(idxs)
+    terminal_locs = np.asarray(terminal_locs)
+    pos = np.searchsorted(terminal_locs, idxs, side='left')
+    has_end = pos < terminal_locs.shape[0]
+    return np.where(has_end, terminal_locs[np.minimum(pos, terminal_locs.shape[0] - 1)], size - 1)
+
+
+def future_state_idxs(idxs, terminal_locs, size, discount, k, rng=None):
+    """K later ROWS of each sampled row's own trajectory, (len(idxs), k): the hindsight-goal
+    draw of `hindsight_goal_idxs` repeated k times per row -- offset d ~ Geometric(p = 1 -
+    discount), d >= 1, row min(idx + d - 1, end_of_trajectory(idx)), so d = 1 is the row
+    itself (state `next_observations[row]` = the row's own s') and no draw crosses a boundary
+    in `terminal_locs`. psmgoal norm_future_k (2026-10-15): the measure's softmax is normalised
+    over the batch's next states plus these states. `rng` defaults to numpy's global stream."""
+    r = np.random if rng is None else rng
+    idxs = np.asarray(idxs)
+    ends = trajectory_ends(idxs, terminal_locs, size)
+    dist = r.geometric(p=1.0 - float(discount), size=(idxs.shape[0], int(k)))
+    return np.minimum(idxs[:, None] + dist - 1, ends[:, None]).astype(np.int64)
+
+
 def hindsight_goal_idxs(idxs, terminal_locs, size, discount, random_frac, rng=None, cur_frac=0.0):
     """Goal ROW for each sampled row, OGBench GCDataset convention (psmgoal, 2026-09-17).
 
@@ -195,6 +221,10 @@ class Dataset(FrozenDict):
         # psmgoal actor_value arms: emit a same-trajectory uniform-future goal state per row
         # as batch['fb_goals'] (`future_goal_idxs`). Off by default.
         self.return_fb_goals = False
+        # psmgoal norm_future_k (2026-10-15): emit K later states of the row's own trajectory as
+        # batch['future_states'] (N, K, ob), each at a hindsight offset ~ Geometric(1 - goal_discount)
+        # clipped at the trajectory end (`future_state_idxs`). 0 = off (no field, no draw).
+        self.norm_future_k = 0
         # psmgoal bootstrap_source=data (2026-10-03): emit row i+1's latent as
         # batch['next_noise_preimage'] (the move the data made at s'_i). Rows are then drawn
         # by `_next_preimage_rows`: no trajectory end (terminals > 0, no next row) and no row
@@ -342,6 +372,11 @@ class Dataset(FrozenDict):
                     self._dict['noise_preimage_cov'][nxt],
                     self._dict['noise_preimage_weights'][nxt],
                 )
+        if int(self.norm_future_k) > 0:
+            # Drawn last so a norm_future_k of 0 leaves every other draw's random stream as is.
+            f_idxs = future_state_idxs(idxs, self.terminal_locs, self.size, self.goal_discount,
+                                       int(self.norm_future_k))
+            result['future_states'] = self._dict['next_observations'][f_idxs]
         return result
 
     def augment(self, batch, keys):

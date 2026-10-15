@@ -268,6 +268,12 @@ def main(cfg: DictConfig):
                     # goal_sampling=uniform (2026-10-04): the measure goal is a uniform draw
                     # over the row's own s' and every later state of its trajectory.
                     dataset.goal_sampling = str(config.get('goal_sampling', 'geometric'))
+                # norm_future_k (2026-10-15): K later states of the row's own trajectory at the
+                # hindsight offset (goal_discount), batch['future_states'], join the softmax
+                # loss's normalisation set. 0 = off (no field).
+                dataset.norm_future_k = int(config.get('norm_future_k', 0))
+                if dataset.norm_future_k > 0:
+                    dataset.goal_discount = float(config.get('goal_discount', 0.98))
                 # Factored-FB induced-reward actor: hindsight tasks are fit from a same-
                 # trajectory future goal, batch['fb_goals']. OFF by default (actor_value=none).
                 # policy_index=goal trains its actor at that same uniform-future goal

@@ -129,6 +129,10 @@ goal_random_frac: 0.3      # dataset off-trajectory random-goal fraction (OGBenc
 policy_index: code         # code (w(z) on the binary policy code) | goal (w = h(g))
 measure_loss: squared      # squared | softmax
 measure_temp: 1.0          # softmax temperature, in the loss and the readouts
+# norm_future_k (2026-10-15, measure_loss=softmax only): K later states of each row's own trajectory
+# (offset ~ Geometric(1 - goal_discount), clipped at the trajectory end, batch['future_states']) join
+# the batch's next states as the softmax normalisation set of the loss and its target. 0 = off.
+norm_future_k: 0
 actor_input: w             # w (the coefficient) | goal (the raw goal state)
 goal_cur_frac: 0.0         # share of rows whose measure goal is their own s'
 eval_goal_source: relabel  # relabel | env

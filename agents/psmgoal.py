@@ -201,9 +201,11 @@ DELTA_OUT_LAYER = "out"
 def softmax_td_loss(M, M_bar, discount, temp):
     """Cross-entropy between softmax_j(M_ij / temp) and the stop-gradded target
     (1 - discount) * onehot(j = i) + discount * softmax_j(M_bar_ij / temp), mean over rows.
-    M, M_bar (N, N): row i is (s_i, u_i) resp. (s'_i, u'_i), column j the batch's next state
-    s+_j. Both softmaxes ignore a per-row shift of their logits."""
-    target = (1.0 - discount) * jnp.eye(M.shape[0]) + discount * jax.nn.softmax(M_bar / temp, axis=-1)
+    M, M_bar (N, S), S >= N: row i is (s_i, u_i) resp. (s'_i, u'_i), column j < N the batch's
+    next state s+_j (so column i is the row's own s'_i) and columns j >= N the rows' future
+    states under norm_future_k (S = N when it is 0). Both softmaxes ignore a per-row shift of
+    their logits."""
+    target = (1.0 - discount) * jnp.eye(M.shape[0], M.shape[1]) + discount * jax.nn.softmax(M_bar / temp, axis=-1)
     logp = jax.nn.log_softmax(M / temp, axis=-1)
     return -jnp.mean(jnp.sum(jax.lax.stop_gradient(target) * logp, axis=-1))
 
@@ -325,6 +327,10 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             assert str(config.get("coef_source", "lp")) != "trained", (
                 "coef_source=trained reads w(z) on the policy code; under policy_index=goal the "
                 "trained coefficient is h(g): use coef_source=amortized")
+        norm_future_k = int(config.get("norm_future_k", 0))
+        assert norm_future_k >= 0, "norm_future_k must be >= 0"
+        if norm_future_k > 0:
+            assert measure_loss == "softmax", "norm_future_k > 0 extends the softmax normalisation set: set measure_loss=softmax"
         if measure_loss == "softmax":
             assert measure_form != "factorized", "measure_loss=softmax is not wired with measure_form=factorized"
             assert float(config.get("ortho_coef", 0.0)) == 0.0, "measure_loss=softmax needs ortho_coef=0"
@@ -760,17 +766,27 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         policy_index=goal: the row's coefficient is w_i = h(g_i) on its measure goal
         batch['goals'] (w_params are then h's params, and the target reads h's Polyak copy);
         the columns stay the batch's next states. measure_loss=softmax swaps the squared TD
-        for `softmax_td_loss` on the same mesh."""
+        for `softmax_td_loss` on the same mesh.
+
+        norm_future_k = K > 0 (softmax only, 2026-10-15): the columns are the batch's N next
+        states followed by every row's K future states batch['future_states'] flattened
+        (column N + i*K + k is row i's k-th future state), S = N + N*K columns shared by every
+        row; the one-hot stays on column i and the bootstrap softmax runs over all S."""
         c = self.config
         obs = jnp.asarray(batch["observations"])
         next_obs = jnp.asarray(batch["next_observations"])
         u = jnp.clip(jnp.asarray(batch["noise_preimage"]), -c["u_clip"], c["u_clip"])
         goals = next_obs                                         # g_j = s'_j
+        if int(c.get("norm_future_k", 0)) > 0:
+            assert "future_states" in batch, "norm_future_k > 0 needs batch['future_states'] (Dataset.norm_future_k)"
+            fut = jnp.asarray(batch["future_states"])                           # (N, K, ob)
+            assert fut.shape[:2] == (next_obs.shape[0], int(c["norm_future_k"])), fut.shape
+            goals = jnp.concatenate([next_obs, fut.reshape(-1, fut.shape[-1])], axis=0)  # (N + N*K, ob)
         row_goals = jnp.asarray(batch["goals"]) if self._goal_index() else None
         w = self._coef(z, row_goals, params=w_params)            # (N, z), online
         w_t = self._coef(z, row_goals, target=True)              # (N, z), target
-        phi, b = self.mesh_phi_b(obs, u, goals, params=basis_params)             # (N, N, z), (N, N)
-        M = (phi * w[:, None, :]).sum(-1) + b                                     # (N, N)
+        phi, b = self.mesh_phi_b(obs, u, goals, params=basis_params)             # (N, S, z), (N, S)
+        M = (phi * w[:, None, :]).sum(-1) + b                                     # (N, S); S = N unless norm_future_k
         if u_next.ndim == 3:                                     # bootstrap_source=bc_mean
             M_bar = self.bc_mean_target(next_obs, u_next, goals, w_t)
         else:
@@ -815,17 +831,32 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
     def _softmax_measure_loss(self, M, target_M, phi, w):
         """measure_loss=softmax: cross-entropy between softmax_j(M_ij/measure_temp) and
         (1-gamma)*onehot(j=i) + gamma*softmax_j(target_M_ij/measure_temp) over the batch's next
-        states. Logs the row softmax p next to the raw M: its mass on the row's own next state,
-        its largest entry, and the spread max_j - min_j of the logits M_ij/measure_temp."""
+        states (plus the rows' future states under norm_future_k; M is (N, S), S = N + N*K).
+        Logs the row softmax p next to the raw M: its mass on the row's own next state
+        (measure_p_own_next = m_softmax_diag), its total mass on the row's own K future states
+        (measure_p_future, 0 when norm_future_k = 0), its largest entry, and the spread
+        max_j - min_j of the logits M_ij/measure_temp. phi_eff_rank is the participation ratio
+        of phi's Gram over the whole mesh (z_dim if isotropic, 1 if rank one)."""
         c = self.config
         temp = float(c["measure_temp"])
         loss = softmax_td_loss(M, target_M, c["discount"], temp)
         p = jax.nn.softmax(M / temp, axis=-1)
-        off = 1.0 - jnp.eye(M.shape[0])
+        N, S = M.shape
+        K = int(c.get("norm_future_k", 0))
+        assert S == N + N * K, (M.shape, K)
+        off = 1.0 - jnp.eye(N, S)
+        p_own = jnp.mean(jnp.diagonal(p))
+        if K > 0:
+            rows = jnp.arange(N)
+            p_future = jnp.mean(jnp.sum(p[:, N:].reshape(N, N, K)[rows, rows, :], axis=-1))
+        else:
+            p_future = jnp.zeros(())
         phi_flat = phi.reshape(-1, phi.shape[-1])
         gram = phi_flat.T @ phi_flat / phi_flat.shape[0]
         info = {"psm_loss": loss,
-                "m_softmax_diag": jnp.mean(jnp.diagonal(p)),
+                "m_softmax_diag": p_own,
+                "measure_p_own_next": p_own,
+                "measure_p_future": p_future,
                 "m_softmax_max": jnp.mean(jnp.max(p, axis=-1)),
                 "m_logit_spread": jnp.mean(jnp.max(M, axis=-1) - jnp.min(M, axis=-1)) / temp,
                 "phi_eff_rank": jnp.trace(gram) ** 2 / jnp.maximum(jnp.sum(gram ** 2), 1e-12),
@@ -1842,6 +1873,10 @@ def get_config():
         "policy_index": "code",     # code (w(z) on the binary policy code) | goal (w = h(g), actor bootstrap at g)
         "measure_loss": "squared",  # squared (TD on the mesh) | softmax (cross-entropy over the batch's next states)
         "measure_temp": 1.0,        # softmax temperature, in the loss and the readouts
+        # measure_loss=softmax: K later states of each row's own trajectory (offset ~ Geometric(1 -
+        # goal_discount), clipped at the trajectory end) join the batch's next states as the
+        # softmax normalisation set of the loss and its target (S = N + N*K columns). 0 = off.
+        "norm_future_k": 0,
         "actor_input": "w",         # w (the coefficient) | goal (the raw goal state)
         "goal_cur_frac": 0.0,       # share of rows whose measure goal is their own s'
         "eval_goal_source": "relabel",  # actor readout's goal: relabel (a rewarding dataset state) | env (the task goal)
