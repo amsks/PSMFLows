@@ -74,6 +74,31 @@ nearest of the 1024 states (full standardized observation; cube-xyz variant also
   latent equally higher), no sharpening (within/across spread equal). A's share level is higher
   (q 0.15 vs 0.107). cos(actor step, dq/du) = 0.30.
 
+### Trajectory mass (same critics, 512 dataset transitions, n_ref 1024; `tools/diag_measure_trajectory_mass.py`, 22e7465)
+
+Mass the measure puts on the transition's OWN exact later state at offset k, relative to a random
+dataset state (1/1024); ctrl = another trajectory's state at the same offset. Same numbers for u = the
+data latent and u = a fresh prior draw.
+
+| k | ratio A | top-5% A | ratio B | top-5% B | ctrl A / B |
+|---|---|---|---|---|---|
+| 1 | 113 | 1.00 | 95 | 1.00 | 0.97 / 0.98 |
+| 5 | 98 | 1.00 | 82 | 1.00 | 0.98 / 0.98 |
+| 10 | 85 | 0.97 | 63 | 0.97 | 0.98 / 0.99 |
+| 20 | 56 | 0.89 | 39 | 0.86 | 0.98 / 0.98 |
+| 50 | 14 | 0.49 | 9 | 0.43 | 1.05 / 1.04 |
+| hindsight goal | 42 | 0.69 | 28 | 0.63 | |
+
+- The measure recognises states of its own trajectory out to k=50 and gives other trajectories'
+  states nothing. The mass does not depend on u, so what is recognised is trajectory membership, not
+  where the action takes the policy. Consistent with the flat rollout result: live-episode states
+  belong to no dataset trajectory.
+- Gate for the next arm passed as posed. Launched on aws (3 seeds, L4): `psmgoal_ja_fbc3_pt_nf2_cube`
+  = fbc3_pt + `agent.norm_future_k=2` (each transition's own later states, K=2 geometric offsets, added
+  to the softmax normalisation set and target; commit 3ca4dc3; `docs/plans/2026-10-15-norm-future.md`).
+  Expected: measure_p_own_next < 0.27, measure_p_future >> 2/768, phi_eff_rank > 1 without ortho;
+  five-task success may drop; mass on other trajectories' states may stay flat (open risk).
+
 ### Also today
 - `coef_source=reward_gpi` + `tools/eval_state_reward.py` (5f1c21d): state-reward task, GPI over goal
   indices; smoke passed; six-run comparison handed to aws.
