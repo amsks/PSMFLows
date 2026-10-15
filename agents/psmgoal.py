@@ -148,8 +148,15 @@ LP_CONS_COLS = 256
 #: feature fit; trained = the coefficient the measure was trained with (policy_index=code).
 COEF_SOURCES = ("lp", "amortized", "regression", "ridge", "trained")
 #: coef_source values that exist only under policy_index=goal (eval only). hgoal_each: each
-#: goal g_j is scored with its own coefficient h(g_j), no single w (2026-10-03).
-GOAL_COEF_SOURCES = ("hgoal_each",)
+#: goal g_j is scored with its own coefficient h(g_j), no single w (2026-10-03). reward_gpi
+#: (2026-10-15): the task is a reward on states r(s+), not a goal; each candidate coefficient
+#: h(g_c) over k_goals candidate goals is read as the expected reward over reference states,
+#: and the score is the max over candidates (GPI over goal indices).
+GOAL_COEF_SOURCES = ("hgoal_each", "reward_gpi")
+#: reward_gpi_cands options (coef_source=reward_gpi): which relabel rows are the candidate
+#: goals. top = the k_goals highest-reward next states; random = k_goals uniform rows;
+#: both = k_goals//2 top + the rest uniform from the remaining rows.
+REWARD_GPI_CANDS = ("top", "random", "both")
 #: bootstrap_source options (policy_index=goal). actor = the goal-fed actor's mode at (s', g);
 #: data = the data's next latent u_{i+1} (batch['next_noise_preimage']), no actor trained.
 #: docs/design/2026-10-03-psmgoal-data-bootstrap.md. argmax = the best of bootstrap_n clipped
@@ -245,6 +252,9 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
     # Joint actor heads (2026-10-05; carried but unused unless actor_kind selects them).
     delta: Any = None            # actor_kind=flowbc: delta(s, g, eps) TrainState
     log_alpha: Any = None        # actor_kind=dsrl: SAC's log alpha TrainState
+    # coef_source=reward_gpi (2026-10-15, eval only; carried but unused otherwise).
+    eval_cand_w: Any = None      # (k_goals, z_dim) h(g_c) per candidate goal
+    eval_ref_reward: Any = None  # (R,) r(s_j) at the reference states eval_ref
 
     # ------------------------------------------------------------------ construction
     @classmethod
@@ -252,7 +262,9 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         assert config.get("encoder", None) is None, "psmgoal does not support visual encoders."
         coef_source = str(config.get("coef_source", "lp"))
         assert coef_source in COEF_SOURCES + GOAL_COEF_SOURCES, \
-            "coef_source must be one of lp | amortized | regression | ridge | trained | hgoal_each"
+            "coef_source must be one of lp | amortized | regression | ridge | trained | hgoal_each | reward_gpi"
+        assert str(config.get("reward_gpi_cands", "both")) in REWARD_GPI_CANDS, \
+            f"reward_gpi_cands must be one of {REWARD_GPI_CANDS}"
         actor_value = str(config.get("actor_value", "none"))
         assert actor_value in ACTOR_VALUES, f"actor_value must be one of {ACTOR_VALUES}"
         if actor_value != "none":
@@ -300,6 +312,9 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         assert int(config.get("gpi_hold", 1)) >= 1, "gpi_hold (env steps one gpi latent is held) must be >= 1"
         if coef_source in GOAL_COEF_SOURCES:
             assert policy_index == "goal", f"coef_source={coef_source} reads h(g) per goal: needs policy_index=goal"
+        if coef_source == "reward_gpi":
+            assert str(config.get("eval_goal_pool", "relabel")) == "relabel", \
+                "coef_source=reward_gpi draws its candidates and reference states from the relabel batch: needs eval_goal_pool=relabel"
         if policy_index == "goal":
             assert bool(config.get("train_actor", False)) or bootstrap_source in ("data", "argmax", "bc_mean"), \
                 ("policy_index=goal bootstraps from the goal-fed actor: set train_actor=true "
@@ -444,7 +459,10 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                                        ob_dim), jnp.float32),
                    eval_actor_goal=jnp.zeros((ob_dim,), jnp.float32),
                    eval_goal_w=jnp.zeros((int(config["k_goals"]), z_dim), jnp.float32),
-                   delta=delta, log_alpha=log_alpha)
+                   delta=delta, log_alpha=log_alpha,
+                   eval_cand_w=jnp.zeros((int(config["k_goals"]), z_dim), jnp.float32),
+                   eval_ref_reward=jnp.zeros((max(int(config["batch_size"]) - int(config["k_goals"]), 1),),
+                                             jnp.float32))
 
     # ------------------------------------------------------------------ the measure
     def M(self, obs, u, g, w, params=None):
@@ -502,6 +520,9 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
 
     def _hgoal_each(self):
         return str(self.config.get("coef_source", "lp")) == "hgoal_each"
+
+    def _reward_gpi(self):
+        return str(self.config.get("coef_source", "lp")) == "reward_gpi"
 
     def _actor_kind(self):
         return str(self.config.get("actor_kind", "tanh"))
@@ -580,6 +601,49 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         if G % chunk:
             total = total + col_sum(goals[n_full * chunk:], goal_w[n_full * chunk:])
         return total / G
+
+    def _reward_gpi_values(self, obs, u, cand_w, refs, ref_reward, params=None, chunk=None):
+        """coef_source=reward_gpi: the value of each (s_i, u_i) row under each candidate
+        coefficient h_c, read as expected reward over the reference states, (N, C).
+        measure_loss=softmax: m_icr = phi(s_i,u_i,ref_r)^T h_c + b; value_ic = sum_r
+        softmax_r(m_icr / measure_temp) r_r (the shares sum to one, so a per-(s,u) shift of M
+        drops out). measure_loss=squared: value_ic = mean_r m_icr r_r.
+        cand_w (C, z_dim) is h(g_c); ref_reward (R,) is r at refs (R, ob). Candidates are
+        scored `chunk` (GOAL_CHUNK) at a time; phi, b at the reference columns are computed
+        once."""
+        chunk = GOAL_CHUNK if chunk is None else int(chunk)
+        C = cand_w.shape[0]
+        temp = float(self.config["measure_temp"])
+        softmax = self._softmax()
+        phi_r, b_r = self.mesh_phi_b(obs, u, refs, params=params)          # (N, R, z), (N, R)
+        r = jnp.asarray(ref_reward, jnp.float32).reshape(-1)
+
+        def values(hw):
+            m_r = jnp.einsum('nrz,cz->ncr', phi_r, hw) + b_r[:, None, :]  # (N, C', R) at h_c
+            if not softmax:
+                return jnp.einsum('ncr,r->nc', m_r, r) / r.shape[0]
+            share = jax.nn.softmax(m_r / temp, axis=2)
+            return jnp.einsum('ncr,r->nc', share, r)
+
+        if C <= chunk:
+            return values(cand_w)
+        n_full = C // chunk
+        head = jax.lax.map(values, cand_w[:n_full * chunk].reshape(n_full, chunk, cand_w.shape[-1]))
+        out = jnp.transpose(head, (1, 0, 2)).reshape(obs.shape[0], n_full * chunk)   # (N, n_full*chunk)
+        if C % chunk:
+            out = jnp.concatenate([out, values(cand_w[n_full * chunk:])], axis=1)
+        return out
+
+    def _reward_gpi_score(self, obs, u, cand_w, refs, ref_reward, params=None, chunk=None):
+        """coef_source=reward_gpi: max over the candidate coefficients of `_reward_gpi_values`
+        (GPI over goal indices), (N,)."""
+        return jnp.max(self._reward_gpi_values(obs, u, cand_w, refs, ref_reward, params=params, chunk=chunk),
+                       axis=1)
+
+    def _reward_gpi_argmax(self, obs, u, cand_w, refs, ref_reward, params=None, chunk=None):
+        """The candidate index each row's `_reward_gpi_score` comes from, (N,) int. Diagnostics."""
+        return jnp.argmax(self._reward_gpi_values(obs, u, cand_w, refs, ref_reward, params=params, chunk=chunk),
+                          axis=1)
 
     # ------------------------------------------------------------------ proto bootstrap
     def proto_bootstrap(self, z, index):
@@ -1394,7 +1458,9 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         """acting=gpi: argmax over gpi_num_u clipped prior draws of the goal-averaged Q,
         Q(s, u_m) = mean_{g in G} phi(s,u_m,g)^T eval_w_star + b(s,u_m,g).
         measure_loss=softmax: the score is the softmax mass on G over [G + eval_ref].
-        coef_source=hgoal_each: `_hgoal_each_score`, each goal at its own h(g_j)."""
+        coef_source=hgoal_each: `_hgoal_each_score`, each goal at its own h(g_j).
+        coef_source=reward_gpi: `_reward_gpi_score`, the max over candidate coefficients of
+        the expected state reward over eval_ref."""
         c = self.config
         assert observations.ndim == 1, "select_latent acts on a single observation"
         K, d_a = int(c["gpi_num_u"]), c["action_dim"]
@@ -1402,6 +1468,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         obs = jnp.broadcast_to(observations, (K, observations.shape[-1]))
         if self._hgoal_each():
             q = self._hgoal_each_score(obs, u_cand, self.eval_goals, self.eval_goal_w, self.eval_ref)
+        elif self._reward_gpi():
+            q = self._reward_gpi_score(obs, u_cand, self.eval_cand_w, self.eval_ref, self.eval_ref_reward)
         else:
             w = jnp.broadcast_to(self.eval_w_star, (K, self.eval_w_star.shape[0]))
             q = self._goal_score(obs, u_cand, self.eval_goals, self.eval_ref, w)   # (K,)
@@ -1544,12 +1612,27 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         measure_loss=softmax also stores batch_size - k_goals non-rewarding next states as the
         readout's reference columns. With acting=distill and actor_input=goal no coefficient
         is inferred: the actor is fed one rewarding state (eval_goal_source=relabel) or
-        `env_goal`, the env's own task goal (eval_goal_source=env)."""
+        `env_goal`, the env's own task goal (eval_goal_source=env).
+
+        coef_source=reward_gpi: `rewards` is a continuous state reward r(s'_i) over the batch
+        rows (no threshold). G = k_goals candidate goals chosen by reward_gpi_cands, with
+        eval_cand_w = h(G); eval_ref = R uniform rows of the batch's next states, with
+        eval_ref_reward their rewards. No coefficient is inferred."""
         c = self.config
         rewards = np.asarray(rewards).reshape(-1)
         k = int(c["k_goals"])
         from_dataset = str(c.get("eval_goal_pool", "relabel")) == "dataset"
-        if from_dataset:
+        reward_gpi = self._reward_gpi()
+        ref_reward = self.eval_ref_reward
+        cand_w = self.eval_cand_w
+        if reward_gpi:
+            next_obs_all = np.asarray(batch["next_observations"])
+            pick = reward_gpi_candidate_rows(rewards, k, str(c.get("reward_gpi_cands", "both")))
+            goals = jnp.asarray(next_obs_all[pick], jnp.float32)
+            n_ref = int(self.eval_ref.shape[0])
+            ref_rows = np.random.choice(rewards.shape[0], size=n_ref, replace=rewards.shape[0] < n_ref)
+            ref_reward = jnp.asarray(rewards[ref_rows], jnp.float32)
+        elif from_dataset:
             assert goal_pool is not None, \
                 "eval_goal_pool=dataset needs goal_pool (the task dataset's next states and rewards)"
             pool_rows = np.nonzero(np.asarray(goal_pool["rewards"]).reshape(-1) > REWARDING_THRESHOLD)[0]
@@ -1576,7 +1659,10 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                      -c["u_clip"], c["u_clip"])
         coef_source = str(c.get("coef_source", "lp"))
         refs = self.eval_ref
-        if self._softmax():
+        if reward_gpi:
+            # Reference states of the reward readout (both losses): uniform rows of the batch.
+            refs = jnp.asarray(np.asarray(batch["next_observations"])[ref_rows], jnp.float32)
+        elif self._softmax():
             # Reference columns of the softmax score: non-rewarding next states of the batch.
             other = np.nonzero(rewards <= REWARDING_THRESHOLD)[0]
             assert other.size > 0, "measure_loss=softmax needs non-rewarding relabel rows as reference columns"
@@ -1604,6 +1690,12 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             # Each goal keeps its own h(g_j); the score is taken per goal (`_hgoal_each_score`),
             # so there is no single coefficient.
             goal_w = self.w_star(goals)
+            w = jnp.zeros_like(self.eval_w_star)
+        elif coef_source == "reward_gpi":
+            # Each candidate goal keeps its own h(g_c); the score is the max over candidates of
+            # the expected state reward (`_reward_gpi_score`), so there is no single coefficient.
+            cand_w = self.w_star(goals)
+            goal_w = cand_w
             w = jnp.zeros_like(self.eval_w_star)
         elif coef_source == "regression":
             # Least-squares coefficient on the same features the LP path reads. Fit reward from
@@ -1643,12 +1735,35 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             # RLU Lagrangian inference (default)
             w = self.run_inference(obs, u, goals, key, refs=refs if self._softmax() else None)
         agent = self.replace(eval_goals=goals, eval_w_star=w, eval_ref=refs, eval_actor_goal=actor_goal,
-                             eval_goal_w=goal_w)
+                             eval_goal_w=goal_w, eval_cand_w=cand_w, eval_ref_reward=ref_reward)
         # acting=distill re-distills the actor at eval by default. With eval_redistill=false the
         # in-loop-trained actor (train_actor) is used directly, without eval re-distillation.
         if c["acting"] == "distill" and bool(c.get("eval_redistill", True)):
             agent = agent.distill_actor(obs, jax.random.fold_in(self.rng, 11))
         return agent
+
+
+def reward_gpi_candidate_rows(rewards, k, mode):
+    """coef_source=reward_gpi: the k candidate rows of a relabel batch, by `mode`
+    (REWARD_GPI_CANDS). top: the k highest-reward rows. random: k uniform rows without
+    replacement. both: k//2 top rows plus k - k//2 uniform rows from the remaining ones.
+    Draws from the global numpy stream like the other eval row picks. With replacement only
+    when the batch is smaller than the request."""
+    rewards = np.asarray(rewards).reshape(-1)
+    n = rewards.shape[0]
+    assert mode in REWARD_GPI_CANDS, f"reward_gpi_cands must be one of {REWARD_GPI_CANDS}"
+    order = np.argsort(-rewards, kind="stable")
+    if mode == "top":
+        return order[:k] if n >= k else np.random.choice(order, size=k, replace=True)
+    if mode == "random":
+        return np.random.choice(n, size=k, replace=n < k)
+    k_top = k // 2
+    top = order[:k_top]
+    rest = order[k_top:]
+    if rest.size == 0:
+        rest = np.arange(n)
+    rand = np.random.choice(rest, size=k - k_top, replace=rest.size < k - k_top)
+    return np.concatenate([top, rand])
 
 
 def get_config():
@@ -1713,7 +1828,11 @@ def get_config():
         "train_goal_head": False,   # train h(g) by J(theta|g)+constraint during update()
         # lp (RLU Lagrangian) | amortized (h(g)) | regression (lstsq) | ridge (actor_value)
         # | trained (policy_index=code: mean of w(z) over 256 fixed policy codes, no inference)
+        # | hgoal_each, reward_gpi (policy_index=goal, eval only)
         "coef_source": "lp",
+        # coef_source=reward_gpi: candidate goals = top (k_goals highest-reward rows) | random
+        # (k_goals uniform rows) | both (k_goals//2 top + the rest uniform)
+        "reward_gpi_cands": "both",
         "lr_goal": 1.0e-4,          # h(g) learning rate
         "j_constraint_coef": 1.0,   # hinge weight on non-negativity in J(theta|g)
         "w_star": {"hidden_dim": 256, "hidden_layers": 2},   # h(g) net

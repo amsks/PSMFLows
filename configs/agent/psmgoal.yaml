@@ -98,7 +98,15 @@ train_goal_head: false     # train h(g) by J(theta|g)+constraint during update()
 # with, w = the mean of w(z) over 256 policy codes z from a fixed key, projected to the
 # sqrt(D) sphere. No Lagrangian or regression is run. Under policy_index=goal it raises:
 # there coef_source=amortized is the trained coefficient.
-coef_source: lp            # lp (RLU Lagrangian inference) | amortized (h(g) head) | regression (lstsq on phi) | ridge (actor_value) | trained (mean of w(z))
+coef_source: lp            # lp (RLU Lagrangian inference) | amortized (h(g) head) | regression (lstsq on phi) | ridge (actor_value) | trained (mean of w(z)) | hgoal_each, reward_gpi (policy_index=goal, eval only)
+# coef_source=reward_gpi (2026-10-15, eval only, policy_index=goal): the task is a reward on
+# states r(s+) handed to infer_eval_goals in place of the relabel rewards. k_goals candidate
+# goals are drawn from the relabel batch by reward_gpi_cands (top = the highest-reward rows;
+# random = uniform rows; both = half and half), each with its own h(g_c); the reference
+# states are batch_size - k_goals uniform rows with their rewards. A candidate's value at
+# (s, u) is the expected reward over the reference states (softmax: reward-weighted shares;
+# squared: mean M * r) and the acting score is the max over candidates (GPI over goal indices).
+reward_gpi_cands: both     # top | random | both
 lr_goal: 1.0e-4            # h(g) learning rate
 j_constraint_coef: 1.0     # hinge weight on non-negativity in J(theta|g)
 w_star: {hidden_dim: 256, hidden_layers: 2}   # h(g): goal state -> sqrt(D) sphere
