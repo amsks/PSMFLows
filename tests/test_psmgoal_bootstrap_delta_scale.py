@@ -43,3 +43,20 @@ def test_scale_one_is_identical():
     batch = _batch()
     np.testing.assert_array_equal(np.asarray(base._select_u_next(batch, _z(base, batch))),
                                   np.asarray(one._select_u_next(batch, _z(one, batch))))
+
+
+def test_scale_minus_one_mirrors_the_step():
+    """m = -1 (the 2026-10-17 sign-flip arm): the bootstrap is eps - delta, the mirror image of
+    eps + delta about the raw draw, wherever neither side is clipped."""
+    base = _nonzero_delta(_agent(**OVER))
+    neg = _agent(bootstrap_delta_scale=-1.0, **OVER).replace(delta=base.delta, rng=base.rng)
+    zero = _agent(bootstrap_delta_scale=0.0, **OVER).replace(delta=base.delta, rng=base.rng)
+    batch = _batch()
+    u_plus = np.asarray(base._select_u_next(batch, _z(base, batch)))
+    u_minus = np.asarray(neg._select_u_next(batch, _z(neg, batch)))
+    u_eps = np.asarray(zero._select_u_next(batch, _z(zero, batch)))        # clip(eps), the BC draw
+    clip = float(base.config['u_clip'])
+    free = np.all(np.abs(u_plus) < clip - 1e-6, axis=1) & np.all(np.abs(u_minus) < clip - 1e-6, axis=1)
+    assert free.sum() > 0
+    np.testing.assert_allclose(u_minus[free] - u_eps[free], -(u_plus[free] - u_eps[free]), atol=1e-5)
+    assert not np.allclose(u_minus, u_plus)
