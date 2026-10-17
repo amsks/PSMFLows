@@ -153,6 +153,14 @@ only its presence does.
   not a successor measure of the policy it bootstraps from. Caveat: the probe episode is walked by the same
   policy, so probe states differ across policies; a rerun probing every policy from the best-of-64 episode's
   states is requested from aws. Compendium section 6.2 carries the full table.
+  Same-probe rerun (aws 05-23-01Z, `+probe_policy=bon64`, the probe episode walked by best-of-64; JSONs
+  `*_bonprobe_aws.json`): nf2 under its own actor tv 0.895 / 0.900 (uniform 0.939 / 0.938, noise 0.32), A under
+  its actor 0.925 / 0.929 (uniform 0.934 / 0.935). tv moves by at most 0.02 between the two probe sets. Stated
+  range 0.85 to 0.90 met; the caveat is closed and the conclusion stands. aws's tool change (`probe_policy`,
+  default `same`) is applied here from its posted diff (aws cannot push).
+- aws offers eval500 of frozen-step checkpoints on its idle L4s (25-35 min per checkpoint). fdplus sd0-2 and
+  fdminus sd0 at 500k (+250k, flags, train.csv) uploaded to HF `runs/<group>/<run dir>/` at 09:40Z; kisski's own
+  500k evals of the same four stay queued (nice 600) as the parity check.
 - Sign-flip arm at 07:10: seeds at 440k / 400k / 400k, `params_250000` written, actor step
   0.040 / 0.033 / 0.022 (A 0.088). The 250k eval jobs (2525538, 2525540, 2525541) have been pending since
   04:32 / 05:07 behind priority; their nice was reset from 600 to 0 at 07:10.

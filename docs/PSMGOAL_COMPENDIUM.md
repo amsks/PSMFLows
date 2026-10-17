@@ -1219,8 +1219,11 @@ better and nf2 0.036 to 0.053 better, against 0.031 to 0.039 under best-of-64. n
 actor's occupancy no better than BC's. The measure is not a successor measure of the policy it
 bootstraps from either. Caveat from aws: the probe episode is walked by the same policy, so the
 probe states differ across the three policies (probe episodes succeeded 0/10 under A's actor,
-2/10 under nf2's, 8/10 under best-of-64); a rerun with every policy probed from the best-of-64
-episode's states is requested (about 10 minutes per run on aws).
+2/10 under nf2's, 8/10 under best-of-64). Rerun with the probe episode walked by best-of-64
+(`+probe_policy=bon64`, aws 2026-10-17T05-23-01Z, JSONs `*_bonprobe_aws.json`): nf2 under its
+actor tv 0.895 / 0.900 against uniform 0.939 / 0.938 and noise 0.32; nf2 under BC 0.889 / 0.895;
+A under its actor 0.925 / 0.929 against uniform 0.934 / 0.935; H(rho) 2.8 to 3.2. tv moves by at
+most 0.02 between the two probe sets. The caveat is closed; the conclusion stands.
 
 Trajectory mass, the same method as 5.4, ratio of the own later state's mass to a random
 state's:

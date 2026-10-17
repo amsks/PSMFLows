@@ -204,6 +204,10 @@ def run(cfg):
     # (the policy the measure was trained to evaluate); bc = one clipped prior draw (the behaviour policy).
     rollout_policy = str(cfg.get('rollout_policy', 'bon64'))
     assert rollout_policy in ('bon64', 'actor', 'bc')
+    # probe_policy: which policy walks the probe episode. same = rollout_policy (the 2026-10-17 01:34Z runs);
+    # bon64 = the deployed best-of-64 readout, so every rollout_policy is probed from the same states.
+    probe_policy = str(cfg.get('probe_policy', 'same'))
+    assert probe_policy in ('same', 'bon64')
     assert task_goal_pick in ('top_share', 'first')
     assert R >= 1 and T >= 1 and n_ref >= 2
     prefix = str(cfg.env_name)
@@ -227,7 +231,8 @@ def run(cfg):
     K, u_clip = int(c['gpi_num_u']), float(c['u_clip'])
     n_ref_cols = max(int(c['batch_size']) - int(c['k_goals']), 1)
     print(f'=== diag_measure_fullness: tasks={tasks} episodes/task={n_ep} probe_ts={probe_ts} R={R} T={T} '
-          f'n_ref={n_ref} task_goal_pick={task_goal_pick} rollout_policy={rollout_policy} seed={base_seed}')
+          f'n_ref={n_ref} task_goal_pick={task_goal_pick} rollout_policy={rollout_policy} '
+          f'probe_policy={probe_policy} seed={base_seed}')
     print(f'    critics: {runs} epoch={cfg.restore_epoch}; forced {FORCED_AGENT_KEYS}; measure_loss={loss} '
           f'temp={temp} gamma={gamma} gpi_num_u={K} k_goals={int(c["k_goals"])} ref_cols={n_ref_cols}', flush=True)
 
@@ -292,10 +297,11 @@ def run(cfg):
         u_clip = float(agent.config['u_clip'])
         return jnp.clip(jax.random.normal(key, (int(agent.config['action_dim']),)), -u_clip, u_clip)
 
-    def act(agent, obs):
-        if rollout_policy == 'actor':
+    def act(agent, obs, pol=None):
+        pol = rollout_policy if pol is None else pol
+        if pol == 'actor':
             return np.clip(np.asarray(decode1(agent, jnp.asarray(obs), actor_latent(agent, jnp.asarray(obs), next_key()))), -1, 1)
-        if rollout_policy == 'bc':
+        if pol == 'bc':
             return np.clip(np.asarray(decode1(agent, jnp.asarray(obs), bc_latent(agent, next_key()))), -1, 1)
         return np.clip(np.asarray(agent.sample_actions(observations=obs, seed=next_key(), temperature=0)), -1, 1)
 
@@ -415,7 +421,8 @@ def run(cfg):
                               f'H_p {mf["H_p"]:.2f} H_rho {mf["H_rho"]:.2f} succ {np.mean(succ):.2f} '
                               f'({time.time() - t0:.0f} s)', flush=True)
                     observation = restore(snap)
-                observation, _, terminated, truncated, info = eval_env.step(act(policy, observation))
+                observation, _, terminated, truncated, info = eval_env.step(
+                    act(policy, observation, None if probe_policy == 'same' else probe_policy))
                 done = terminated or truncated
                 step += 1
             ep_success[str(task)].append(int(bool(info.get('success', False))))
@@ -439,7 +446,7 @@ def run(cfg):
         'tool': 'diag_measure_fullness',
         'env_prefix': prefix, 'tasks': tasks, 'episodes_per_task': n_ep, 'probe_ts': list(probe_ts),
         'R': R, 'T': T, 'n_ref': n_ref, 'n_ref_cols': n_ref_cols, 'seed': base_seed,
-        'task_goal_pick': task_goal_pick, 'rollout_policy': rollout_policy,
+        'task_goal_pick': task_goal_pick, 'rollout_policy': rollout_policy, 'probe_policy': probe_policy,
         'goal_settings': list(GOAL_SETTINGS), 'nn_modes': list(nn_modes),
         'gamma': gamma, 'measure_temp': temp, 'measure_loss': loss, 'gpi_num_u': K, 'u_clip': u_clip,
         'runs': runs, 'restore_epoch': int(cfg.restore_epoch),
