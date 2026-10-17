@@ -130,6 +130,9 @@ behind three jobs. luis was asked at 09:26Z for fdrand seeds 3-5 and has not rep
 All eight started together at 21:59 CEST (18.5 h after submission, 2 h after the time-limit cut), with kisski's
 four parity evals; each flags.json re-read: `frozen_delta`, epoch 500000, mode minus / random / zero as
 intended. 250k checkpoints due about 01:30, 500k about 05:00 on 10-18; aws evaluates each on upload.
+aws-kisski parity on the 250k checkpoints (aws 19-17-30Z, JSONs `runs/frozen_step/aws/`): fdplus sd0 0.713 on
+aws against 0.726 on kisski, sd1 0.793 / 0.792, sd2 0.788 / 0.791; fdminus sd0 0.735 / 0.726. Three-seed fdplus
+250k 0.765 on aws against 0.770 on kisski. Differences within one binomial standard error.
 
 ### Frozen-step arms launched 03:20 CEST (`docs/plans/2026-10-17-frozen-delta-bootstrap.md`, commits 09ae79b, 21abf12)
 
