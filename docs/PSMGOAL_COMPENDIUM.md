@@ -916,8 +916,8 @@ success 59 (A) against 68 (B). The best-of-8 above best-of-64 and the 0.696 belo
 | best of 64 | bon64 | 3 | 0.006 | cancelled |
 | mean of 8 BC draws' softmax rows | bcmean8 | 3 | 0.735 | 0.683 |
 | flowbc actor step mirrored in the target (scale -1), actor trained as A | ja_fbc3_pt_bdsneg | 3 | 0.623 | 0.640 |
-| frozen flowbc field from A seed 0 at 500k, +step | ja_fbc3_pt_fdplus | 3 | 0.770 | pending |
-| same field, -step | ja_fbc3_pt_fdminus | 1 of 3 | 0.726 | pending |
+| frozen flowbc field from A seed 0 at 500k, +step | ja_fbc3_pt_fdplus | 3 | 0.770 | 0.742 |
+| same field, -step | ja_fbc3_pt_fdminus | 1 of 3 | 0.726 | 0.620 |
 | flowbc actor, bc 0.3, shaped | ja_fbc03_sh | 3 | 0.758 | 0.706 |
 | flowbc actor, bc 3, shaped | ja_fbc3_sh | 5 | 0.700 | 0.710 |
 | flowbc actor, bc 0.3, point | ja_fbc03_pt | 3 | 0.757 | 0.777 |
@@ -1292,6 +1292,10 @@ each live reading. Numbers are what to compare against.
    First frozen-step numbers (250k, 09:55): plus 0.770 (0.726 / 0.792 / 0.791), at A's 0.789,
    so the frozen field reproduces A without co-training; minus seed 0 0.726 (per task 0.790
    0.542 0.956 0.548 0.794), above B and below A, one seed. Random and zero pending.
+   At 500k (aws evals, 10-34-17Z): plus 0.742 (0.762 / 0.677 / 0.787; seed 1 fell to 0.430 on
+   task 1), below the 0.78 to 0.82 stated beforehand and not separable from A 0.805 with three
+   seeds; minus seed 0 0.620 (per task 0.706 0.666 0.602 0.676 0.450), B's level, down 0.106
+   from 250k. Plus against minus on seed 0 at 500k: +0.142, plus ahead on four of five tasks.
 
 2. Does a step larger than the trained one help at full length?
    The aws sweep is one seed at 100k, and A and B were tied until 150k. Needed: m = 1 at 100k

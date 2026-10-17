@@ -22,7 +22,7 @@ Date: **2026-10-17** (latest) · prior: 2026-10-15, 2026-10-07, 2026-10-05, 2026
 
 ---
 
-## 2026-10-17 — nf2 scores above critic A; the actor's step points at the critic's preferred cluster; sign-flip arm at B's level (0.623 / 0.640); frozen +step at A (0.770 at 250k); psmgoal compendium written
+## 2026-10-17 — nf2 scores above critic A; the actor's step points at the critic's preferred cluster; sign-flip arm at B's level (0.623 / 0.640); frozen +step 0.770 / 0.742, frozen -step seed 0 0.726 / 0.620; psmgoal compendium written
 
 ### nf2 (`psmgoal_ja_fbc3_pt_nf2_cube`, A + `agent.norm_future_k=2`), eval500 hgoal_each
 
@@ -106,6 +106,27 @@ seeds 0.707 to 0.859), so the frozen field from A seed 0 at 500k reproduces A wi
 (0.789); one seed, per task 0.790 0.542 0.956 0.548 0.794 against fdplus seed 0's 0.758 0.764 0.876 0.666 0.568
 (the two runs are distinct: different flags, different checkpoints). fdminus seeds 1-2, fdrand and fdzero are
 still pending in the queue. The plus-against-random contrast is the one that separates the readings.
+
+Update 20:00 CEST, frozen-step 500k evaluated on aws (aws 10-34-17Z; eval500 hgoal_each, aws's L4s, JSONs HF
+`runs/frozen_step/aws/`; kisski's own evals of the same checkpoints still queued as parity):
+
+| run | per task at 500k | 500k | 250k |
+|---|---|---|---|
+| fdplus sd0 | 0.826 0.648 0.928 0.808 0.602 | 0.762 | 0.726 |
+| fdplus sd1 | 0.430 0.730 0.870 0.744 0.612 | 0.677 | 0.792 |
+| fdplus sd2 | 0.718 0.904 0.802 0.760 0.750 | 0.787 | 0.791 |
+| **fdplus, 3 seeds** | | **0.742** (SE 0.033) | 0.770 |
+| fdminus sd0 | 0.706 0.666 0.602 0.676 0.450 | **0.620** | 0.726 |
+| critic A | | 0.805 | 0.789 |
+| critic B | | 0.657 | 0.626 |
+| sign-flip | | 0.640 | 0.623 |
+
+fdplus at 500k is below the 0.78 to 0.82 stated to aws; seed 1 fell on task 1 (0.430). Three seeds do not place
+fdplus below A (the interval includes 0.805) and do not confirm it at A. fdminus seed 0 fell by 0.106 to B's
+level, outside the stated "within 0.05 of 0.726". Plus against minus on the same seed: +0.142, plus ahead on
+four of five tasks. Pending kisski jobs 2525530-2525537 had their time limit cut from 24 h to 10 h at 20:00
+(the four finished runs took 6:52 to 7:02) so they can backfill; they had been pending 16.5 h at priority 4373
+behind three jobs. luis was asked at 09:26Z for fdrand seeds 3-5 and has not replied since 01:39Z.
 
 ### Frozen-step arms launched 03:20 CEST (`docs/plans/2026-10-17-frozen-delta-bootstrap.md`, commits 09ae79b, 21abf12)
 
