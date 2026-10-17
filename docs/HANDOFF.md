@@ -74,6 +74,26 @@ at or below B 0.63 / 0.66; perturbation reading (the user's "exploration in nois
 at A 0.79 / 0.80; 0.70-0.75 -> both, random-direction control next. The actor's own step in
 this arm is 0.019 at 75k against A's 0.088.
 
+### Frozen-step arms launched 03:20 (`docs/plans/2026-10-17-frozen-delta-bootstrap.md`, commits 09ae79b, 21abf12)
+
+The sign-flip arm is confounded (its actor's step shrank to 0.019 vs A's 0.088 by 75k, so direction and
+length change together). `bootstrap_source=frozen_delta` loads delta from A sd000 500k and never updates
+it; the target latent is clip(eps + step) with step = +delta (`fdplus`), -delta (`fdminus`), a random
+direction of the same length per row (`fdrand`) or 0 (`fdzero`); the live actor trains, unused. Six CPU
+tests; 200-step GPU smokes (random, minus) exit 0 with the right flags. Jobs 2525526-2525537 (4 arms x
+seeds 0-2, 500k, 24 h), eval watcher `watcher_fd.log`. Expected: plus at A 0.80 (below it if co-adaptation
+matters); zero at B 0.66; minus and random at/below B if the step's direction carries the gain, at A if
+only its presence does.
+
+### Work split posted to the mailbox (kisski posts of 03:2xZ)
+- luis: relaunch nf2 seeds 1-2 to 500k (H200, 24 h); build the deployment-actor distillation (Gaussian
+  full-covariance student of the best-of-64 teacher on nf2 sd0 500k, 32-goal descriptor, MLE on the
+  winning raw latent; expected within 0.05 of 0.91 in-task if the Gaussian suffices).
+- aws: fullness rerun with `+rollout_policy=actor|bc|bon64` (new in 09ae79b) on A sd000 500k and nf2 sd0
+  500k: the 10-15 test compared the measure with best-of-64 rollouts, not with the actor policy it was
+  trained to evaluate.
+- nf2 sd0 250k/500k params, train.csv, eval.csv uploaded to HF `runs/psmgoal_ja_fbc3_pt_nf2_cube/sd000_*/`.
+
 ### Also
 - `docs/PSMGOAL_COMPENDIUM.md`: every design decision, arm, diagnostic and number from the
   09-17 spec to nf2, with math, pseudocode, the hypothesis table, open questions with
