@@ -127,6 +127,9 @@ level, outside the stated "within 0.05 of 0.726". Plus against minus on the same
 four of five tasks. Pending kisski jobs 2525530-2525537 had their time limit cut from 24 h to 10 h at 20:00
 (the four finished runs took 6:52 to 7:02) so they can backfill; they had been pending 16.5 h at priority 4373
 behind three jobs. luis was asked at 09:26Z for fdrand seeds 3-5 and has not replied since 01:39Z.
+All eight started together at 21:59 CEST (18.5 h after submission, 2 h after the time-limit cut), with kisski's
+four parity evals; each flags.json re-read: `frozen_delta`, epoch 500000, mode minus / random / zero as
+intended. 250k checkpoints due about 01:30, 500k about 05:00 on 10-18; aws evaluates each on upload.
 
 ### Frozen-step arms launched 03:20 CEST (`docs/plans/2026-10-17-frozen-delta-bootstrap.md`, commits 09ae79b, 21abf12)
 
