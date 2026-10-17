@@ -842,8 +842,9 @@ helps. The test does not rank the critics; the ranking stays with full-episode n
 `bootstrap_n=8`): the target softmax is the mean over 8 prior draws' softmax rows, so target
 noise is reduced without any max. Pre-stated: if the actor's gain is lower target noise, this
 reaches about 0.80; if it stays near bon1, the gain needs the actor's push. Result 0.735 ±
-0.031 at 250k (0.674 / 0.755 / 0.775), 0.708 at 500k on seed 0 only, against bon1 0.712 /
-0.701 in the same pipeline. Within noise of one draw.
+0.031 at 250k (0.674 / 0.755 / 0.775) and 0.683 ± 0.036 at 500k over 3 seeds (0.708 / 0.728 /
+0.612; posted by luis 2026-10-17T01-11-35Z), against bon1 0.712 / 0.701 in the same pipeline.
+Within noise of one draw at both checkpoints.
 
 2026-10-15, kisski, the fullness and actor-mechanism diagnostics, then the trajectory-mass gate
 and the nf2 decision. These are section 5.
@@ -904,7 +905,7 @@ success 59 (A) against 68 (B). The best-of-8 above best-of-64 and the 0.696 belo
 | best of 4 | bon4 | 3 | 0.218 | 0.213 |
 | best of 8 | bon8 | 3 | 0.020 | 0.096 |
 | best of 64 | bon64 | 3 | 0.006 | cancelled |
-| mean of 8 BC draws' softmax rows | bcmean8 | 3 / 1 | 0.735 | 0.708 |
+| mean of 8 BC draws' softmax rows | bcmean8 | 3 | 0.735 | 0.683 |
 | flowbc actor, bc 0.3, shaped | ja_fbc03_sh | 3 | 0.758 | 0.706 |
 | flowbc actor, bc 3, shaped | ja_fbc3_sh | 5 | 0.700 | 0.710 |
 | flowbc actor, bc 0.3, point | ja_fbc03_pt | 3 | 0.757 | 0.777 |
@@ -935,7 +936,7 @@ The actor acting alone is 0.098 to 0.132 in every actor arm except bc 0.3 with t
 |---|---|---|---|
 | The actor is not needed; one BC draw does the same | bon1 at 5 seeds against A at 5 seeds | 0.696 ± 0.029 against 0.805 ± 0.014 | refuted |
 | A greedy max over BC draws replaces the actor | bon2 / 4 / 8 / 64 | 0.399 / 0.213 / 0.096 / 0.006 | refuted; the max over noisy target estimates overestimates |
-| The gain is lower target noise | mean of 8 draws | 0.735 against bon1 0.712 | refuted by the pre-stated criterion of about 0.80 |
+| The gain is lower target noise | mean of 8 draws | 0.735 / 0.683 against bon1 0.712 / 0.701 | refuted by the pre-stated criterion of about 0.80 |
 | The actor regularises early training | curves; p2a against a2p | tied to 150k, gap opens after; 0.806 against 0.727 | refuted; the effect lives in the fixed point |
 | The gain scales with the step size | BC weight 0.3 / 1 / 3 / 10 / 1000 | 0.777 / 0.771 / 0.805 / 0.719 / 0.657 | flat from 0.3 to 3; a threshold, not a slope |
 | The gain scales with the step in the target alone | m = 0.5 / 2 / 4 at 100k, 1 seed | 0.532 / 0.637 / 0.628 | m at or above 2 level, 0.5 lower; open at 100k |
@@ -1179,6 +1180,36 @@ better than uniform at any checkpoint. tv between the nf2 and B distributions is
 where A against B was 0.09, so the training change moved the measure substantially, mostly not
 toward the rollouts.
 
+Fullness against the actor policy and BC (aws, 2026-10-17, `+rollout_policy=actor|bc|bon64`,
+code 52892fd; JSONs on HF `runs/measure_fullness/fullness_{A_actor,A_bc,nf2_actor,nf2_bc,nf2_bon64}_sd000_500k_aws.json`).
+The 10-15 test and the table above compare the measure with rollouts of the best-of-64 policy.
+The measure is trained to evaluate the actor policy u = clip(eps + delta(s', g, eps)), so the
+comparison was rerun with the rollouts (and the probe episode) driven by the run's own actor,
+by one clipped prior draw (BC), and by best-of-64 as the control. Same settings as 5.2
+(2 episodes per task, 8 rollouts of 100 steps per probe, 1024 reference states, seed 0, 500k).
+
+| critic | rollout policy | goal | tv(p, rho) | tv(uniform, rho) | split-half noise | rank corr | H(p) | H(rho) |
+|---|---|---|---|---|---|---|---|---|
+| A | actor | task / random | 0.917 / 0.921 | 0.931 / 0.930 | 0.352 / 0.354 | 0.131 / 0.106 | 6.79 | 3.22 / 3.21 |
+| A | bc | task / random | 0.911 / 0.916 | 0.925 / 0.926 | 0.385 / 0.391 | 0.126 / 0.101 | 6.79 | 3.43 / 3.43 |
+| nf2 | actor | task / random | 0.881 / 0.874 | 0.930 / 0.927 | 0.354 / 0.376 | 0.213 / 0.176 | 5.39 / 5.92 | 3.27 / 3.37 |
+| nf2 | bc | task / random | 0.877 / 0.891 | 0.929 / 0.927 | 0.355 / 0.353 | 0.206 / 0.163 | 5.35 / 5.99 | 3.30 / 3.31 |
+| nf2 | bon64 | task / random | 0.935 / 0.911 | 0.966 / 0.950 | 0.201 / 0.261 | 0.138 / 0.134 | 5.59 / 5.95 | 2.49 / 2.87 |
+
+Critic B against A's actor rollouts: tv 0.920 / 0.921. On cube position alone, nf2 under the
+actor and BC is worse than uniform (0.93 to 0.95 against 0.88); under best-of-64 it is not.
+Pre-stated: the rollout occupancy under the actor and BC is broader (met: H(rho) 2.5 to 2.9
+under best-of-64, 3.2 to 3.4 under the actor and BC); tv falls below the best-of-64 value but
+stays above the noise floor (met: 0.87 to 0.92 against a floor of 0.35); if nf2's tv under its
+own actor had dropped near the floor the 10-15 conclusion would have been withdrawn (not met).
+The uniform baseline falls as much as tv does, so measured against uniform A is 0.010 to 0.014
+better and nf2 0.036 to 0.053 better, against 0.031 to 0.039 under best-of-64. nf2 fits the
+actor's occupancy no better than BC's. The measure is not a successor measure of the policy it
+bootstraps from either. Caveat from aws: the probe episode is walked by the same policy, so the
+probe states differ across the three policies (probe episodes succeeded 0/10 under A's actor,
+2/10 under nf2's, 8/10 under best-of-64); a rerun with every policy probed from the best-of-64
+episode's states is requested (about 10 minutes per run on aws).
+
 Trajectory mass, the same method as 5.4, ratio of the own later state's mass to a random
 state's:
 
@@ -1231,6 +1262,15 @@ each live reading. Numbers are what to compare against.
    the bootstrap selection) is the next arm. The actor acting alone stays at BC level in every
    case. The actor's own step in this arm was 0.019 at 75k against A's 0.088, so the actor
    learns a smaller step when its target is mirrored; that is a result in itself.
+   Update 2026-10-17 03:20: the sign-flip arm's own step is 0.040 / 0.033 / 0.022 (seeds 0 / 1 /
+   2) at 400k against A's 0.088, so direction and length change together and the arm does not
+   separate them. The clean test is the frozen-step arms
+   `psmgoal_ja_fbc3_pt_fd{plus,minus,rand,zero}_cube` (`bootstrap_source=frozen_delta`, the
+   step field loaded from A seed 0 at 500k and never updated; plan
+   `docs/plans/2026-10-17-frozen-delta-bootstrap.md`, kisski jobs 2525526 to 2525537): plus
+   expected at A 0.80 (below it if the co-trained actor matters), zero at B 0.66, minus and
+   random at or below B under the direction reading and at A under the presence reading. The
+   informative contrasts are plus against random and random against zero.
 
 2. Does a step larger than the trained one help at full length?
    The aws sweep is one seed at 100k, and A and B were tied until 150k. Needed: m = 1 at 100k
@@ -1242,7 +1282,11 @@ each live reading. Numbers are what to compare against.
    Seeds 1 and 2 need a relaunch under a 24-hour limit, about 16 hours each on an H100. The
    250k three-seed number is 0.865; the 500k one-seed number is 0.912. Prediction from the seed
    0 curve: 0.88 to 0.92 at 500k over 3 seeds. A result at or below 0.865 would say the 500k
-   gain on seed 0 is seed noise.
+   gain on seed 0 is seed noise. luis launched fresh seeds 1 and 2 on 2026-10-17 (H200, 24 h,
+   jobs 8674932 / 8674933, smoke flags norm_future_k 2). The same two checkpoints are evaluated
+   on all three machines (`scripts/campaign_2026-10/nf2_threeway_watcher.sh` on kisski; luis and
+   aws upload to HF `runs/nf2_threeway/<machine>/`); expected agreement within 0.01 on the
+   five-task mean.
 
 4. Why nf2 raised success without action dependence.
    Measurement: the per-goal share at test time along a trajectory toward the goal, for A and
@@ -1254,7 +1298,9 @@ each live reading. Numbers are what to compare against.
 5. Does the measure ever depend on the action latent?
    The trajectory-mass ratio under the data latent against a prior draw is 1.00 to 1.05 in A and
    nf2. A successor measure of a goal-reaching policy must give the data latent, which was the
-   action the trajectory actually took, more own-future mass than a random draw. Arms that could
+   action the trajectory actually took, more own-future mass than a random draw. The 10-17
+   fullness rerun against the actor policy (section 6.2) gives tv 0.87 to 0.92 against a noise
+   floor of 0.35, so the measure is not a successor measure of its own bootstrap policy either. Arms that could
    produce this: more future states per transition (K = 8 or 16, at 3 to 5 times A's step cost);
    candidates drawn from other trajectories near the own future states, so the measure has to
    generalise in state space; a target that includes the own-future candidates in the actor's
@@ -1268,8 +1314,7 @@ each live reading. Numbers are what to compare against.
    all seeds and collapsed by 225k. nf2 on antmaze is untested. Prediction: nf2 moves the
    own-next share up as on cube; success unknown.
 
-7. Smaller items still open on the record: the mean-of-8 bootstrap's seeds 1 and 2 at 500k
-   were never posted; the time-to-success file's best-of-8 above best-of-64 on A seed 0 is
+7. Smaller items still open on the record: the time-to-success file's best-of-8 above best-of-64 on A seed 0 is
    unexplained; the actor-goal question (actmg 0.751) is answered on success only; the Factored
    FB z-arm reading of 10-15 (ridge task vector, 50 percent random indices, nonlinear F in z,
    B on cube position) is noted and not acted on.
@@ -1314,7 +1359,7 @@ over seeds, 250k and 500k: BC 0.111; A 0.789 / 0.805 (5 seeds); nf2 0.865 (3 see
 that nf2's 500k needs the two missing seeds.
 
 Table 2, what the bootstrap does (section 4.3 condensed): the data's next latent 0.646; one BC
-draw 0.696; mean of 8 draws 0.735 (250k); best of 2 / 4 / 8 draws 0.399 / 0.213 / 0.096; the
+draw 0.696; mean of 8 draws 0.735 / 0.683; best of 2 / 4 / 8 draws 0.399 / 0.213 / 0.096; the
 actor at BC weight 0.3 / 1 / 3 / 10 / 1000: 0.777 / 0.771 / 0.805 / 0.719 / 0.657; no BC term
 0.033; switch arms 0.806 (late) and 0.727 (early). The claim: a small in-support step in the
 target is necessary and sufficient for the gain, a greedy step destroys it, averaging does not
@@ -1460,7 +1505,8 @@ Evaluation JSONs: `$PSM_DATA/logs/<group>_<sd>_<step>_<readout>_task<t>.json`.
 
 Diagnostic JSONs under `$PSM_DATA/logs/`: `actor_mechanism/actor_mech_sd000_500k.json`;
 `measure_fullness/fullness_fbc3pt_vs_fbcBC_sd000_500k.json`,
-`fullness_nf2_sd000_{250000,500000}.json`, `trajectory_mass_sd000_500k.json`,
+`fullness_nf2_sd000_{250000,500000}.json` (HF `runs/measure_fullness/fullness_{A_actor,A_bc,nf2_actor,nf2_bc,nf2_bon64}_sd000_500k_aws.json`
+for the 10-17 rollout-policy rerun), `trajectory_mass_sd000_500k.json`,
 `trajectory_mass_nf2_sd000_{250000,500000}.json`, `trajectory_mass_nf2_sd000_50k_cpu_Aonly.json`;
 `actor_shift/shift_fbc3pt_sd000_500k.json`; `time_to_success/tts_fbc3pt_sd000_500k.json`,
 `luis_t1_survival.json`; `diag_actor_ranking.json`; `diag_measure_pair_ranking.json`;

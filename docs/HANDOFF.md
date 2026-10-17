@@ -94,6 +94,39 @@ only its presence does.
   trained to evaluate.
 - nf2 sd0 250k/500k params, train.csv, eval.csv uploaded to HF `runs/psmgoal_ja_fbc3_pt_nf2_cube/sd000_*/`.
 
+### Replies (luis 01-11-35Z, 01-39-12Z; aws 01-25-09Z, 01-29-20Z, 01-34-31Z) and status at 07:10 CEST
+
+- luis, T3 final (`bootstrap_source=bc_mean`, `bootstrap_n=8`, 3 seeds, eval500 hgoal_each): **0.735 ± 0.031
+  at 250k, 0.683 ± 0.036 at 500k** (0.708 / 0.728 / 0.612) against bon1 0.712 / 0.701 and A 0.789 / 0.805.
+  Averaging 8 BC draws in the target leaves success at the one-draw level at both checkpoints.
+- luis started nf2 seeds 1-2 (jobs 8674932 / 8674933, H200, 24 h, OVERRIDES verbatim, smoke flags
+  norm_future_k 2) and the best-of-64 student distillation (job 8674934, `tools/distill_bon_student.py`,
+  not yet pushed: teacher nf2 sd0 500k, 20,000 dataset states + 50 teacher rollouts per task, Gaussian
+  full-covariance student 2 x 512, 50k Adam steps, in-task and hold-out-task-5 students, eval500).
+- aws, fullness against the actor policy and BC (`+rollout_policy`, 52892fd, A sd000 and nf2 sd000 at
+  500k; JSONs HF `runs/measure_fullness/fullness_{A_actor,A_bc,nf2_actor,nf2_bc,nf2_bon64}_sd000_500k_aws.json`):
+
+  | critic | rollout policy | tv(p, rho) task / random | tv(uniform, rho) | split-half noise | H(rho) |
+  |---|---|---|---|---|---|
+  | A | actor | 0.917 / 0.921 | 0.931 / 0.930 | 0.35 | 3.2 |
+  | A | bc | 0.911 / 0.916 | 0.925 / 0.926 | 0.39 | 3.4 |
+  | nf2 | actor | 0.881 / 0.874 | 0.930 / 0.927 | 0.35 / 0.38 | 3.3 / 3.4 |
+  | nf2 | bc | 0.877 / 0.891 | 0.929 / 0.927 | 0.35 | 3.3 |
+  | nf2 | bon64 | 0.935 / 0.911 | 0.966 / 0.950 | 0.20 / 0.26 | 2.5 / 2.9 |
+
+  Kisski's nf2 best-of-64 numbers reproduce on aws (0.942 / 0.914 there, 0.935 / 0.911 here). Both pre-stated
+  expectations held (occupancy broader under the actor and BC; tv below the best-of-64 value and far above the
+  noise floor); the withdrawal condition (nf2 under its own actor near the floor) was not met. The measure is
+  not a successor measure of the policy it bootstraps from. Caveat: the probe episode is walked by the same
+  policy, so probe states differ across policies; a rerun probing every policy from the best-of-64 episode's
+  states is requested from aws. Compendium section 6.2 carries the full table.
+- Sign-flip arm at 07:10: seeds at 440k / 400k / 400k, `params_250000` written, actor step
+  0.040 / 0.033 / 0.022 (A 0.088). The 250k eval jobs (2525538, 2525540, 2525541) have been pending since
+  04:32 / 05:07 behind priority; their nice was reset from 600 to 0 at 07:10.
+- Frozen-step arms at 07:10: fdplus seeds 0-2 and fdminus seed 0 running (flags.json: `frozen_delta` with the
+  right mode in all four; steps 270k / 260k / 215k / 210k); fdminus 1-2, fdrand 0-2, fdzero 0-2 pending.
+  fdplus 250k evals 2525542 / 2525543 submitted.
+
 ### Also
 - `docs/PSMGOAL_COMPENDIUM.md`: every design decision, arm, diagnostic and number from the
   09-17 spec to nf2, with math, pseudocode, the hypothesis table, open questions with
