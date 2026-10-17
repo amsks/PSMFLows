@@ -82,6 +82,13 @@ actor_value: none          # none | measure_reward_raw | measure_reward_softmax
 fb_value_temp: 1.0         # softmax arm temperature (reference measure_density_temp)
 fb_bc_coeff: 3.0           # in-support anchor toward the dataset preimage (reference FlowBC bc_coeff)
 bootstrap_delta_scale: 1.0 # factor on the flowbc actor's step in the TD target only (acting, actor loss unscaled); 1.0 = off
+# bootstrap_source=frozen_delta (2026-10-17): the target latent is clip(eps + step) with step from a FROZEN
+# flowbc delta loaded from frozen_delta_path at frozen_delta_epoch (no co-adaptation; the live actor still
+# trains, unused by the target). frozen_delta_mode: plus (+delta) | minus (-delta) | random (a random
+# direction with the step's length, per row) | zero (clip(eps), critic B). Needs policy_index=goal, actor_kind=flowbc.
+frozen_delta_path: null
+frozen_delta_epoch: 500000
+frozen_delta_mode: plus
 fb_rand_frac: 0.5          # random-direction task fraction (reference z_rand_frac)
 fb_hit_spec: "19:22:0.4"   # hindsight kernel reward blocks a:b:eps (cube xyz, eps 0.4)
 fb_ridge_lambda_mult: 0.01 # lam = mult * tr(C)/D

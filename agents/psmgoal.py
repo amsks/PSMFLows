@@ -163,7 +163,14 @@ REWARD_GPI_CANDS = ("top", "random", "both")
 #: prior draws at s', scored by the target measure on the row's goal (2026-10-07); no actor.
 #: bc_mean = the target measure averaged over bootstrap_n clipped prior draws at s' (2026-10-13;
 #: softmax: the mean of their softmax rows); no actor.
-BOOTSTRAP_SOURCES = ("actor", "data", "argmax", "bc_mean")
+BOOTSTRAP_SOURCES = ("actor", "data", "argmax", "bc_mean", "frozen_delta")
+#: bootstrap_source=frozen_delta (2026-10-17): the TD target latent is clip(eps + step) with step built from a
+#: FROZEN flowbc delta loaded from another run (frozen_delta_path/epoch); no co-adaptation. plus = +delta
+#: (critic A's target with a fixed field), minus = -delta, random = a random direction of the same length
+#: per row, zero = clip(eps) (critic B). The live actor still trains (policy_index=goal needs it) but is
+#: not read by the target.
+FROZEN_DELTA_MODES = ("plus", "minus", "random", "zero")
+FROZEN_DELTA_BOOT_KEY = 105
 #: goal_sampling options (policy_index=goal, 2026-10-04). geometric = the hindsight goal at
 #: offset ~ Geometric(1 - goal_discount) (utils/datasets.py hindsight_goal_idxs); uniform =
 #: a uniform draw over the row's own s' and every later state of the same trajectory
@@ -219,6 +226,21 @@ class InferenceState:
     l_opt: Any             # optax state for the multiplier
 
 
+def _load_frozen_delta_params(run_dir, epoch, template):
+    """bootstrap_source=frozen_delta: read `delta.params` out of another psmgoal run's params_<epoch>.pkl
+    (the full agent state dict) and restore it onto `template` (this agent's delta params pytree), so
+    the architectures must match (actor.hidden_dim / hidden_layers, action_dim, ob_dim)."""
+    import glob
+    import pickle
+    cands = glob.glob(run_dir)
+    assert len(cands) == 1, f"frozen_delta_path matched {len(cands)} dirs: {cands}"
+    path = f"{cands[0]}/params_{int(epoch)}.pkl"
+    with open(path, "rb") as f:
+        saved = pickle.load(f)["agent"]
+    assert "delta" in saved and "params" in saved["delta"], f"{path} has no delta params (not a flowbc run?)"
+    return flax.serialization.from_state_dict(template, saved["delta"]["params"])
+
+
 class PSMGoalAgent(flax.struct.PyTreeNode):
     """RLU Proto Successor Measure on flow latents; see the module docstring."""
 
@@ -253,6 +275,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
     eval_goal_w: Any = None      # (k_goals, z_dim) h(g_j) per eval goal (coef_source=hgoal_each)
     # Joint actor heads (2026-10-05; carried but unused unless actor_kind selects them).
     delta: Any = None            # actor_kind=flowbc: delta(s, g, eps) TrainState
+    frozen_delta_params: Any = None   # bootstrap_source=frozen_delta: the loaded, never-updated delta params
     log_alpha: Any = None        # actor_kind=dsrl: SAC's log alpha TrainState
     # coef_source=reward_gpi (2026-10-15, eval only; carried but unused otherwise).
     eval_cand_w: Any = None      # (k_goals, z_dim) h(g_c) per candidate goal
@@ -301,6 +324,13 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             assert not bool(config.get("train_actor", False)), \
                 f"bootstrap_source={bootstrap_source} replaces the actor in the bootstrap: set train_actor=false"
             assert int(config.get("bootstrap_n", 8)) >= 1, "bootstrap_n must be >= 1"
+        if bootstrap_source == "frozen_delta":
+            assert policy_index == "goal" and str(config.get("actor_kind", "tanh")) == "flowbc", \
+                "bootstrap_source=frozen_delta applies a flowbc delta(s', g, eps): needs policy_index=goal, actor_kind=flowbc"
+            assert str(config.get("frozen_delta_mode", "plus")) in FROZEN_DELTA_MODES, \
+                f"frozen_delta_mode must be one of {FROZEN_DELTA_MODES}"
+            assert config.get("frozen_delta_path", None) or config.get("allow_untrained_flow", False), \
+                "bootstrap_source=frozen_delta needs frozen_delta_path (a run dir with params_<frozen_delta_epoch>.pkl)"
         if bootstrap_source == "data":
             # docs/design/2026-10-03-psmgoal-data-bootstrap.md: u' = u_{i+1} is a sample of the
             # goal's policy at s' only for a hindsight goal from the row's own future.
@@ -318,9 +348,9 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             assert str(config.get("eval_goal_pool", "relabel")) == "relabel", \
                 "coef_source=reward_gpi draws its candidates and reference states from the relabel batch: needs eval_goal_pool=relabel"
         if policy_index == "goal":
-            assert bool(config.get("train_actor", False)) or bootstrap_source in ("data", "argmax", "bc_mean"), \
+            assert bool(config.get("train_actor", False)) or bootstrap_source in ("data", "argmax", "bc_mean", "frozen_delta"), \
                 ("policy_index=goal bootstraps from the goal-fed actor: set train_actor=true "
-                 "(or bootstrap_source=data|argmax|bc_mean)")
+                 "(or bootstrap_source=data|argmax|bc_mean|frozen_delta)")
             assert not bool(config.get("train_goal_head", False)), \
                 "policy_index=goal trains h by the measure loss; train_goal_head must be false"
             assert actor_value == "none", "policy_index=goal has its own actor loss; set actor_value=none"
@@ -419,6 +449,15 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         delta = TrainState.create(
             delta_def, delta_def.init(jax.random.fold_in(r_a, 1), ex_observations, ex_observations, ex_u)["params"],
             tx=optax.adam(config["lr_actor"]))
+        # bootstrap_source=frozen_delta: load delta's params from another run and keep them fixed.
+        frozen_delta_params = None
+        if str(config.get("bootstrap_source", "actor")) == "frozen_delta":
+            fpath = config.get("frozen_delta_path", None)
+            if fpath:
+                frozen_delta_params = _load_frozen_delta_params(
+                    str(fpath), int(config.get("frozen_delta_epoch", 500000)), delta.params)
+            else:   # tests/smokes only (allow_untrained_flow): start from delta's own init, replace() later
+                frozen_delta_params = copy.deepcopy(delta.params)
         dsrl = config.get("dsrl_actor", {"target_entropy": 0.0, "init_alpha": 1.0, "lr_alpha": 3.0e-4})
         log_alpha_def = LogAlpha(init_value=float(np.log(float(dsrl["init_alpha"]))))
         log_alpha = TrainState.create(log_alpha_def, log_alpha_def.init(jax.random.fold_in(r_a, 2))["params"],
@@ -465,7 +504,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                                        ob_dim), jnp.float32),
                    eval_actor_goal=jnp.zeros((ob_dim,), jnp.float32),
                    eval_goal_w=jnp.zeros((int(config["k_goals"]), z_dim), jnp.float32),
-                   delta=delta, log_alpha=log_alpha,
+                   delta=delta, log_alpha=log_alpha, frozen_delta_params=frozen_delta_params,
                    eval_cand_w=jnp.zeros((int(config["k_goals"]), z_dim), jnp.float32),
                    eval_ref_reward=jnp.zeros((max(int(config["batch_size"]) - int(config["k_goals"]), 1),),
                                              jnp.float32))
@@ -520,6 +559,9 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
 
     def _argmax_bootstrap(self):
         return str(self.config.get("bootstrap_source", "actor")) == "argmax"
+
+    def _frozen_delta_bootstrap(self):
+        return str(self.config.get("bootstrap_source", "actor")) == "frozen_delta"
 
     def _bc_mean_bootstrap(self):
         return str(self.config.get("bootstrap_source", "actor")) == "bc_mean"
@@ -684,6 +726,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             return self.argmax_bootstrap(batch)[0]
         if self._bc_mean_bootstrap():
             return self.prior_draws(jnp.asarray(batch["next_observations"]).shape[0])
+        if self._frozen_delta_bootstrap():
+            return self.frozen_delta_bootstrap(batch)
         if bool(c.get("train_actor", False)):
             next_obs = jnp.asarray(batch["next_observations"])
             goals = jnp.asarray(batch["goals"]) if self._goal_index() else None
@@ -713,6 +757,34 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         N = jnp.asarray(batch["observations"]).shape[0]
         index = jnp.asarray(batch["index"]) if "index" in batch else jnp.arange(N)
         return self.proto_bootstrap(z, index)
+
+    def frozen_delta_bootstrap(self, batch):
+        """bootstrap_source=frozen_delta (2026-10-17). eps ~ N(0, I) from the same key stream as the
+        flowbc actor bootstrap (so mode=plus with the live params would be bit-identical to it);
+        d = delta_frozen(s', g, eps) from the loaded params; the target latent is
+          plus:   clip(eps + d)        minus: clip(eps - d)
+          random: clip(eps + ||d|| * r/||r||), r ~ N(0, I) per row (the step's length, a random direction)
+          zero:   clip(eps)
+        Lengths are matched before the clip (the clip touches ~1% of rows at u_clip=3)."""
+        c = self.config
+        next_obs = jnp.asarray(batch["next_observations"])
+        goals = jnp.asarray(batch["goals"])
+        N, d_a = next_obs.shape[0], int(c["action_dim"])
+        eps = jax.random.normal(jax.random.fold_in(self.rng, FLOWBC_BOOT_KEY), (N, d_a))
+        d = self.delta(next_obs, goals, eps, params=self.frozen_delta_params)
+        mode = str(c.get("frozen_delta_mode", "plus"))
+        if mode == "plus":
+            step = d
+        elif mode == "minus":
+            step = -d
+        elif mode == "zero":
+            step = jnp.zeros_like(d)
+        else:   # random: a random direction with the frozen step's length, per row
+            r = jax.random.normal(jax.random.fold_in(self.rng, FROZEN_DELTA_BOOT_KEY), (N, d_a))
+            r = r / jnp.maximum(jnp.linalg.norm(r, axis=-1, keepdims=True), 1e-12)
+            step = r * jnp.linalg.norm(d, axis=-1, keepdims=True)
+        u_clip = float(c["u_clip"])
+        return jax.lax.stop_gradient(jnp.clip(eps + step, -u_clip, u_clip))
 
     def argmax_bootstrap(self, batch):
         """bootstrap_source=argmax: u'_i = the best of bootstrap_n clipped prior draws at s'_i,
@@ -1851,6 +1923,9 @@ def get_config():
         "fb_value_temp": 1.0,       # softmax arm: p_j = softmax_j(M_j / temp)
         "fb_bc_coeff": 3.0,         # in-support anchor weight on mean (u - u_data)^2
         "bootstrap_delta_scale": 1.0,  # factor on the flowbc actor's step in the TD target only
+        "frozen_delta_path": None,     # bootstrap_source=frozen_delta: run dir whose delta params are loaded
+        "frozen_delta_epoch": 500000,  # ... at this checkpoint
+        "frozen_delta_mode": "plus",   # plus | minus | random | zero
         "fb_rand_frac": 0.5,        # fraction of rows whose task is a random sqrt(D) direction
         "fb_hit_spec": "19:22:0.4",  # kernel reward blocks a:b:eps (cube: cube xyz, eps 0.4)
         "fb_ridge_lambda_mult": 0.01,   # lam = mult * tr(C)/D

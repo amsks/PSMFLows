@@ -199,6 +199,11 @@ def run(cfg):
     probe_ts = tuple(parse_int_list(cfg.get('probe_ts', None), PROBE_TS))
     R, T, n_ref = int(cfg.get('R', 8)), int(cfg.get('T', 100)), int(cfg.get('n_ref', 1024))
     task_goal_pick = str(cfg.get('task_goal_pick', 'top_share'))
+    # rollout_policy (2026-10-17): which g-policy's occupancy rho is measured. bon64 = the deployed best-of-64
+    # readout under h(g) (the original); actor = the run's own flowbc actor at goal g, u = clip(eps + delta(s, g, eps))
+    # (the policy the measure was trained to evaluate); bc = one clipped prior draw (the behaviour policy).
+    rollout_policy = str(cfg.get('rollout_policy', 'bon64'))
+    assert rollout_policy in ('bon64', 'actor', 'bc')
     assert task_goal_pick in ('top_share', 'first')
     assert R >= 1 and T >= 1 and n_ref >= 2
     prefix = str(cfg.env_name)
@@ -222,7 +227,7 @@ def run(cfg):
     K, u_clip = int(c['gpi_num_u']), float(c['u_clip'])
     n_ref_cols = max(int(c['batch_size']) - int(c['k_goals']), 1)
     print(f'=== diag_measure_fullness: tasks={tasks} episodes/task={n_ep} probe_ts={probe_ts} R={R} T={T} '
-          f'n_ref={n_ref} task_goal_pick={task_goal_pick} seed={base_seed}')
+          f'n_ref={n_ref} task_goal_pick={task_goal_pick} rollout_policy={rollout_policy} seed={base_seed}')
     print(f'    critics: {runs} epoch={cfg.restore_epoch}; forced {FORCED_AGENT_KEYS}; measure_loss={loss} '
           f'temp={temp} gamma={gamma} gpi_num_u={K} k_goals={int(c["k_goals"])} ref_cols={n_ref_cols}', flush=True)
 
@@ -277,7 +282,21 @@ def run(cfg):
         keys['k'], sub = jax.random.split(keys['k'])
         return sub
 
+    @jax.jit
+    def actor_latent(agent, obs, key):
+        eps = jax.random.normal(key, (1, int(agent.config['action_dim'])))
+        return agent.flowbc_latent(obs[None], agent.eval_goals[:1], eps)[0][0]
+
+    @jax.jit
+    def bc_latent(agent, key):
+        u_clip = float(agent.config['u_clip'])
+        return jnp.clip(jax.random.normal(key, (int(agent.config['action_dim']),)), -u_clip, u_clip)
+
     def act(agent, obs):
+        if rollout_policy == 'actor':
+            return np.clip(np.asarray(decode1(agent, jnp.asarray(obs), actor_latent(agent, jnp.asarray(obs), next_key()))), -1, 1)
+        if rollout_policy == 'bc':
+            return np.clip(np.asarray(decode1(agent, jnp.asarray(obs), bc_latent(agent, next_key()))), -1, 1)
         return np.clip(np.asarray(agent.sample_actions(observations=obs, seed=next_key(), temperature=0)), -1, 1)
 
     def with_goal(agent, g, hw, refs):
@@ -420,7 +439,8 @@ def run(cfg):
         'tool': 'diag_measure_fullness',
         'env_prefix': prefix, 'tasks': tasks, 'episodes_per_task': n_ep, 'probe_ts': list(probe_ts),
         'R': R, 'T': T, 'n_ref': n_ref, 'n_ref_cols': n_ref_cols, 'seed': base_seed,
-        'task_goal_pick': task_goal_pick, 'goal_settings': list(GOAL_SETTINGS), 'nn_modes': list(nn_modes),
+        'task_goal_pick': task_goal_pick, 'rollout_policy': rollout_policy,
+        'goal_settings': list(GOAL_SETTINGS), 'nn_modes': list(nn_modes),
         'gamma': gamma, 'measure_temp': temp, 'measure_loss': loss, 'gpi_num_u': K, 'u_clip': u_clip,
         'runs': runs, 'restore_epoch': int(cfg.restore_epoch),
         'train_seed': {s: prov[s].get('train_seed') for s in runs},
