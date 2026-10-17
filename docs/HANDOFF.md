@@ -22,7 +22,7 @@ Date: **2026-10-17** (latest) · prior: 2026-10-15, 2026-10-07, 2026-10-05, 2026
 
 ---
 
-## 2026-10-17 — nf2 scores above critic A; the actor's step points at the critic's preferred cluster; sign-flip arm at B's level (0.623 at 250k); psmgoal compendium written
+## 2026-10-17 — nf2 scores above critic A; the actor's step points at the critic's preferred cluster; sign-flip arm at B's level (0.623 / 0.640); frozen +step at A (0.770 at 250k); psmgoal compendium written
 
 ### nf2 (`psmgoal_ja_fbc3_pt_nf2_cube`, A + `agent.norm_future_k=2`), eval500 hgoal_each
 
@@ -87,9 +87,25 @@ gradient-step reading (at or below B, 0.63) is met; the perturbation reading (at
 stated before the result stands: this arm's actor shrank its own step to 0.022 / 0.023 / 0.031 by 500k against
 A's 0.088, so the mirrored target is both reversed and smaller, and a smaller perturbation is not excluded by
 this arm alone. The frozen-step arms below hold the length fixed. The 500k checkpoints of seeds 0 and 2 are
-written; the 500k evals follow through the watcher (2525558 submitted 07:57). First frozen-step number:
-fdplus seed 0 at 250k 0.726 (per task 0.758 0.764 0.876 0.666 0.568), within A's seed range 0.707 to 0.859;
-seeds 1 and 2 pending.
+written; the 500k evals follow through the watcher (2525558 submitted 07:57).
+
+Update 09:55 CEST, sign-flip 500k and the first frozen-step numbers (eval500 hgoal_each):
+
+| arm | 250k | per seed | 500k | per seed |
+|---|---|---|---|---|
+| sign-flip | 0.623 | 0.706 / 0.633 / 0.529 | **0.640** | 0.642 / 0.527 / 0.752 |
+| frozen step, plus (`fdplus`) | **0.770** | 0.726 / 0.792 / 0.791 | pending | |
+| frozen step, minus (`fdminus`) | 0.726 (seed 0 only) | per task 0.790 0.542 0.956 0.548 0.794 | | |
+| critic B | 0.626 | | 0.657 | |
+| critic A | 0.789 | | 0.805 | |
+
+Sign-flip at 500k is again at B's level (per seed per task: sd0 0.726 0.558 0.744 0.722 0.462; sd1 0.660 0.454
+0.762 0.222 0.536; sd2 0.780 0.832 0.832 0.622 0.694). fdplus at 250k is at A's level (0.770 against 0.789, A's
+seeds 0.707 to 0.859), so the frozen field from A seed 0 at 500k reproduces A without co-training; the plan's
+"plus well below A" case did not happen. fdminus seed 0 at 250k sits at 0.726, above B (0.626) and below A
+(0.789); one seed, per task 0.790 0.542 0.956 0.548 0.794 against fdplus seed 0's 0.758 0.764 0.876 0.666 0.568
+(the two runs are distinct: different flags, different checkpoints). fdminus seeds 1-2, fdrand and fdzero are
+still pending in the queue. The plus-against-random contrast is the one that separates the readings.
 
 ### Frozen-step arms launched 03:20 CEST (`docs/plans/2026-10-17-frozen-delta-bootstrap.md`, commits 09ae79b, 21abf12)
 
