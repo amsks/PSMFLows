@@ -74,7 +74,7 @@ at or below B 0.63 / 0.66; perturbation reading (the user's "exploration in nois
 at A 0.79 / 0.80; 0.70-0.75 -> both, random-direction control next. The actor's own step in
 this arm is 0.019 at 75k against A's 0.088.
 
-### Frozen-step arms launched 03:20 (`docs/plans/2026-10-17-frozen-delta-bootstrap.md`, commits 09ae79b, 21abf12)
+### Frozen-step arms launched 03:20 CEST (`docs/plans/2026-10-17-frozen-delta-bootstrap.md`, commits 09ae79b, 21abf12)
 
 The sign-flip arm is confounded (its actor's step shrank to 0.019 vs A's 0.088 by 75k, so direction and
 length change together). `bootstrap_source=frozen_delta` loads delta from A sd000 500k and never updates
@@ -85,7 +85,7 @@ seeds 0-2, 500k, 24 h), eval watcher `watcher_fd.log`. Expected: plus at A 0.80 
 matters); zero at B 0.66; minus and random at/below B if the step's direction carries the gain, at A if
 only its presence does.
 
-### Work split posted to the mailbox (kisski posts of 03:2xZ)
+### Work split posted to the mailbox (kisski posts 2026-10-17T01-21-14Z to luis, 01-21-17Z to aws)
 - luis: relaunch nf2 seeds 1-2 to 500k (H200, 24 h); build the deployment-actor distillation (Gaussian
   full-covariance student of the best-of-64 teacher on nf2 sd0 500k, 32-goal descriptor, MLE on the
   winning raw latent; expected within 0.05 of 0.91 in-task if the Gaussian suffices).
