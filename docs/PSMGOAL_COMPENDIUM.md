@@ -849,6 +849,15 @@ Within noise of one draw at both checkpoints.
 2026-10-15, kisski, the fullness and actor-mechanism diagnostics, then the trajectory-mass gate
 and the nf2 decision. These are section 5.
 
+2026-10-17, kisski, the sign-flip arm (`psmgoal_ja_fbc3_pt_bdsneg_cube`, A with
+`bootstrap_delta_scale=-1.0`: target latent clip(eps - delta) instead of clip(eps + delta), the
+actor trained unchanged; plan `docs/plans/2026-10-17-sign-flip-bootstrap.md`). Pre-stated:
+direction carries the gain -> at or below B 0.63 / 0.66; only the step's presence matters -> at
+A 0.79 / 0.80. Result at 250k: 0.623 (0.706 / 0.633 / 0.529; seed 0 per task 0.782 0.614 0.892
+0.702 0.540), B's level. Caveat known before the result: the arm's actor shrank its step to
+0.022 to 0.031 by 500k against A's 0.088, so the mirrored target is also a shorter one. The
+frozen-step arms (section 7, item 1) fix the length.
+
 2026-10-15, aws, the state-reward comparison on A seed 0 at 500k (`tools/eval_state_reward.py`;
 `coef_source=reward_gpi`, GPI over goal coefficients against a continuous state reward;
 `hgoal_topk`, the usual readout with the 32 highest-reward states as goals; `bc`):
@@ -906,6 +915,7 @@ success 59 (A) against 68 (B). The best-of-8 above best-of-64 and the 0.696 belo
 | best of 8 | bon8 | 3 | 0.020 | 0.096 |
 | best of 64 | bon64 | 3 | 0.006 | cancelled |
 | mean of 8 BC draws' softmax rows | bcmean8 | 3 | 0.735 | 0.683 |
+| flowbc actor step mirrored in the target (scale -1), actor trained as A | ja_fbc3_pt_bdsneg | 3 | 0.623 | pending |
 | flowbc actor, bc 0.3, shaped | ja_fbc03_sh | 3 | 0.758 | 0.706 |
 | flowbc actor, bc 3, shaped | ja_fbc3_sh | 5 | 0.700 | 0.710 |
 | flowbc actor, bc 0.3, point | ja_fbc03_pt | 3 | 0.757 | 0.777 |
@@ -1262,9 +1272,11 @@ each live reading. Numbers are what to compare against.
    the bootstrap selection) is the next arm. The actor acting alone stays at BC level in every
    case. The actor's own step in this arm was 0.019 at 75k against A's 0.088, so the actor
    learns a smaller step when its target is mirrored; that is a result in itself.
-   Update 2026-10-17 03:20: the sign-flip arm's own step is 0.040 / 0.033 / 0.022 (seeds 0 / 1 /
-   2) at 400k against A's 0.088, so direction and length change together and the arm does not
-   separate them. The clean test is the frozen-step arms
+   Result 2026-10-17 08:26, 250k, eval500 hgoal_each: 0.623 (0.706 / 0.633 / 0.529) against
+   B 0.626 and A 0.789. The gradient-step outcome (at or below B) is met; the perturbation
+   outcome (at A) is not. The arm's own step is 0.022 / 0.023 / 0.031 at 500k against A's
+   0.088, so direction and length change together and the arm alone does not exclude a smaller
+   perturbation as the cause. The clean test is the frozen-step arms
    `psmgoal_ja_fbc3_pt_fd{plus,minus,rand,zero}_cube` (`bootstrap_source=frozen_delta`, the
    step field loaded from A seed 0 at 500k and never updated; plan
    `docs/plans/2026-10-17-frozen-delta-bootstrap.md`, kisski jobs 2525526 to 2525537): plus

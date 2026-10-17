@@ -22,7 +22,7 @@ Date: **2026-10-17** (latest) · prior: 2026-10-15, 2026-10-07, 2026-10-05, 2026
 
 ---
 
-## 2026-10-17 — nf2 scores above critic A; the actor's step points at the critic's preferred cluster; sign-flip arm launched; psmgoal compendium written
+## 2026-10-17 — nf2 scores above critic A; the actor's step points at the critic's preferred cluster; sign-flip arm at B's level (0.623 at 250k); psmgoal compendium written
 
 ### nf2 (`psmgoal_ja_fbc3_pt_nf2_cube`, A + `agent.norm_future_k=2`), eval500 hgoal_each
 
@@ -73,6 +73,23 @@ steps) exit 0, flags -1.0. Jobs 2525506 (sd0, 00:57), 2525507 / 2525508 (sd1 / s
 at or below B 0.63 / 0.66; perturbation reading (the user's "exploration in noise space") ->
 at A 0.79 / 0.80; 0.70-0.75 -> both, random-direction control next. The actor's own step in
 this arm is 0.019 at 75k against A's 0.088.
+
+### Sign-flip arm, 250k result (08:26 CEST, eval500 hgoal_each, jobs 2525538 / 2525540 / 2525541)
+
+| arm | 250k five-task | per seed | per task (seed 0) |
+|---|---|---|---|
+| sign-flip (`bootstrap_delta_scale=-1.0`) | **0.623** | 0.706 / 0.633 / 0.529 | 0.782 0.614 0.892 0.702 0.540 |
+| critic B (one BC draw) | 0.626 | 0.757 / 0.593 / 0.528 | |
+| critic A (actor step) | 0.789 | 0.818 / 0.831 / 0.732 / 0.859 / 0.707 | |
+
+The mirrored step scores at critic B's level, 0.17 below A. Against the plan's pre-stated outcomes: the
+gradient-step reading (at or below B, 0.63) is met; the perturbation reading (at A, 0.79) is not. The caveat
+stated before the result stands: this arm's actor shrank its own step to 0.022 / 0.023 / 0.031 by 500k against
+A's 0.088, so the mirrored target is both reversed and smaller, and a smaller perturbation is not excluded by
+this arm alone. The frozen-step arms below hold the length fixed. The 500k checkpoints of seeds 0 and 2 are
+written; the 500k evals follow through the watcher (2525558 submitted 07:57). First frozen-step number:
+fdplus seed 0 at 250k 0.726 (per task 0.758 0.764 0.876 0.666 0.568), within A's seed range 0.707 to 0.859;
+seeds 1 and 2 pending.
 
 ### Frozen-step arms launched 03:20 CEST (`docs/plans/2026-10-17-frozen-delta-bootstrap.md`, commits 09ae79b, 21abf12)
 
