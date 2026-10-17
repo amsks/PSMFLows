@@ -18,7 +18,68 @@ hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RES
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
 Branch: `feat/inversion-integration` · Machine: `kisski` (GWDG, SLURM/H100) · prior: `midi-01` (UT CS)
-Date: **2026-10-15** (latest) · prior: 2026-10-07, 2026-10-05, 2026-09-23, 2026-09-17, 2026-09-16, 2026-09-15, 2026-09-14, 2026-09-11, 2026-09-10, 2026-09-09, 2026-09-08, 2026-09-07, 2026-09-06, 2026-09-05, 2026-09-04, 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+Date: **2026-10-17** (latest) · prior: 2026-10-15, 2026-10-07, 2026-10-05, 2026-09-23, 2026-09-17, 2026-09-16, 2026-09-15, 2026-09-14, 2026-09-11, 2026-09-10, 2026-09-09, 2026-09-08, 2026-09-07, 2026-09-06, 2026-09-05, 2026-09-04, 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+
+---
+
+## 2026-10-17 — nf2 scores above critic A; the actor's step points at the critic's preferred cluster; sign-flip arm launched; psmgoal compendium written
+
+### nf2 (`psmgoal_ja_fbc3_pt_nf2_cube`, A + `agent.norm_future_k=2`), eval500 hgoal_each
+
+| step | seeds | five-task | per seed |
+|---|---|---|---|
+| 250k | 0 1 2 | **0.865** | 0.914 / 0.829 / 0.852 |
+| 500k | 0 | **0.912** | sd0 per task 0.914 0.938 0.950 0.850 0.910 |
+
+Critic A: 0.789 (250k, 5 seeds) / 0.805 (500k). Seeds 1 and 2 hit the 12 h limit at 375k
+(jobs 2525380/2525381) and hold only `params_250000`; seed 0 (2525384, 16 h limit) completed
+in 15 h 56 min. A step costs 2.3x A's (256 x 768 mesh). Training signals at 500k (sd0):
+`measure_p_own_next` 0.344 (expected < 0.27: not met), `measure_p_future` 0.250 (expected
+>> 0.0026: met), `phi_eff_rank` 1.05 (expected > 1: marginal). Success did not fall (expected
+"may fall"). Diagnostics on sd0 (`$PSM_DATA/logs/measure_fullness/{fullness,trajectory_mass}_nf2_sd000_{250000,500000}.json`):
+fullness tv to the rollout occupancy 0.942 / 0.914 (task / random goal) vs uniform 0.971 /
+0.949 and A 0.965 / 0.952; entropy 5.55 / 5.98 (A 6.79); on cube position alone no better than
+uniform. Trajectory mass on own later states 416x (k=1) to 137x (k=50) a random state's (A
+113x to 14x); other trajectories' same-offset states 0.89 to 1.00x; data latent vs prior draw
+ratio 1.00 to 1.05 at every offset. Reading: nf2 is a stronger own-trajectory detector; the
+mass still does not depend on u and does not transfer across trajectories. Why success rose is
+unmeasured. Needs: seeds 1-2 relaunched under 24 h for the 500k number.
+
+### Where the actor's step points (`tools/diag_actor_shift_direction.py`, 93783f5; A sd000 500k, 512 states, 2000 draws; `$PSM_DATA/logs/actor_shift/shift_fbc3pt_sd000_500k.json`, job 2525503)
+
+| cosine of the constant part of the step with | value |
+|---|---|
+| the critic's top-5% centroid | 0.340 ± 0.021 |
+| the critic's mean gradient in u | 0.348 ± 0.022 |
+| the data latent | 0.078 ± 0.021 |
+
+cos(gradient, centroid) 0.947; cos(centroid, data latent) 0.098. Per draw: toward the centroid
+0.245 (70% positive), along the gradient 0.297 (70%), toward the data latent 0.087 (58%),
+outward from the prior centre -0.059 (45%). Random |cos| reference in 5 dims 0.375. Step 0.088,
+constant part 0.080, 82% of the second moment is the per-(s,g) constant; 88% of its variance is
+across goals at a fixed state. In action space the decoded action moves 0.010 while the recorded
+action is 0.298 away; gripper sign flips 0.9%. Reading: a goal-conditioned push toward what the
+critic ranks highest, 4% of the way, along the critic's local gradient, not toward the recorded
+action. Whether the direction produces the gain is the sign-flip arm's question.
+
+### Sign-flip arm launched (`psmgoal_ja_fbc3_pt_bdsneg_cube` = A + `agent.bootstrap_delta_scale=-1.0`; plan `docs/plans/2026-10-17-sign-flip-bootstrap.md`)
+
+The TD target bootstraps from clip(eps - delta) instead of clip(eps + delta); the actor trains
+unchanged. Unit test `test_scale_minus_one_mirrors_the_step` (5 pass). Smoke 2525504 (200
+steps) exit 0, flags -1.0. Jobs 2525506 (sd0, 00:57), 2525507 / 2525508 (sd1 / sd2, 01:35),
+24 h, 0.049 s/step; flags.json of each seed shows -1.0. Eval watcher
+`scripts/campaign_2026-10/arm_eval_watcher_cube.sh` (e61ff1f) submits hgoal_each at 250k and
+500k. Expected, stated before results: gradient-step reading (direction carries the gain) ->
+at or below B 0.63 / 0.66; perturbation reading (the user's "exploration in noise space") ->
+at A 0.79 / 0.80; 0.70-0.75 -> both, random-direction control next. The actor's own step in
+this arm is 0.019 at 75k against A's 0.088.
+
+### Also
+- `docs/PSMGOAL_COMPENDIUM.md`: every design decision, arm, diagnostic and number from the
+  09-17 spec to nf2, with math, pseudocode, the hypothesis table, open questions with
+  predictions, a proposed write-up and regeneration commands.
+- The aws step-scale sweep (m = 0.5 / 2 / 4, 1 seed, 100k): 0.532 / 0.637 / 0.628; m >= 2 level,
+  no m = 1 at 100k; see the compendium section 4.2.
 
 ---
 

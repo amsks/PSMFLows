@@ -16,6 +16,16 @@ they are closed prevents re-running them.
 > described in the block below is now `f_psmflow` (alias `psmflow`), kept as the comparator
 > at 0.284 five-task.
 >
+> **UPDATE 2026-10-17.** The "lp best 0.118" above belongs to the 2026-09-17 spec agent; the
+> promoted RLU-port agent reads lp 0.001. The agent as run since 2026-10-05 is the softmax-loss,
+> goal-indexed, flowbc-actor-bootstrap configuration `psmgoal_ja_fbc3_pt_cube`, 0.805 ± 0.014
+> five-task cube at 500k over 5 seeds (BC 0.111), and `norm_future_k=2` on top of it reaches
+> 0.865 at 250k (3 seeds) / 0.912 at 500k (1 seed). The complete record of how that
+> configuration was reached, what its actor does, why the trained measure is a trajectory
+> detector rather than a successor measure, and what nf2 changed, with math, pseudocode, every
+> arm and every number, is **`docs/PSMGOAL_COMPENDIUM.md`**. Sections 4 to 8 of this file
+> predate psmgoal and describe the comparator.
+>
 > **PREVIOUS PRIMARY (2026-09-04, amended 2026-09-05).** The project's algorithm is the
 > **paper-strict affine LatentFlowPSM**, and it is now the DEFAULT of `agent=psmflow`:
 > `psi_form=affine policy_index=latent train_actor=false acting=gpi`, i.e.
