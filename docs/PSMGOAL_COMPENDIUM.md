@@ -917,7 +917,9 @@ success 59 (A) against 68 (B). The best-of-8 above best-of-64 and the 0.696 belo
 | mean of 8 BC draws' softmax rows | bcmean8 | 3 | 0.735 | 0.683 |
 | flowbc actor step mirrored in the target (scale -1), actor trained as A | ja_fbc3_pt_bdsneg | 3 | 0.623 | 0.640 |
 | frozen flowbc field from A seed 0 at 500k, +step | ja_fbc3_pt_fdplus | 3 | 0.770 | 0.742 |
-| same field, -step | ja_fbc3_pt_fdminus | 1 of 3 | 0.726 | 0.620 |
+| same field, -step | ja_fbc3_pt_fdminus | 3 | 0.596 | 0.614 (sd0) |
+| same field, random direction of the same length | ja_fbc3_pt_fdrand | 3 | 0.692 | pending |
+| same field, zero step (one BC draw) | ja_fbc3_pt_fdzero | 3 | 0.727 | pending |
 | flowbc actor, bc 0.3, shaped | ja_fbc03_sh | 3 | 0.758 | 0.706 |
 | flowbc actor, bc 3, shaped | ja_fbc3_sh | 5 | 0.700 | 0.710 |
 | flowbc actor, bc 0.3, point | ja_fbc03_pt | 3 | 0.757 | 0.777 |
@@ -1296,6 +1298,12 @@ each live reading. Numbers are what to compare against.
    task 1), below the 0.78 to 0.82 stated beforehand and not separable from A 0.805 with three
    seeds; minus seed 0 0.620 (per task 0.706 0.666 0.602 0.676 0.450), B's level, down 0.106
    from 250k. Plus against minus on seed 0 at 500k: +0.142, plus ahead on four of five tasks.
+   All four arms at 250k, 3 seeds each (10-18): plus 0.770, zero 0.727 (0.761 / 0.733 / 0.686),
+   random 0.692 (0.809 / 0.718 / 0.550), minus 0.596 (0.726 / 0.521 / 0.542). Presence outcome
+   (random at A) not met. Direction outcome met for minus and random; zero sits above B's 0.626,
+   and the no-step level over B, bon1 and fdzero (nine seeds) is about 0.69, so the step's gain
+   over no step on matched frozen-field seeds is +0.043 at 250k, not the 0.16 of A against B.
+   Order: plus > zero > random > minus. 500k for zero, random and the minus seeds 1-2 pending.
 
 2. Does a step larger than the trained one help at full length?
    The aws sweep is one seed at 100k, and A and B were tied until 150k. Needed: m = 1 at 100k

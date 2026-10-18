@@ -22,7 +22,7 @@ Date: **2026-10-17** (latest) · prior: 2026-10-15, 2026-10-07, 2026-10-05, 2026
 
 ---
 
-## 2026-10-17 — nf2 scores above critic A; the actor's step points at the critic's preferred cluster; sign-flip arm at B's level (0.623 / 0.640); frozen +step 0.770 / 0.742, frozen -step seed 0 0.726 / 0.620; psmgoal compendium written
+## 2026-10-17 — nf2 scores above critic A; the actor's step points at the critic's preferred cluster; sign-flip arm at B's level (0.623 / 0.640); frozen-step 250k: +step 0.770, zero 0.727, random 0.692, -step 0.596; psmgoal compendium written
 
 ### nf2 (`psmgoal_ja_fbc3_pt_nf2_cube`, A + `agent.norm_future_k=2`), eval500 hgoal_each
 
@@ -133,6 +133,36 @@ intended. 250k checkpoints due about 01:30, 500k about 05:00 on 10-18; aws evalu
 aws-kisski parity on the 250k checkpoints (aws 19-17-30Z, JSONs `runs/frozen_step/aws/`): fdplus sd0 0.713 on
 aws against 0.726 on kisski, sd1 0.793 / 0.792, sd2 0.788 / 0.791; fdminus sd0 0.735 / 0.726. Three-seed fdplus
 250k 0.765 on aws against 0.770 on kisski. Differences within one binomial standard error.
+
+### Frozen-step arms, all four at 250k (10-18 04:35 CEST, kisski eval500 hgoal_each, 3 seeds each)
+
+| step in the target (field frozen from A seed 0 at 500k) | 250k | per seed | per task, seed 0 |
+|---|---|---|---|
+| +delta (`fdplus`) | **0.770** | 0.726 / 0.792 / 0.791 | 0.758 0.764 0.876 0.666 0.568 |
+| zero (`fdzero`, one BC draw) | **0.727** | 0.761 / 0.733 / 0.686 | 0.802 0.704 0.918 0.728 0.652 |
+| random direction, same length (`fdrand`) | **0.692** | 0.809 / 0.718 / 0.550 | 0.896 0.810 0.936 0.796 0.608 |
+| -delta (`fdminus`) | **0.596** | 0.726 / 0.521 / 0.542 | 0.790 0.542 0.956 0.548 0.794 |
+| critic A (co-trained actor step) | 0.789 | 5 seeds 0.707 to 0.859 | |
+| critic B (BC weight 1000, step 0.0003) | 0.626 | 0.757 / 0.593 / 0.528 | |
+| bon1 (one BC draw, luis) | 0.712 | | |
+
+Other seeds per task: fdzero sd1 0.872 0.886 0.716 0.452 0.740, sd2 0.772 0.718 0.910 0.510 0.522; fdrand sd1
+0.764 0.740 0.922 0.674 0.492, sd2 0.698 0.506 0.914 0.468 0.162; fdminus sd1 0.354 0.802 0.602 0.450 0.398,
+sd2 0.674 0.634 0.790 0.318 0.294. 500k so far (kisski): fdplus 0.741 (0.756 / 0.671 / 0.795; aws 0.742),
+fdminus sd0 0.614 (aws 0.620). The other 500k checkpoints are written at about 05:00 and evaluated on kisski
+and aws.
+
+Against the plan's pre-stated outcomes at 250k. Direction reading (minus and random at or below B, zero at B,
+plus at A): plus 0.770 is at A; minus 0.596 is below B; random 0.692 is at the no-step level and below plus;
+zero 0.727 is above B's 0.626. Presence reading (minus and random at A): not met, random is 0.08 below plus
+and minus 0.17 below. The no-step level itself is now three groups of three seeds: B 0.626, bon1 0.712,
+fdzero 0.727, nine-seed mean about 0.69; B's three seeds are the low end of that spread, so the A-to-B gap
+of 0.16 overstates the step's effect, and plus against zero on matched seeds is +0.043 (seed standard errors
+about 0.02 each). Order at 250k: plus > zero > random > minus. A step in the actor's direction adds a small
+amount over no step; the same step in a random direction adds nothing; the reversed step costs 0.13.
+Within-arm seed spread is large (random 0.55 to 0.81), so the 500k numbers and more seeds are needed before
+the plus-zero difference is more than one standard error. luis's extra random seeds 3-5 (asked 09:26Z) are
+unanswered.
 
 ### Frozen-step arms launched 03:20 CEST (`docs/plans/2026-10-17-frozen-delta-bootstrap.md`, commits 09ae79b, 21abf12)
 
