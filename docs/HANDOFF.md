@@ -22,7 +22,7 @@ Date: **2026-10-17** (latest) · prior: 2026-10-15, 2026-10-07, 2026-10-05, 2026
 
 ---
 
-## 2026-10-17 — nf2 scores above critic A; the actor's step points at the critic's preferred cluster; sign-flip arm at B's level (0.623 / 0.640); frozen-step 250k: +step 0.770, zero 0.727, random 0.692, -step 0.596; psmgoal compendium written
+## 2026-10-17 — nf2 scores above critic A; the actor's step points at the critic's preferred cluster; sign-flip arm at B's level (0.623 / 0.640); frozen-step arms done: +step 0.741, zero 0.687, random 0.683, -step 0.577 at 500k; psmgoal compendium written
 
 ### nf2 (`psmgoal_ja_fbc3_pt_nf2_cube`, A + `agent.norm_future_k=2`), eval500 hgoal_each
 
@@ -163,6 +163,35 @@ amount over no step; the same step in a random direction adds nothing; the rever
 Within-arm seed spread is large (random 0.55 to 0.81), so the 500k numbers and more seeds are needed before
 the plus-zero difference is more than one standard error. luis's extra random seeds 3-5 (asked 09:26Z) are
 unanswered.
+
+### Frozen-step arms complete: 500k, 3 seeds each (10-18 05:27 CEST, kisski eval500 hgoal_each)
+
+| step in the target | 250k | 500k | 500k per seed | 500k per task, seed 0 |
+|---|---|---|---|---|
+| +delta (`fdplus`) | 0.770 | **0.741** | 0.756 / 0.671 / 0.795 | 0.784 0.660 0.936 0.780 0.620 |
+| zero (`fdzero`) | 0.727 | **0.687** | 0.728 / 0.655 / 0.677 | 0.792 0.858 0.692 0.646 0.652 |
+| random direction, same length (`fdrand`) | 0.692 | **0.683** | 0.709 / 0.654 / 0.687 | 0.766 0.844 0.804 0.736 0.394 |
+| -delta (`fdminus`) | 0.596 | **0.577** | 0.614 / 0.475 / 0.642 | 0.708 0.644 0.602 0.664 0.454 |
+| critic A | 0.789 | 0.805 | | |
+| critic B | 0.626 | 0.657 | | |
+| sign-flip (co-trained, reversed) | 0.623 | 0.640 | | |
+
+Other seeds per task at 500k: fdplus sd1 0.412 0.764 0.868 0.716 0.596, sd2 0.710 0.906 0.820 0.776 0.762; fdzero
+sd1 0.660 0.838 0.576 0.522 0.680, sd2 0.846 0.508 0.838 0.670 0.522; fdrand sd1 0.654 0.772 0.780 0.410 0.654,
+sd2 0.762 0.756 0.856 0.464 0.598; fdminus sd1 0.778 0.282 0.836 0.264 0.214, sd2 0.844 0.658 0.818 0.280 0.610.
+All twelve runs uploaded to HF `runs/psmgoal_ja_fbc3_pt_fd*_cube/`; aws evaluates each (parity).
+
+Result, with the same frozen step field in every arm and the same step length in plus, random and minus:
+the random direction equals no step (0.683 against 0.687 at 500k, 0.692 against 0.727 at 250k); the reversed
+direction is 0.11 to 0.13 below no step at both checkpoints; the actor's direction is 0.054 above no step at
+500k and 0.043 at 250k (seed standard errors 0.02 to 0.04). Order at both checkpoints: plus > zero = random >
+minus. Against the plan: the "only the step's presence matters" outcome (random and minus at A) is not met at
+either checkpoint; the "direction carries the gain" outcomes are met for minus and random, and plus sits
+0.06 below A at 500k with an interval that includes A. The no-step level across B, bon1 and fdzero (nine
+seeds) is 0.66 to 0.69 at 500k, so the step's measured gain over no step is about 0.05, and the 0.15 gap
+between critics A and B is partly B's seeds. What is left open: whether the co-trained actor adds the
+remaining 0.06 between fdplus and A (three seeds cannot separate them), and more seeds on plus and zero to
+put the 0.05 beyond one standard error.
 
 ### Frozen-step arms launched 03:20 CEST (`docs/plans/2026-10-17-frozen-delta-bootstrap.md`, commits 09ae79b, 21abf12)
 

@@ -916,10 +916,10 @@ success 59 (A) against 68 (B). The best-of-8 above best-of-64 and the 0.696 belo
 | best of 64 | bon64 | 3 | 0.006 | cancelled |
 | mean of 8 BC draws' softmax rows | bcmean8 | 3 | 0.735 | 0.683 |
 | flowbc actor step mirrored in the target (scale -1), actor trained as A | ja_fbc3_pt_bdsneg | 3 | 0.623 | 0.640 |
-| frozen flowbc field from A seed 0 at 500k, +step | ja_fbc3_pt_fdplus | 3 | 0.770 | 0.742 |
-| same field, -step | ja_fbc3_pt_fdminus | 3 | 0.596 | 0.614 (sd0) |
-| same field, random direction of the same length | ja_fbc3_pt_fdrand | 3 | 0.692 | pending |
-| same field, zero step (one BC draw) | ja_fbc3_pt_fdzero | 3 | 0.727 | pending |
+| frozen flowbc field from A seed 0 at 500k, +step | ja_fbc3_pt_fdplus | 3 | 0.770 | 0.741 |
+| same field, -step | ja_fbc3_pt_fdminus | 3 | 0.596 | 0.577 |
+| same field, random direction of the same length | ja_fbc3_pt_fdrand | 3 | 0.692 | 0.683 |
+| same field, zero step (one BC draw) | ja_fbc3_pt_fdzero | 3 | 0.727 | 0.687 |
 | flowbc actor, bc 0.3, shaped | ja_fbc03_sh | 3 | 0.758 | 0.706 |
 | flowbc actor, bc 3, shaped | ja_fbc3_sh | 5 | 0.700 | 0.710 |
 | flowbc actor, bc 0.3, point | ja_fbc03_pt | 3 | 0.757 | 0.777 |
@@ -964,8 +964,8 @@ The actor acting alone is 0.098 to 0.132 in every actor arm except bc 0.3 with t
 | Direct start-to-goal trajectories carry the result | nostitch / randdrop | 0.786 / 0.787 | refuted |
 | The goal mix or measure-matched actor goals help | ogmix / rand30 / actmg | 0.755 / 0.704 / 0.751 | refuted |
 | Actors fail at inference by not reaching the preferred cluster | membership; step length | 5.4 percent against 4.2 for raw draws; step 0.088 on a draw of 2.13 | supported |
-| Exploration in noise space: only the perturbation off the exact draw matters, direction irrelevant | sign-flip arm | running; prediction 0.79 to 0.80 if true, at or below 0.66 if false | open |
-| Gradient step: the direction of the step carries the gain | sign-flip arm; shift diagnostic | step follows the gradient and the cluster centroid at cosine 0.35 and 0.34 | open |
+| Exploration in noise space: only the perturbation off the exact draw matters, direction irrelevant | frozen-step arms (same field, same length): random direction against zero step | random 0.692 / 0.683 against zero 0.727 / 0.687 at 250k / 500k; prediction was at A 0.79 / 0.80 | refuted |
+| Gradient step: the direction of the step carries the gain | frozen-step arms: plus against random and minus; sign-flip; shift diagnostic | plus 0.770 / 0.741, random 0.692 / 0.683, minus 0.596 / 0.577; sign-flip 0.623 / 0.640; step along the gradient at cosine 0.35 | supported; the gain over no step is 0.04 to 0.05, the loss from reversing it 0.11 to 0.13 |
 | Why A beats B at all | the only difference found | A's share level 0.151 against 0.107 | open |
 
 ### 4.5 Where the step points (2026-10-17, `tools/diag_actor_shift_direction.py`)
@@ -1013,6 +1013,15 @@ noise, from the critic favouring its own actor, from a sharper critic, from earl
 the data's direct trajectories, from the goal mix, or from the shape of the critic's preferred
 set. Whether it comes from the direction of the step or from the step's mere presence is the
 open question, and the sign-flip arm decides it.
+
+Update 2026-10-18, after the frozen-step arms (section 7, item 1). The direction is what matters.
+With the step field frozen from critic A and the step length held fixed, a step in the actor's
+direction scores 0.741 at 500k, no step 0.687, the same length in a random direction 0.683, and
+the reversed direction 0.577. The gain over no step is 0.04 to 0.05 of five-task success, not
+the 0.15 read off critics A and B, because B's three seeds sit at the low end of the no-step
+level (B 0.657, bon1 0.701, fdzero 0.687). The reversed step costs 0.11 to 0.13. A co-trained
+actor is not needed to get the gain; whether it adds the remaining 0.06 between fdplus and A
+is not separable with three seeds.
 
 ---
 
@@ -1304,6 +1313,12 @@ each live reading. Numbers are what to compare against.
    and the no-step level over B, bon1 and fdzero (nine seeds) is about 0.69, so the step's gain
    over no step on matched frozen-field seeds is +0.043 at 250k, not the 0.16 of A against B.
    Order: plus > zero > random > minus. 500k for zero, random and the minus seeds 1-2 pending.
+   500k, 3 seeds each (10-18 05:27): plus 0.741 (0.756 / 0.671 / 0.795), zero 0.687 (0.728 /
+   0.655 / 0.677), random 0.683 (0.709 / 0.654 / 0.687), minus 0.577 (0.614 / 0.475 / 0.642).
+   Random equals zero at both checkpoints; minus is 0.11 below zero; plus is 0.054 above zero.
+   The presence reading is refuted; the direction reading holds with a gain of 0.04 to 0.05 over
+   no step. Open: the 0.06 between fdplus and A (co-trained actor or seed noise), and more seeds
+   on plus and zero.
 
 2. Does a step larger than the trained one help at full length?
    The aws sweep is one seed at 100k, and A and B were tied until 150k. Needed: m = 1 at 100k
