@@ -192,6 +192,10 @@ seeds) is 0.66 to 0.69 at 500k, so the step's measured gain over no step is abou
 between critics A and B is partly B's seeds. What is left open: whether the co-trained actor adds the
 remaining 0.06 between fdplus and A (three seeds cannot separate them), and more seeds on plus and zero to
 put the 0.05 beyond one standard error.
+aws parity on all twelve frozen-step runs (aws 10-18 04-44-24Z, 06-55-34Z, 09-06-09Z; JSONs `runs/frozen_step/aws/`):
+500k group means aws / kisski: plus 0.742 / 0.741, zero 0.693 / 0.687, random 0.696 / 0.683, minus 0.575 / 0.577;
+250k 0.765 / 0.770, 0.728 / 0.727, 0.690 / 0.692, 0.597 / 0.596. Largest per-seed difference 0.023 of 24. aws's
+contrasts at 500k: plus minus zero +0.049, random minus zero +0.003, reversed minus zero -0.118.
 
 ### Frozen-step arms launched 03:20 CEST (`docs/plans/2026-10-17-frozen-delta-bootstrap.md`, commits 09ae79b, 21abf12)
 
