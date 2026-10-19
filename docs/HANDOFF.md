@@ -54,6 +54,50 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 18:50 CEST, pool arms complete at 250k: goal index with the frozen field 0.326 ± 0.041, with the live actor 0.328 ± 0.092 (goal readout); the reward readout 0.29 / 0.26; bank 0.252 ± 0.063; critic A on the same readout 0.805
+
+kisski eval500, 500 episodes per task, 3 seeds each, 250k (jobs 2525800 to 2525802, 2525819 to 2525832):
+
+| five-task cube, 250k | t1 | t2 | t3 | t4 | t5 | mean |
+|---|---|---|---|---|---|---|
+| pool bank, pool_reward, sd0 | 0.156 | 0.158 | 0.398 | 0.192 | 0.264 | 0.234 |
+| pool bank, pool_reward, sd1 | 0.228 | 0.288 | 0.322 | 0.124 | 0.242 | 0.241 |
+| pool bank, pool_reward, sd2 | 0.194 | 0.246 | 0.428 | 0.332 | 0.204 | 0.281 |
+| **pool bank, pool_reward, mean ± 95% CI** | | | | | | **0.252 ± 0.063** |
+| pool fdplus, hgoal_each, sd0 | 0.384 | 0.494 | 0.232 | 0.086 | 0.354 | 0.310 |
+| pool fdplus, hgoal_each, sd1 | 0.404 | 0.440 | 0.314 | 0.122 | 0.434 | 0.343 |
+| pool fdplus, hgoal_each, sd2 | 0.412 | 0.362 | 0.394 | 0.058 | 0.404 | 0.326 |
+| **pool fdplus, hgoal_each, mean ± 95% CI** | | | | | | **0.326 ± 0.041** |
+| pool fdplus, pool_reward, sd0 | 0.380 | 0.454 | 0.398 | 0.036 | 0.264 | 0.306 |
+| pool fdplus, pool_reward, sd1 | 0.330 | 0.456 | 0.224 | 0.126 | 0.316 | 0.290 |
+| pool fdplus, pool_reward, sd2 | 0.264 | 0.384 | 0.480 | 0.038 | 0.234 | 0.280 |
+| **pool fdplus, pool_reward, mean ± 95% CI** | | | | | | **0.292 ± 0.033** |
+| pool ja, hgoal_each, sd0 | 0.270 | 0.592 | 0.266 | 0.038 | 0.268 | 0.287 |
+| pool ja, hgoal_each, sd1 | 0.414 | 0.446 | 0.370 | 0.192 | 0.370 | 0.358 |
+| pool ja, hgoal_each, sd2 | 0.424 | 0.388 | 0.226 | 0.214 | 0.440 | 0.338 |
+| **pool ja, hgoal_each, mean ± 95% CI** | | | | | | **0.328 ± 0.092** |
+| pool ja, pool_reward, sd0 | 0.304 | 0.232 | 0.376 | 0.026 | 0.170 | 0.222 |
+| pool ja, pool_reward, sd1 | 0.380 | 0.396 | 0.324 | 0.092 | 0.156 | 0.270 |
+| pool ja, pool_reward, sd2 | 0.334 | 0.324 | 0.482 | 0.018 | 0.280 | 0.288 |
+| **pool ja, pool_reward, mean ± 95% CI** | | | | | | **0.260 ± 0.085** |
+| critic A (`psmgoal_ja_fbc3_pt_cube`), hgoal_each, 250k, 5 seeds | | | | | | 0.789 |
+| frozen +step arm (fdplus, batch softmax), hgoal_each, 250k | | | | | | 0.74 |
+| BC control | | | | | | 0.111 |
+
+Against `docs/design/2026-10-19-pool-measure.md`: expected 0.70 to 0.80 for both goal arms under hgoal_each with
+pool_reward within 0.05; measured 0.33 and 0.33, pool_reward 0.03 to 0.07 below. The only change from critic A
+and the frozen-step arm is the candidate set of the softmax (the fixed 1024-state pool with the nearest-pool-state
+anchor instead of the batch's own next states): success falls from 0.79 / 0.74 to 0.33. Task 4 is at or near
+zero in every pool cell (0.02 to 0.21). Training signals at 290k to 360k: anchor mass 0.08 to 0.10, pool entropy
+3.7 to 3.8 (goal arms) and 4.2 (bank) of 6.93, pool_u_tv 0.05 to 0.08 (flat since 5k), phi effective rank 1.15 to
+1.25. With aws's fullness lines (bank 16:50, 17:35; fdplus 18:40): the pool measure fits its own policy's
+occupancy in full-state cells (tv 0.45 bank, 0.60 to 0.69 fdplus against floors of 0.35 to 0.40) and sits at the
+uniform level in cube-position cells in every line. Reading: the acting of critic A and nf2 comes from the
+one-hot on the trajectory's own next state over the batch; a proper distribution over a fixed set removes it
+and the full-state agreement it buys does not include the cube. The pool measure is a diagnostic result; the
+user moved to the reward-index arm (18:40). The 500k pool checkpoints land about 01:00 to 03:00 and get the
+same two readouts for the record; no further pool arms.
+
 ### 18:40 CEST, user decision: port Density FB's z arm (the reward index) into psmgoal; built, tested, smoked, launched on luis and kisski; results wanted by about 00:00
 
 User, 18:00 to 18:15: the pool measure's fullness-without-acting result and the Density FB comparison led to
