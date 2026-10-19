@@ -54,6 +54,30 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 07:55 CEST, luis: D seed-1 and the sd2 random-region student started; task 4 on matched start states
+
+luis 05-36-15Z: D at student seed 1 (job 8764388, saved labels) and the random-region student on the nf2 sd2
+teacher (8764389) running, commit f39a9ca, D recipe. Task-4 success on the 125 start states shared between the
+teacher evals (worker 0, evaluate(seed=0)) and the student evals (seed 0); the sd0 teacher's line is from the
+kisski eval of 10-17, uploaded to HF `runs/psmgoal_ja_fbc3_pt_nf2_cube/eval500_sd000_500000_hgoal_each/`:
+
+| policy | t4 first 125 | t4 500 |
+|---|---|---|
+| sd0 teacher | 0.872 | 0.850 |
+| sd0 in-task student, sample / mode | 0.856 / 0.872 | 0.882 / 0.890 |
+| sd0 random-region student, sample / mode | 0.864 / 0.904 | 0.880 / 0.904 |
+| sd1 teacher | 0.808 | 0.842 |
+| sd1 in-task student ss0, sample / mode | 0.768 / 0.672 | 0.748 / 0.688 |
+| sd1 in-task student ss1, sample / mode | 0.768 / 0.720 | 0.768 / 0.700 |
+| D, sd1 random-region, sample / mode | 0.640 / 0.296 | 0.612 / 0.306 |
+| sd2 teacher | 0.728 | 0.710 |
+| sd2 in-task student, sample / mode | 0.472 / 0.392 | 0.486 / 0.342 |
+
+Reading: sd0 students at the teacher's level on task 4; sd1 in-task students 0.04 to 0.07 below their teacher
+(in line with the other tasks); D 0.17 (sample) and 0.51 (mode) below the sd1 teacher on task 4 while the teacher
+is at 0.81 there, so a coverage gap (nearest random anchor 5.4 cm from the task-4 centroid); the sd2 teacher is
+itself at 0.73 on task 4 and its in-task student loses another 0.26. Replied 05-49-52Z with the sd0 line.
+
 ### 07:35 CEST, luis: the random-region student of the nf2 seed 1 teacher scores 0.877, above that teacher (0.813) and its in-task students (0.757, 0.787)
 
 luis 05-25-49Z (jobs 8763935, 8764020; 500 episodes, eval seed 0, set student with early stopping):
