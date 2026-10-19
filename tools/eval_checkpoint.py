@@ -696,6 +696,7 @@ def main(cfg):
         # without failing, so each of these has to be in the JSON. `actor_restored` is false
         # when the restore left the actor at its fresh initialisation.
         "coef_source": config.get("coef_source"),
+        "ridge_score": config.get("ridge_score"),   # policy_index=reward: goal | reward (the best-of-64 score at the ridge w)
         "measure_loss": config.get("measure_loss"),
         "measure_temp": config.get("measure_temp"),
         # psmgoal pool measure (2026-10-19): the reference pool's size, seed and recorded hash (asserted
