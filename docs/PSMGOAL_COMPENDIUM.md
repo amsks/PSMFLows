@@ -1343,6 +1343,10 @@ Ladder (01:20): sd000 best-of-64 at w 0.260 / 0.283 / 0.392 / 0.328 / 0.424 at 5
 rising 0.16 over the run while the feature spread shrinks 50x, so the shrink does not cost the readout and 250k
 is not the end of the curve. 500k line launched (seeds 3-5, `psmgoal_ri_fbc3_500k_cube`); expected 0.50 to 0.65
 at 500k if the slope continues at half rate.
+Kernel actor reward (01:50): `reward_actor_reward=kernel` (8817b60), the actor climbs the exact kernel reward of
+its own hindsight goal on the rows that keep one (Density FB's kernel mode; the paper's Eq. pretraining-reward
+is the centered view the 250k arm ran). Arm `psmgoal_ri_fbc3_kern_cube` seeds 0-2, 250k. Expected: actor at w
+0.30 or above if the reward rows were the limit; within 0.05 of BC if the BC term holds it.
 
 ## 7. Open questions and the next arms, with predictions
 

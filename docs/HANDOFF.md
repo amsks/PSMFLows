@@ -54,6 +54,38 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 01:50 CEST 10-20, kernel actor reward built and launched: `psmgoal_ri_fbc3_kern_cube` seeds 0-2 (2525864-2525866), the actor climbs the exact kernel reward on its hindsight rows
+
+The user's call at 01:30: Density FB's actor on the exact kernel reward is the setting that worked, and the
+paper's method section (pasted) is the reference, not the repo notes. What the pasted section trains the actor
+on is Eq. pretraining-reward, r_z(s+) = (B_xi(s+) - mu_hat)^T z / sqrt(d), the centered feature view, which is
+what the 250k arm ran; the kernel enters there through the inference of z from goal-reaching kernel rewards.
+Density FB's code also has `measure_density_z_actor_reward=kernel` (305c5d4): the exact kernel reward of the
+row's own hindsight goal on the rows that keep one, the centered view on the sphere-draw rows.
+
+Port (8817b60): `reward_actor_reward` in `agents/psmgoal.py` (latent_centered | kernel; default
+latent_centered, so every existing run is unchanged). `reward_actor_rows` builds the actor's reward over the
+batch's next states: under kernel, k(g_i, y_j) with fb_hit_spec 19:22:0.4 on the rows with
+index_hindsight_actor == 1, (f(y_j) - mu)^T w_i / sqrt(D) on the random rows; `actor_loss_flowbc_reward` takes
+the rows. Critic, index solve, bootstrap and test time untouched. Tests: `tests/test_psmgoal_reward_index.py`
+23 pass (new: bad value asserts; kernel rows equal the kernel reward on hindsight rows and the centered view
+elsewhere, latent_centered equals the centered view on every row; update runs under kernel and moves delta).
+Lint clean on the two files. Launcher: `SUFFIX=_kern RI_EXTRA="agent.reward_actor_reward=kernel"`.
+
+Smoke (CPU, 200 steps, exit 0, `$S/smoke_rik_cpu.log`; a first attempt failed on the wrong env name, the
+preimage file is bound to `cube-single-play-singletask-v0`): flags policy_index reward, reward_actor_reward
+kernel, coef_source ridge, ridge_score goal, actor_kind flowbc, actor_input w, measure_loss softmax,
+fb_rand_frac 0.5, fb_hit_spec 19:22:0.4, bootstrap_source actor, fb_bc_coeff 3.0. Step 200: index_proxy_corr
+0.458 and measure_p_own_next 0.005, equal to the latent_centered smoke (same critic path); actor_r_std 0.35
+against the latent rows' scale; actor_delta_norm 0.007; actor_q 0.036.
+
+Launch: seeds 0-2, 250k, group `psmgoal_ri_fbc3_kern_cube`, jobs 2525864-2525866, pending at 01:48 behind
+the 500k seeds 2525859-2525861; flags re-read on start; watcher `ARM=psmgoal_ri_fbc3_kern_cube` submits the
+three readouts at 250k. Expected, stated now: if the exact reward is what the actor lacked, the actor at w
+moves off BC to 0.30 or above at 250k and best-of-64 at w stays near 0.42; if the actor stays within 0.05 of
+BC (0.11), the BC term holds it and the reward rows are not the limit. Critic signals (proxy correlation,
+own-next mass) expected equal to the latent_centered arm within noise, since the critic path is unchanged.
+
 ### 01:25 CEST 10-20, reward-index sd000 ladder: best-of-64 at the ridge w rises with training, 0.26 at 50k to 0.42 at 250k; 500k line launched (seeds 3-5, `psmgoal_ri_fbc3_500k_cube`, 2525859-2525861)
 
 Packed ri_gpi evals of sd000 at 50k / 100k / 150k / 200k (2525851-2525854, five tasks, 500 episodes each):
