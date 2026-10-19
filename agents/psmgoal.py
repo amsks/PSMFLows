@@ -131,7 +131,15 @@ def induced_value(M, r, mode, temp):
 #: FLOWBC_BOOT_KEY) and the coefficient is ONE shared learned w, read as the existing w(z) net at the
 #: constant all-ones code BANK_CODE (no new net; the all-zero code would give enc(0) = 0, w = 0 at init).
 #: No actor is trained (train_actor must be false); a plain policy evaluation of BC.
-POLICY_INDEXES = ("code", "goal", "bank")
+POLICY_INDEXES = ("code", "goal", "bank", "reward")
+#: reward (2026-10-19, docs/design/2026-10-19-reward-index.md): Density FB's z arm. w_i is the centred ridge
+#: solve of a reward on the projected-phi feature f (fb_feature at the slow tower fb_zenc): at training the
+#: kernel reward of the row's hindsight goal over the batch's next states (fb_rand_frac of the rows a random
+#: sphere draw), at test the relabel rewards (coef_source=ridge). Critic A's loss, bootstrap and flowbc
+#: actor otherwise; the actor takes w. ridge_score picks the best-of-64 score at test time.
+RIDGE_SCORES = ("goal", "reward")
+REWARD_INDEX_KEY = 107
+REWARD_ACTOR_KEY = 108
 BANK_CODE = 1.0
 #: measure_loss options. squared = TD on the mesh; softmax = cross-entropy over the columns.
 #: pool (2026-10-19, docs/design/2026-10-19-pool-measure.md): the softmax cross-entropy with the
@@ -332,7 +340,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             assert bool(config.get("train_actor", False)), \
                 "actor_value != none trains the in-loop actor: set train_actor=true"
         if str(config.get("coef_source", "lp")) == "ridge":
-            assert actor_value != "none", "coef_source=ridge reads the actor_value feature state"
+            assert actor_value != "none" or str(config.get("policy_index", "code")) == "reward", \
+                "coef_source=ridge reads the actor_value feature state (or policy_index=reward)"
         assert int(config["max_log_seed"]) >= 1, "max_log_seed (policy-code width) must be >= 1"
         assert int(config["k_goals"]) >= 1 and int(config["gpi_num_u"]) >= 1
         assert float(config["inf_coeff"]) >= 0.0
@@ -408,6 +417,25 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             assert str(config.get("coef_source", "lp")) != "trained", (
                 "coef_source=trained reads w(z) on the policy code; under policy_index=goal the "
                 "trained coefficient is h(g): use coef_source=amortized")
+        if policy_index == "reward":
+            # docs/design/2026-10-19-reward-index.md: Density FB's z arm in critic A's recipe.
+            assert measure_loss == "softmax", "policy_index=reward uses critic A's softmax loss: set measure_loss=softmax"
+            assert bool(config.get("train_actor", False)), \
+                "policy_index=reward bootstraps from the w-fed flowbc actor: set train_actor=true"
+            assert str(config.get("actor_kind", "tanh")) == "flowbc", "policy_index=reward: set actor_kind=flowbc"
+            assert actor_input == "w", "policy_index=reward feeds the actor the index w: actor_input=w"
+            assert bootstrap_source == "actor", "policy_index=reward bootstraps from the actor at (s', w): bootstrap_source=actor"
+            assert actor_value == "none", "policy_index=reward has its own actor loss; set actor_value=none"
+            assert not bool(config.get("train_goal_head", False)), "policy_index=reward has no goal head to train"
+            assert int(config.get("norm_future_k", 0)) == 0, "policy_index=reward: norm_future_k=0 (first arm)"
+            assert coef_source in ("ridge", "lp"), \
+                "policy_index=reward is read at test time by coef_source=ridge (lp only as a diagnostic)"
+            assert str(config.get("ridge_score", "goal")) in RIDGE_SCORES, f"ridge_score must be one of {RIDGE_SCORES}"
+            assert str(config.get("bootstrap_switch", "none")) == "none" and float(config.get("bootstrap_delta_scale", 1.0)) == 1.0, \
+                "policy_index=reward: bootstrap_switch=none, bootstrap_delta_scale=1"
+            assert str(config["acting"]) in ("gpi", "distill"), "policy_index=reward acts by gpi (best-of-64 at w) or distill (the actor at w)"
+            if str(config["acting"]) == "distill":
+                assert not bool(config.get("eval_redistill", True)), "policy_index=reward: the flowbc actor is not re-distilled; set eval_redistill=false"
         norm_future_k = int(config.get("norm_future_k", 0))
         assert norm_future_k >= 0, "norm_future_k must be >= 0"
         if norm_future_k > 0:
@@ -440,9 +468,10 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         assert actor_kind in ACTOR_KINDS, f"actor_kind must be one of {ACTOR_KINDS}"
         assert actor_value_kind in ACTOR_VALUE_KINDS, f"actor_value_kind must be one of {ACTOR_VALUE_KINDS}"
         if actor_kind != "tanh":
-            assert policy_index == "goal", f"actor_kind={actor_kind} is the goal actor: needs policy_index=goal"
+            assert policy_index in ("goal", "reward"), f"actor_kind={actor_kind} is the goal actor: needs policy_index=goal|reward"
             assert bool(config.get("train_actor", False)), f"actor_kind={actor_kind} trains an actor: set train_actor=true"
-            assert actor_input == "goal", f"actor_kind={actor_kind} takes the raw goal: set actor_input=goal"
+            assert policy_index == "reward" or actor_input == "goal", \
+                f"actor_kind={actor_kind} takes the raw goal: set actor_input=goal"
         if actor_kind == "dsrl":
             assert float(config.get("fb_bc_coeff", 3.0)) == 0.0, \
                 "actor_kind=dsrl has no BC term: set fb_bc_coeff=0"
@@ -508,8 +537,10 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         # the slots; trained only under their actor_kind.
         delta_def = LatentResidualActor(action_dim=action_dim, hidden_dim=config["actor"]["hidden_dim"],
                                         hidden_layers=config["actor"]["hidden_layers"])
+        # policy_index=reward: delta's goal slot takes the index w (z_dim) instead of a goal state.
+        ex_delta_cond = ex_w if policy_index == "reward" else ex_observations
         delta = TrainState.create(
-            delta_def, delta_def.init(jax.random.fold_in(r_a, 1), ex_observations, ex_observations, ex_u)["params"],
+            delta_def, delta_def.init(jax.random.fold_in(r_a, 1), ex_observations, ex_delta_cond, ex_u)["params"],
             tx=optax.adam(config["lr_actor"]))
         # bootstrap_source=frozen_delta: load delta's params from another run and keep them fixed.
         frozen_delta_params = None
@@ -627,6 +658,12 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
 
     def _bank_index(self):
         return str(self.config.get("policy_index", "code")) == "bank"
+
+    def _reward_index(self):
+        return str(self.config.get("policy_index", "code")) == "reward"
+
+    def _ridge_reward_score(self):
+        return self._reward_index() and str(self.config.get("ridge_score", "goal")) == "reward"
 
     def bank_w(self, params=None, target=False):
         """policy_index=bank: the single shared coefficient, (1, z_dim): the w(z) net at the constant code
@@ -840,6 +877,11 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         bootstrap_source=bc_mean: all bootstrap_n clipped prior draws, (n, N, d); measure_loss
         averages the target over them."""
         c = self.config
+        if self._reward_index():
+            # the flowbc actor at (s', w_i), w_i the row's index (batch['index_w'], `reward_index_rows`)
+            next_obs = jnp.asarray(batch["next_observations"])
+            eps = jax.random.normal(jax.random.fold_in(self.rng, FLOWBC_BOOT_KEY), (next_obs.shape[0], int(c["action_dim"])))
+            return jax.lax.stop_gradient(self.flowbc_latent(next_obs, jnp.asarray(batch["index_w"]), eps)[0])
         if self._bank_index():
             # the behaviour policy: one clipped prior draw at s', the same key stream as the flowbc bootstrap
             # (so it equals that bootstrap with delta = 0)
@@ -992,8 +1034,12 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             assert fut.shape[:2] == (next_obs.shape[0], int(c["norm_future_k"])), fut.shape
             goals = jnp.concatenate([next_obs, fut.reshape(-1, fut.shape[-1])], axis=0)  # (N + N*K, ob)
         row_goals = jnp.asarray(batch["goals"]) if self._goal_index() else None
-        w = self._coef(z, row_goals, params=w_params)            # (N, z), online
-        w_t = self._coef(z, row_goals, target=True)              # (N, z), target
+        if self._reward_index():
+            # the index is a solve, not a net: online and target rows are the same stop-gradded w_i
+            w = w_t = jax.lax.stop_gradient(jnp.asarray(batch["index_w"]))        # (N, z)
+        else:
+            w = self._coef(z, row_goals, params=w_params)            # (N, z), online
+            w_t = self._coef(z, row_goals, target=True)              # (N, z), target
         phi, b = self.mesh_phi_b(obs, u, goals, params=basis_params)             # (N, S, z), (N, S)
         M = (phi * w[:, None, :]).sum(-1) + b                                     # (N, S); S = N unless norm_future_k
         if u_next.ndim == 3:                                     # bootstrap_source=bc_mean
@@ -1004,7 +1050,10 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         if self._pool():
             return self._pool_measure_loss(M, target_M, phi, w, anchor, obs, basis_params)
         if self._softmax():
-            return self._softmax_measure_loss(M, target_M, phi, w)
+            loss, info = self._softmax_measure_loss(M, target_M, phi, w)
+            if self._reward_index():
+                info = {**info, **self.reward_index_info(batch, w)}
+            return loss, info
         # Successor-measure Bellman fit (PSM Eq. 2 + Cor. 4.2, arXiv 2411.19418 v2; RLU
         # discrete_psm.py:427-434): off-diagonal = squared TD to gamma*target; diagonal =
         # -(1-gamma) pull toward reaching your own next state.
@@ -1312,6 +1361,99 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                 "fb_cov_trace": jnp.trace(cov), "fb_f_mu_norm": jnp.linalg.norm(mu)}
         return actor, fb_state, info
 
+    # ----------------------------------------------- reward index (policy_index=reward, 2026-10-19)
+    def reward_index_rows(self, batch):
+        """policy_index=reward: the index rows of one update, computed once per step from the batch (the
+        index is a solve on f at the slow tower, not a net). Returned as a dict merged into the batch:
+        index_w (N, D) the measure rows' w = ridge of the kernel reward of batch['goals'] over the batch's
+        next states (fb_rand_frac of the rows a random sqrt(D) sphere draw); index_w_actor (N, D) the same
+        at the actor goal batch['fb_goals'] with its own draw; index_f (P, D) f of the next states at the
+        index tower; index_anchor (k_anchor, ob) the anchors read; index_hindsight(_actor) (N, 1) 1 on
+        hindsight rows."""
+        pool = jnp.asarray(batch["next_observations"])
+        k_anchor = self.fb_anchor.shape[0]
+        assert pool.shape[0] >= k_anchor, "batch must hold at least fb_k_anchor next states"
+        anchors = jnp.where(self.fb_filled > 0.5, self.fb_anchor, pool[:k_anchor])
+        f_pool = jax.lax.stop_gradient(self.fb_feature(pool, self.fb_zenc, anchors))          # (P, D)
+        w_m, h_m = self.fb_sample_tasks(f_pool, jnp.asarray(batch["goals"]), pool,
+                                        jax.random.fold_in(self.rng, REWARD_INDEX_KEY))
+        w_a, h_a = self.fb_sample_tasks(f_pool, jnp.asarray(batch["fb_goals"]), pool,
+                                        jax.random.fold_in(self.rng, REWARD_ACTOR_KEY))
+        return {"index_w": w_m, "index_w_actor": w_a, "index_f": f_pool, "index_anchor": anchors,
+                "index_hindsight": h_m, "index_hindsight_actor": h_a}
+
+    def reward_index_info(self, batch, w):
+        """Training-log diagnostics of the reward index (docs/design/2026-10-19-reward-index.md):
+        index_proxy_corr = mean over the hindsight rows of the per-row correlation between the index's own
+        reward view (f(y_j) - mu)^T w_i / sqrt(D) and the kernel reward k(g_i, y_j) over the batch's next
+        states; index_w_norm, index_hindsight_frac, index_cov_trace."""
+        c = self.config
+        f_c = jnp.asarray(batch["index_f"]) - self.fb_mu[None]
+        proxy = (w @ f_c.T) / jnp.sqrt(float(c["z_dim"]))                                     # (N, P)
+        kern = kernel_reward(jnp.asarray(batch["goals"]), jnp.asarray(batch["next_observations"]),
+                             parse_hit_spec(c["fb_hit_spec"]))                                 # (N, P)
+        hs = jnp.asarray(batch["index_hindsight"]).reshape(-1)                                  # (N,)
+        a = proxy - proxy.mean(axis=1, keepdims=True)
+        b = kern - kern.mean(axis=1, keepdims=True)
+        corr = jnp.sum(a * b, axis=1) / jnp.sqrt(jnp.sum(a * a, axis=1) * jnp.sum(b * b, axis=1) + 1e-12)
+        n_h = jnp.maximum(jnp.sum(hs), 1.0)
+        return {"index_proxy_corr": jnp.sum(corr * hs) / n_h,
+                "index_w_norm": jnp.mean(jnp.linalg.norm(w, axis=-1)),
+                "index_hindsight_frac": jnp.mean(hs),
+                "index_cov_trace": jnp.trace(self.fb_cov)}
+
+    def actor_loss_flowbc_reward(self, delta_params, obs, pool, w_rows, f_centered, eps, u_data):
+        """policy_index=reward, actor_kind=flowbc. u_i = clip(eps_i + delta(s_i, w_i, eps_i)); value
+        Q_i = sum_j softmax_j(M(s_i,u_i,y_j; w_i)/measure_temp) r_i(y_j) with r_i(y) = (f(y) - mu)^T w_i / sqrt(D),
+        the index's own reward view (Density FB `latent_centered`); loss -q_coeff mean Q / sg|Q| + fb_bc_coeff
+        mean delta^2. phi, b stop-gradded; only delta moves."""
+        c = self.config
+        bp = jax.lax.stop_gradient(self.basis.params)
+        temp = float(c["measure_temp"])
+        u, d = self.flowbc_latent(obs, w_rows, eps, params=delta_params)
+        M = self.mesh_M(obs, u, pool, w_rows, params=bp)                                       # (N, P)
+        r = jax.lax.stop_gradient(w_rows @ f_centered.T / jnp.sqrt(float(c["z_dim"])))         # (N, P)
+        p = jax.nn.softmax(M / temp, axis=1)
+        q = jnp.sum(p * r, axis=1)
+        qscale = jax.lax.stop_gradient(jnp.maximum(jnp.abs(q).mean(), 1e-6))
+        bc = jnp.mean(d ** 2)
+        loss = -float(c.get("q_coeff", 1.0)) * jnp.mean(q) / qscale + float(c["fb_bc_coeff"]) * bc
+        n = min(M.shape[0], M.shape[1])
+        return loss, {"actor_loss": loss, "actor_q": jnp.mean(q), "actor_q_absmean": qscale,
+                      "actor_bc_err": bc, "actor_delta_norm": jnp.mean(jnp.linalg.norm(d, axis=-1)),
+                      "actor_u_absmean": jnp.mean(jnp.abs(u)),
+                      "actor_u_data_gap": jnp.mean((u - u_data) ** 2),
+                      "actor_p_own": jnp.mean(jnp.diagonal(p[:n, :n])),
+                      "actor_M_mean": jnp.mean(M), "actor_M_std": jnp.std(M), "actor_r_std": jnp.std(r)}
+
+    def reward_actor_step(self, batch):
+        """One flowbc actor step at the actor index rows batch['index_w_actor'], then the index-state update
+        in `fb_actor_step`'s order (f read at the OLD tower; the tower EMAs toward the PRE-step basis; the
+        moments EMA from the OLD-tower f). Returns (updates, info)."""
+        c = self.config
+        obs = jnp.asarray(batch["observations"])
+        pool = jnp.asarray(batch["next_observations"])
+        w_a = jnp.asarray(batch["index_w_actor"])
+        f_pool = jnp.asarray(batch["index_f"])
+        anchors = jnp.asarray(batch["index_anchor"])
+        f_centered = f_pool - self.fb_mu[None]
+        eps = jax.random.normal(jax.random.fold_in(self.rng, 102), (obs.shape[0], int(c["action_dim"])))
+        u_data = jnp.clip(jnp.asarray(batch["noise_preimage"]), -c["u_clip"], c["u_clip"])
+        (_, info), g_d = jax.value_and_grad(self.actor_loss_flowbc_reward, has_aux=True)(
+            self.delta.params, obs, pool, w_a, f_centered, eps, u_data)
+        delta = self.delta.apply_gradients(grads=g_d)
+        tz, ts = float(c["fb_enc_tau"]), float(c["fb_sigma_tau"])
+        zenc = jax.tree_util.tree_map(lambda p, e: p * tz + e * (1.0 - tz), self.basis.params, self.fb_zenc)
+        mu_b = jnp.mean(f_pool, axis=0)
+        db = f_pool - mu_b[None]
+        cov_b = db.T @ db / f_pool.shape[0]
+        mu = self.fb_mu * (1.0 - ts) + mu_b * ts
+        cov = self.fb_cov * (1.0 - ts) + cov_b * ts
+        cov = 0.5 * (cov + cov.T)
+        upd = {"delta": delta, "fb_zenc": zenc, "fb_mu": mu, "fb_cov": cov, "fb_anchor": anchors,
+               "fb_filled": jnp.ones_like(self.fb_filled)}
+        return upd, {**info, "index_hindsight_frac_actor": jnp.mean(jnp.asarray(batch["index_hindsight_actor"]))}
+
     # ----------------------------------------------- goal-conditioned actor (policy_index=goal)
     def actor_loss_goal(self, actor_params, obs, pool, goals, noise, u_data):
         """Actor loss under policy_index=goal (Factored-FB FlowBC on the tanh-Gaussian latent actor).
@@ -1494,6 +1636,11 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             actor = upd.pop("actor", self.actor)
             fb_state = upd
             info = {**info, **a_info}
+        elif self._reward_index() and bool(c.get("train_actor", False)):
+            # reward index: the flowbc actor at the actor index rows, plus the index-state update.
+            upd, a_info = self.reward_actor_step(batch)
+            fb_state = upd
+            info = {**info, **a_info}
         elif str(c.get("actor_value", "none")) != "none":
             # Factored-FB induced-reward actor; replaces actor_objective's loss.
             actor, fb_state, a_info = self.fb_actor_step(batch)
@@ -1521,6 +1668,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         new_rng, rng = jax.random.split(self.rng)
         N = jnp.asarray(batch["observations"]).shape[0]
         z = sample_z_bin(rng, N, int(self.config["max_log_seed"]))
+        if self._reward_index():
+            batch = {**batch, **self.reward_index_rows(batch)}
         u_next = self._select_u_next(batch, z)
         new_agent, info = self.apply_update(batch, z, u_next)
         return new_agent.replace(rng=new_rng), info
@@ -1530,6 +1679,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         rng = rng if rng is not None else self.rng
         N = jnp.asarray(batch["observations"]).shape[0]
         z = sample_z_bin(rng, N, int(self.config["max_log_seed"]))
+        if self._reward_index():
+            batch = {**batch, **self.reward_index_rows(batch)}
         u_next = self._select_u_next(batch, z)
         coef = self.w_star if self._goal_index() else self.w
         return self.measure_loss(self.basis.params, coef.params, batch, z, u_next)
@@ -1763,6 +1914,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         elif self._pool_reward():
             q = self._pool_reward_score(obs, u_cand, self.eval_cand_w, self.eval_bank, self.eval_bank_r,
                                         self.eval_bank_w)
+        elif self._ridge_reward_score():
+            q = self._reward_gpi_score(obs, u_cand, self.eval_cand_w, self.eval_ref, self.eval_ref_reward)
         else:
             w = jnp.broadcast_to(self.eval_w_star, (K, self.eval_w_star.shape[0]))
             q = self._goal_score(obs, u_cand, self.eval_goals, self.eval_ref, w)   # (K,)
@@ -1808,8 +1961,9 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         seed = self.rng if seed is None else seed
         if self.config["acting"] == "distill":
             actor_in = self.eval_actor_goal if self._actor_takes_goal() else self.eval_w_star
-            if self._actor_takes_goal() and self._actor_kind() == "flowbc":
-                # one prior draw eps per step, corrected by delta(s, g, eps)
+            if self._actor_kind() == "flowbc":
+                # one prior draw eps per step, corrected by delta(s, g, eps) (policy_index=goal) or
+                # delta(s, w, eps) at the ridge w (policy_index=reward)
                 eps = jax.random.normal(seed, (1, self.config["action_dim"]))
                 u_star = self.flowbc_latent(observations[None], actor_in[None], eps)[0][0]
             else:
@@ -2038,6 +2192,14 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             # centering removes the shift) on f(s+) over the WHOLE relabel batch, at the
             # stored EMA moments and index tower, normalized to sqrt(D). Zero-shot: no training.
             w = self.fb_eval_task(np.asarray(batch["next_observations"]), rewards)
+            if self._ridge_reward_score():
+                # ridge_score=reward: best-of-64 by the expected relabel reward over eval_ref uniform rows
+                # of the batch (`_reward_gpi_score`) at the single ridge w (every candidate row = w).
+                cand_w = jnp.broadcast_to(w[None], (k, w.shape[0]))
+                n_ref = int(self.eval_ref.shape[0])
+                rows_r = np.random.choice(rewards.shape[0], size=n_ref, replace=rewards.shape[0] < n_ref)
+                refs = jnp.asarray(np.asarray(batch["next_observations"])[rows_r], jnp.float32)
+                ref_reward = jnp.asarray(rewards[rows_r], jnp.float32)
         elif coef_source == "trained":
             # The coefficient M was trained with: project(mean_z w(z)). No inference is run.
             w = self.trained_coef()
@@ -2176,6 +2338,7 @@ def get_config():
         # | hgoal_each, reward_gpi (policy_index=goal, eval only) | pool_reward (policy_index=goal|bank,
         # eval only: the importance-weighted reward integral over a bank of pool_eval_size relabel next states)
         "coef_source": "lp",
+        "ridge_score": "goal",      # policy_index=reward, eval: best-of-64 by the goal mass at w (goal) | the expected relabel reward over eval_ref at w (reward)
         "pool_eval_size": 512,      # coef_source=pool_reward: bank size (a quarter rewarding at most)
         # coef_source=reward_gpi: candidate goals = top (k_goals highest-reward rows) | random
         # (k_goals uniform rows) | both (k_goals//2 top + the rest uniform)

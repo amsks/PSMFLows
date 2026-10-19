@@ -259,7 +259,8 @@ def main(cfg: DictConfig):
                 # OFF by default (train_goal_head=false) -> core dataset path is unchanged.
                 # policy_index=goal (2026-10-01) reads the same mixture as each row's MEASURE goal,
                 # with a goal_cur_frac share of rows taking their own s'.
-                _goal_index = str(config.get('policy_index', 'code')) == 'goal'
+                # policy_index=reward (2026-10-19) reads the same measure goals for its hindsight kernel reward.
+                _goal_index = str(config.get('policy_index', 'code')) in ('goal', 'reward')
                 if bool(config.get('train_goal_head', False)) or _goal_index:
                     dataset.return_goals = True
                     dataset.goal_discount = float(config.get('goal_discount', 0.98))
