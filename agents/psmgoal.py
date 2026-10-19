@@ -126,7 +126,13 @@ def induced_value(M, r, mode, temp):
 # density-fb) impls/critics/density_fb.py.
 
 #: policy_index options. code = w(z) on the binary policy code; goal = w = h(g) on the row's goal.
-POLICY_INDEXES = ("code", "goal")
+#: bank (2026-10-19, docs/design/2026-10-19-pool-measure.md): a bank of n_bank policies; only n_bank=1
+#: is implemented, the behaviour policy -- the bootstrap latent is one clipped prior draw (a BC draw,
+#: FLOWBC_BOOT_KEY) and the coefficient is ONE shared learned w, read as the existing w(z) net at the
+#: constant all-ones code BANK_CODE (no new net; the all-zero code would give enc(0) = 0, w = 0 at init).
+#: No actor is trained (train_actor must be false); a plain policy evaluation of BC.
+POLICY_INDEXES = ("code", "goal", "bank")
+BANK_CODE = 1.0
 #: measure_loss options. squared = TD on the mesh; softmax = cross-entropy over the columns.
 #: pool (2026-10-19, docs/design/2026-10-19-pool-measure.md): the softmax cross-entropy with the
 #: batch's next states replaced by a FIXED reference pool of pool_size dataset states carried on
@@ -365,6 +371,15 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         if coef_source == "reward_gpi":
             assert str(config.get("eval_goal_pool", "relabel")) == "relabel", \
                 "coef_source=reward_gpi draws its candidates and reference states from the relabel batch: needs eval_goal_pool=relabel"
+        if policy_index == "bank":
+            assert int(config.get("n_bank", 1)) == 1, "policy_index=bank: only n_bank=1 (the behaviour policy) is implemented"
+            assert not bool(config.get("train_actor", False)), \
+                "policy_index=bank evaluates the behaviour policy: no actor is trained, set train_actor=false"
+            assert bootstrap_source == "actor", (
+                "policy_index=bank bootstraps from one clipped prior draw and ignores bootstrap_source: "
+                "leave it at its default (actor)")
+            assert not bool(config.get("train_goal_head", False)), "policy_index=bank has no goal head to train"
+            assert coef_source not in GOAL_COEF_SOURCES, f"coef_source={coef_source} reads h(g): needs policy_index=goal"
         if policy_index == "goal":
             assert bool(config.get("train_actor", False)) or bootstrap_source in ("data", "argmax", "bc_mean", "frozen_delta"), \
                 ("policy_index=goal bootstraps from the goal-fed actor: set train_actor=true "
@@ -587,6 +602,15 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
     def _goal_index(self):
         return str(self.config.get("policy_index", "code")) == "goal"
 
+    def _bank_index(self):
+        return str(self.config.get("policy_index", "code")) == "bank"
+
+    def bank_w(self, params=None, target=False):
+        """policy_index=bank: the single shared coefficient, (1, z_dim): the w(z) net at the constant code
+        BANK_CODE (on the sqrt(D) sphere like every w(z)). target=True reads the Polyak copy."""
+        code = jnp.full((1, int(self.config["max_log_seed"])), BANK_CODE, jnp.float32)
+        return self.w(code, params=self.target_w if target else params)
+
     def _softmax(self):
         """The measure is a distribution over candidate states and is read as shares: measure_loss=softmax
         and measure_loss=pool (the pool loss is the softmax cross-entropy over the pool). Every readout
@@ -631,9 +655,13 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
     def _coef(self, z, goals, params=None, target=False):
         """The per-row coefficient w of the measure, (N, z_dim). policy_index=code: w(z) on the
         binary policy code z. policy_index=goal: w = h(g) on the row's goal, z unused.
+        policy_index=bank: the one shared w (`bank_w`) broadcast to every row; z, goals unused.
         target=True reads the Polyak copy; otherwise `params` (None -> the online params)."""
         if self._goal_index():
             return self.w_star(goals, params=self.target_w_star if target else params)
+        if self._bank_index():
+            n = (z if z is not None else goals).shape[0]
+            return jnp.broadcast_to(self.bank_w(params=params, target=target), (n, int(self.config["z_dim"])))
         return self.w(z, params=self.target_w if target else params)
 
     def _goal_score(self, obs, u, goals, refs, w_rows, params=None):
@@ -770,6 +798,12 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         bootstrap_source=bc_mean: all bootstrap_n clipped prior draws, (n, N, d); measure_loss
         averages the target over them."""
         c = self.config
+        if self._bank_index():
+            # the behaviour policy: one clipped prior draw at s', the same key stream as the flowbc bootstrap
+            # (so it equals that bootstrap with delta = 0)
+            next_obs = jnp.asarray(batch["next_observations"])
+            eps = jax.random.normal(jax.random.fold_in(self.rng, FLOWBC_BOOT_KEY), (next_obs.shape[0], int(c["action_dim"])))
+            return jax.lax.stop_gradient(jnp.clip(eps, -c["u_clip"], c["u_clip"]))
         if self._data_bootstrap():
             return jnp.clip(jnp.asarray(batch["next_noise_preimage"]), -c["u_clip"], c["u_clip"])
         if self._argmax_bootstrap():
@@ -2055,7 +2089,10 @@ def get_config():
         "goal_discount": 0.98,      # dataset hindsight-goal geometric horizon (main.py)
         "goal_random_frac": 0.3,    # dataset off-trajectory random-goal fraction (OGBench-style)
         # --- goal-conditioned training (2026-10-01; all OFF by default) ---
-        "policy_index": "code",     # code (w(z) on the binary policy code) | goal (w = h(g), actor bootstrap at g)
+        # code (w(z) on the binary policy code) | goal (w = h(g), actor bootstrap at g) | bank (n_bank=1:
+        # the behaviour policy, one shared w = w(z) at a constant code, bootstrap = a clipped prior draw)
+        "policy_index": "code",
+        "n_bank": 1,                # policy_index=bank: members of the bank; only 1 is implemented
         # squared (TD on the mesh) | softmax (cross-entropy over the batch's next states) | pool
         # (the softmax cross-entropy over a fixed pool of pool_size dataset states, one-hot on the
         # pool state nearest the row's next state; docs/design/2026-10-19-pool-measure.md)

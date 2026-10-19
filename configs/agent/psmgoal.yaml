@@ -134,7 +134,13 @@ goal_random_frac: 0.3      # dataset off-trajectory random-goal fraction (OGBenc
 # Test time, same checkpoint: coef_source=amortized (h over the rewarding states) or lp with
 # acting=gpi; or acting=distill eval_redistill=false to act with the actor, fed a rewarding
 # dataset state (eval_goal_source=relabel) or the env's task goal (eval_goal_source=env).
-policy_index: code         # code (w(z) on the binary policy code) | goal (w = h(g))
+# policy_index=bank (2026-10-19, docs/design/2026-10-19-pool-measure.md): a bank of n_bank policies, only
+# n_bank=1 implemented -- the behaviour policy. The bootstrap latent is one clipped prior draw (a BC
+# draw), the coefficient one shared learned w (the w(z) net at a constant code), no actor is trained
+# (train_actor=false, bootstrap_source=actor left at its default and ignored). A clean policy
+# evaluation of BC; readout coef_source=pool_reward (the single w) or lp.
+policy_index: code         # code (w(z) on the binary policy code) | goal (w = h(g)) | bank
+n_bank: 1
 measure_loss: squared      # squared | softmax | pool
 measure_temp: 1.0          # softmax temperature, in the loss and the readouts
 # measure_loss=pool (2026-10-19, docs/design/2026-10-19-pool-measure.md): the softmax cross-entropy
