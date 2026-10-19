@@ -1357,7 +1357,8 @@ each live reading. Numbers are what to compare against.
    calibration changes acting by 0.02 to 0.03. Held-out task (trained on four tasks): mean
    descriptor 0.002; set-encoder descriptor, leave-one-out over the five tasks, 0.072 / 0.230 /
    0.002 / 0.000 / 0.000 (mean 0.061), validation NLL 12 to 21 times the prior's on the held-out
-   task's states. Four training tasks do not give a descriptor space to interpolate in; the
+   task's states; with early stopping 0.034 / 0.446 / 0.000 / 0.000 / 0.000 (mean 0.096) and the
+   NLL at the prior. Four training tasks do not give a descriptor space to interpolate in; the
    next arm trains on 20 random goal-set tasks and tests on the five real ones (expected 0.3 to
    0.7). This closes the "actor fails at inference" item for in-task deployment: the failure was
    the actor objective (critic climb with a BC penalty), not the representability of the target.

@@ -54,6 +54,24 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 05:05 CEST, luis: (b') early-stopped set-encoder leave-one-out, mean 0.10; one task reaches 0.45, four stay at or below BC
+
+luis 03-01-41Z (job 8763395, 500 episodes per held-out task, 10-17 labels, early_stop + weight_decay 1e-4):
+
+| held-out task | 1 | 2 | 3 | 4 | 5 | mean |
+|---|---|---|---|---|---|---|
+| (b') sample | 0.034 | 0.446 | 0.000 | 0.000 | 0.000 | 0.096 |
+| (b') mode | 0.002 | 0.318 | 0.000 | 0.000 | 0.000 | 0.064 |
+| (b) sample, no early stop | 0.072 | 0.230 | 0.002 | 0.000 | 0.000 | 0.061 |
+| (b') validation NLL (prior) | 8.2 (8.1) | 9.0 (8.8) | 9.3 (8.6) | 10.6 (8.8) | 10.6 (8.3) | |
+
+Against the stated ranges: the mean stays in 0.0 to 0.15; task 2 alone crosses the 0.3 line. Early stopping moves
+the held-out NLL from 3 to 21 times the prior to within 0.1 to 2.3 nats of it: the student stops committing on an
+unseen task and still does not know where its goal is. The 20-random-region arm (8763442, labelling since 03:35
+CEST) is the test of whether more training regions fix that. Files `runs/distill/student_bprime_nf2sd0_500k/`.
+Asked of luis: check whether task 2's goal region lies inside the hull of the other four in cube position, which
+would make it the one interpolable case.
+
 ### 04:30 CEST, fullness tool: `+ref_set=pool`, bank path, and a fix that matters (530b8c0)
 
 `tools/diag_measure_fullness.py`: `+ref_set=random|pool` (pool = the run's own 1024 training pool as X, asserted
