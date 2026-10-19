@@ -54,6 +54,33 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 17:20 CEST, antmaze complete at 250k for both arms and 500k for the actor recipe: A 0.063 / 0.070, nf2 0.101 ± 0.162, BC 0.072
+
+kisski eval500 hgoal_each, 500 episodes per task (jobs 2525766 to 2525768, 2525794 and two earlier 500k jobs,
+2525799 / 2525803 / 2525804):
+
+| antmaze, 500 episodes | t1 | t2 | t3 | t4 | t5 | mean |
+|---|---|---|---|---|---|---|
+| BC control | 0.056 | 0.174 | 0.026 | 0.006 | 0.100 | 0.072 |
+| actor recipe (A) 250k, mean ± 95% CI | | | | | | 0.063 ± 0.106 |
+| actor recipe (A) 500k, sd0 | 0.102 | 0.000 | 0.004 | 0.002 | 0.010 | 0.024 |
+| actor recipe (A) 500k, sd1 | 0.094 | 0.072 | 0.140 | 0.202 | 0.006 | 0.103 |
+| actor recipe (A) 500k, sd2 | 0.000 | 0.000 | 0.414 | 0.004 | 0.004 | 0.084 |
+| **actor recipe (A) 500k, mean ± 95% CI** | | | | | | **0.070 ± 0.103** |
+| nf2 250k, sd0 | 0.048 | 0.260 | 0.000 | 0.000 | 0.000 | 0.062 |
+| nf2 250k, sd1 | 0.000 | 0.106 | 0.092 | 0.000 | 0.122 | 0.064 |
+| nf2 250k, sd2 | 0.352 | 0.478 | 0.000 | 0.000 | 0.050 | 0.176 |
+| **nf2 250k, mean ± 95% CI** | | | | | | **0.101 ± 0.162** |
+
+Stated 03:00: actor recipe at BC level (0.07 to 0.12); nf2 unknown, 0.1 to 0.3 if the cube mechanism transfers.
+Actor recipe: 0.063 and 0.070 at 250k and 500k, at BC. nf2: 0.101 ± 0.162 at 250k, one seed at 0.176 carried by
+tasks 1 and 2 (0.352, 0.478), the other two at 0.062 and 0.064; the CI covers BC. Training signals at the last
+logged step: actor recipe at 500k own-next mass 0.088 to 0.096, phi effective rank 1.02 to 1.03, actor step norm
+0.005 to 0.006; nf2 at 330k to 340k own-next mass 0.039 to 0.049, own-future mass 0.054 to 0.087, rank 1.03 to
+1.04, step norm 0.004 to 0.007. On cube the own-next mass of these critics is 0.34 (nf2) to 0.49 (A); on antmaze
+it stays under 0.1 for both, as recorded on 10-15 for the earlier critics. nf2 500k lands at about 23:00 CEST
+with its eval after. The nf2 sd000 250k checkpoint goes to HF for aws's single antmaze parity line.
+
 ### 17:00 CEST, aws: bank fullness parity to the third decimal; best-of-64 probes tv 0.51 / 0.60; luis: 50-region student 0.925 ± 0.011 on three seeds
 
 aws 14-36-26Z (code b361b6e, same checkpoint and settings, about 3 min per run; JSONs
