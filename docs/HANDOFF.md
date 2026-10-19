@@ -54,6 +54,34 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 10:10 CEST, luis: with the random regions within 8 cm of the real goals removed, the student falls to 0.305 (12 regions) and 0.196 (8 regions); the transfer rests on coverage
+
+luis 07-56-07Z (jobs 8763932, 8764019, CPU; sd0 teacher, saved real + 20-region labels, random-only plan, set
+student with early stopping, student seed 0, 500 episodes per task at eval seed 0; files
+`runs/distill/distill_nf2sd0_500k_rand20_excl8{,_sparse}.json`, luis commit ec1e140):
+
+| student | regions kept | n | t1 | t2 | t3 | t4 | t5 | mean sample | mean mode |
+|---|---|---|---|---|---|---|---|---|---|
+| 20 regions, 3 student seeds | 100..119 | 20 | | | | | | 0.907 ± 0.121 | 0.903 ± 0.155 |
+| 20 regions, seed 0 | 100..119 | 20 | 0.924 | 0.830 | 0.984 | 0.880 | 0.902 | 0.904 | 0.920 |
+| A: regions more than 8 cm from every real goal | 101-104, 106-110, 114-116 | 12 | 0.176 | 0.478 | 0.016 | 0.302 | 0.552 | 0.305 | 0.274 |
+| A': as A, sparse regions also dropped | 101, 103, 104, 107-110, 114 | 8 | 0.008 | 0.102 | 0.000 | 0.774 | 0.098 | 0.196 | 0.180 |
+| BC control | | | | | | | | 0.111 | |
+
+Nearest kept anchor to each real goal centroid (3d, cm): 20 regions 3.5 / 8.0 / 1.6 / 5.4 / 5.1; A and A' both
+13.2 / 8.0 / 10.2 / 8.5 / 8.6 (none of the four sparse regions was nearest to any goal). Validation NLL on the
+real tasks' rollout states is above the prior for both students on four of five tasks (A 9.47 / 9.76 / 9.04 /
+8.92 / 7.86 against prior 8.14 / 8.81 / 8.60 / 8.79 / 8.28); on their own held-out random-region episodes both reach
+6.92 to 6.99, the same as the 20-region student. Task 4 on the shared 125 start states: A 0.240, A' 0.760
+(teacher 0.872).
+
+Against the rule stated 10-19 ~04:00 (A below 0.85 and A' back within 0.05 of 0.904: bad labels; both fall:
+coverage; both within 0.05: clean transfer): both fall, by 0.60 and 0.71, 12 to 14 times the per-seed SD of 0.049,
+so the direction is read from one seed. Reading: the student imitates the teacher on the regions it was trained on
+and this does not carry to goals 8 to 13 cm away; the 0.90 of the 20-region student rests on random regions within
+about 5 cm of each real goal. A against A' is not read until student seeds 1 and 2 are in (queued 8766459 to
+8766462); the per-task moves between them are of the size one student seed produced on task 4. No reply needed.
+
 ### 09:25 CEST, luis: student seeds 1 and 2 on the 20-region labels give 0.957 and 0.860; three-seed mean 0.907 ± 0.121; the student-seed spread covers every single-seed gap reported today
 
 luis 07-13-42Z (jobs 8763933 / 8763934, CPU, saved sd0 real + 20-region labels, set student with early stopping,
