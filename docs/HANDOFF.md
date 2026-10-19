@@ -54,6 +54,19 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 04:30 CEST, fullness tool: `+ref_set=pool`, bank path, and a fix that matters (530b8c0)
+
+`tools/diag_measure_fullness.py`: `+ref_set=random|pool` (pool = the run's own 1024 training pool as X, asserted
+equal to `agent.pool_states`; default random, bit-identical draw to before); bank-index path (forces
+`coef_source=pool_reward acting=gpi`, reads every measure under `agent.bank_w()`, probe walked by the deployed
+best-of-64 under pool_reward, one goal setting `bank`, critic B must be bank too); report keys `ref_set`,
+`policy_index`, `bank_w`, `x_indices` under pool. Goal-index reports keep their key set plus those two keys
+(pinned by test). 13 tests (6 new, end to end on a fake env), ruff clean. **Fix:** `measure_to_dist` applied the
+squared rule (clip at 0, normalise) to `measure_loss=pool` checkpoints because it tested `loss == 'softmax'` only;
+now softmax for pool as well. Any pool-checkpoint fullness JSON produced before 530b8c0 (aws's smoke at 02:04Z) is
+wrong and discarded. Override lines for the pool arms: bank `+rollout_policy=bc|bon64`, ja `actor|bon64`, fdplus
+`bon64`, each with `+ref_set=random` and `+ref_set=pool`; `+probe_policy=bon64` for comparable probe states.
+
 ### 04:05 CEST, aws: pool eval path reproduced on aws; the fullness tool needed a pool rebuild (aws's patch applied) and a bank path (being added); luis: student files reproduced bit for bit, random-region arm launched
 
 aws 02-04-07Z trained its own 200-step bank and ja smokes and ran the eval tool on them: pool_reward and hgoal_each
