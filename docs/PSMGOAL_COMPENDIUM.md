@@ -1279,6 +1279,58 @@ makes the ranking at test time less noisy. Neither has a measurement.
 
 ---
 
+### 6.4 The pool measure (2026-10-19, `docs/design/2026-10-19-pool-measure.md`)
+
+The brainstorm of 10-17 asked for the full successor measure: a distribution over a fixed set of states
+instead of a detector of the trajectory's own next state. Built as `measure_loss=pool`: the softmax runs
+over a fixed reference pool R of 1024 dataset next states, the one-hot sits on the pool state nearest the
+row's next state (standardised full-state distance), the target is (1 - gamma) one-hot + gamma softmax of the
+target measure over R, everything else as arm A. Three arms, 3 seeds, 250k: `bank` (policy index = one BC
+draw, no actor, a policy evaluation of BC; readout `pool_reward`, the importance-weighted reward integral
+over 512 relabel states), `fdplus` (A's goal index with the frozen +step field), `ja` (A's goal index with the
+live flowbc actor).
+
+| five-task cube, 250k, 3 seeds | hgoal_each | pool_reward |
+|---|---|---|
+| pool bank | | 0.252 ± 0.063 |
+| pool fdplus | 0.326 ± 0.041 | 0.292 ± 0.033 |
+| pool ja | 0.328 ± 0.092 | 0.260 ± 0.085 |
+| arm A / frozen +step arm (batch softmax), same readout | 0.789 / 0.74 | |
+| BC | 0.111 | |
+
+Expected before the runs: 0.70 to 0.80 for the goal arms, 0.6 to 0.72 for the bank. Fullness
+(`tools/diag_measure_fullness.py`, bank sd000 and fdplus sd000 at 250k, kisski and aws in parity): in
+full-state cells the pool measure's distribution over the reference states is 0.07 to 0.19 above the split-half
+floor under its own policy (bank under BC tv 0.45 / floor 0.38; fdplus under its actor 0.60 to 0.69 / floor 0.33
+to 0.40), where critic A and nf2 were 0.65 to 0.80 above it; under best-of-64 rollouts 0.65 to 0.84 against
+floors of 0.17 to 0.26. In cube-position cells it is at the uniform level in every line (tv 0.91 to 0.97,
+Spearman 0.00 to 0.07): the occupancy puts 0.3 to 0.5 of its mass on the next state's cube cell and the measure
+puts 0.01 there. Training signals: anchor mass 0.08 to 0.10 (A's own-next mass 0.45 to 0.49), pool entropy 3.7
+to 4.2 nats of 6.93, pool_u_tv 0.05 to 0.08 flat from 5k, phi effective rank 1.15 to 1.25.
+
+What this settles. The acting of A and nf2 comes from the one-hot on the trajectory's own next state over the
+batch's next states: with that replaced by a real distribution over a fixed set, success falls from 0.79 to 0.33
+with the same actor, index, bootstrap and readout. The full-state agreement the pool loss buys is in the arm
+and gripper coordinates that dominate the standardised distance; the cube position, the only thing the reward
+reads, is not resolved. The pool measure is a diagnostic result in this form. The next lever written down and
+not built: weight the cube position in the distance that defines the anchor and the cells. The 500k pool
+checkpoints are evaluated for the record only.
+
+### 6.5 The reward index (2026-10-19, `docs/design/2026-10-19-reward-index.md`, launched)
+
+Density FB's second arm, `measure_density_z`: the critic's task index is a vector solved from reward samples
+(centred ridge fit of the reward on the state tower, at training on hindsight kernel rewards, at test on the
+relabelled rewards), with the goal arm's one-hot own-next-state loss. Cube-single in their stack: 82.9 ± 4.0
+(state tower on cube position), 91.7 ± 2.2 (full state), goal arm 93.1 ± 1.8. The point against plain FB and
+against psmgoal's earlier reward coefficients (regression 0.30): the index map used at test time is the one the
+critic trains on. Ported as `policy_index=reward` (2d48a11): index feature = the projected phi `fb_feature` at the
+slow basis copy (no new net), training rows w_i = ridge of the kernel reward of the geometric hindsight goal over
+the batch's next states (half random), A's softmax loss, the flowbc actor at w with Q = sum_j softmax_j(M/t)
+(f(y_j) - mu)^T w / sqrt(D), bootstrap from that actor at (s', w); `coef_source=ridge` at test with three
+readouts (actor at w; best-of-64 by the goal mass at w; best-of-64 by the expected relabel reward). Arm
+`psmgoal_ri_fbc3_cube`, 3 seeds, 250k, luis (H200) and kisski. Stated before results: best-of-64 at w 0.70 to
+0.80, actor within 0.10, failure line 0.30; gate `index_proxy_corr` above 0.3 by 100k.
+
 ## 7. Open questions and the next arms, with predictions
 
 Each item gives the question, the measurement that decides it, and the predicted outcome under
