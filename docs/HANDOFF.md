@@ -54,6 +54,42 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 03:50 CEST, pool-measure arms launched (9 jobs); antmaze relaunched after a launch error
+
+Pool measure, code e331513 / a0ad48e / b24899e / 0f83c3b (rebased) / 914e63a: 44 new CPU tests, 13 regression
+files pass, ruff clean. Independent review: the pool loss, bank index, readout and eval rebuild match the spec;
+the squared and softmax arms are bit-identical before and after (measured on two updates + inference + acting);
+the u-dependence diagnostic carries no gradient; peak memory about 7-8 GB (4/3 of nf2). Two review items applied:
+the argmax bootstrap is refused under pool (it scores draws over the batch's next states, not the pool); the eval
+watcher got a `pool_reward` tag. Smokes 2525741-2525743 (200 steps, GPU) exit 0; flags `measure_loss: pool`,
+`pool_size: 1024`, `pool_hash dfea8933...` (the same in every arm: same dataset, same pool_seed), `policy_index`
+bank / goal / goal; train.csv carries measure_p_anchor, pool_entropy, pool_u_tv, phi_eff_rank (finite; at step
+200 pool_u_tv 0.09-0.13 is an untrained network's noise). Eval path check 2525745-2525748 on the smoke
+checkpoints through `tools/eval_checkpoint.py` (2 episodes, these four ran on CPU because the one-off wrapper
+requested no GPU): pool rebuilt, `pool_hash_checked: true`, `pool_reward` and `hgoal_each` both run, bank arm
+under `pool_reward`.
+
+Launched 03:45 with `scripts/campaign_2026-10/pool_arms.sh` (hyperparameters: arm A's fbc3_pt overrides minus
+`measure_loss`, plus the arm's keys; 500k, eval 50k/50, save 250k, 24 h, seeds 0-2; pool_size 1024, pool_seed 0,
+pool_eval_size 512):
+
+| group | arm keys | jobs |
+|---|---|---|
+| `psmgoal_pool_bank_cube` | `measure_loss=pool policy_index=bank train_actor=false acting=gpi coef_source=pool_reward` | 2525749-2525751 |
+| `psmgoal_pool_fdplus_cube` | `measure_loss=pool bootstrap_source=frozen_delta` (A sd000 500k, mode plus) | 2525752-2525754 |
+| `psmgoal_pool_ja_cube` | `measure_loss=pool bootstrap_source=actor` (live flowbc actor) | 2525755-2525757 |
+
+Watchers: `watcher_pool_goal.log` (hgoal_each + pool_reward on fdplus and ja), `watcher_pool_bank.log`
+(pool_reward on bank), `watcher_pool_upload.log` (HF for aws). Expectations: the design doc's table (fullness tv
+0.5-0.7 at 250k, pool_u_tv > 0.05 by 100k, cube 0.6-0.72 bank / 0.70-0.80 goal; fail = tv > 0.85 and
+pool_u_tv < 0.02 on the bank arm). The fullness diagnostic on the first 250k checkpoints is the gate before any
+success number is quoted.
+
+Antmaze: the 02:59 launch (2525719-2525724) failed at once, every job in 1-2 s: the launch shell had no
+`PSM_DATA`, so the preimage path and data root were empty (the smokes before it had the variable set). Relaunched
+03:50 with the identical overrides as jobs 2525758-2525760 (fbc3_pt, 10 h) and 2525761-2525763 (nf2, 24 h); the
+flags check and the watchers key on the group names and carry over.
+
 ### 03:30 CEST, luis: three-way table complete; the early-stopped student matches the best-of-64 teacher at 500 episodes
 
 luis 01-25-45Z. nf2 seeds 1-2 at 500k on luis: 0.813 / 0.866 (kisski 0.825 / 0.861, aws 0.815 / 0.870; all within
