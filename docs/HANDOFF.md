@@ -54,6 +54,43 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 08:25 CEST, luis: 50 random regions, random-only student 0.928 / 0.930 on the real tasks (teacher 0.912, 20 regions 0.904); adding the real tasks lowers tasks 4 and 5 again
+
+luis 06-13-48Z (job 8763896; nf2 sd0 500k teacher; regions 100..119 reuse the rand20 labels, 120..149 fresh
+rollouts; set student, early stopping, weight decay 1e-4, student seed 0; 500 episodes per task at eval seed 0;
+files `runs/distill/distill_nf2sd0_500k_rand50.json`, `students_rand50_nf2sd0_500k/`, luis commit b47b224):
+
+| student | trained on | t1 | t2 | t3 | t4 | t5 | mean sample | mean mode |
+|---|---|---|---|---|---|---|---|---|
+| teacher best-of-64 (kisski eval500) | | 0.914 | 0.938 | 0.950 | 0.850 | 0.910 | 0.912 | |
+| 20 random regions only | 20 random | 0.924 | 0.830 | 0.984 | 0.880 | 0.902 | 0.904 | 0.920 |
+| 50 random regions only | 50 random | 0.946 | 0.962 | 0.958 | 0.924 | 0.850 | 0.928 | 0.930 |
+| 20 random + the other 4 real tasks, tested on task t | 20 random + 4 real | 0.932 | 0.896 | 0.962 | 0.854 | 0.712 | 0.871 | |
+| 50 random + the other 4 real tasks, tested on task t | 50 random + 4 real | 0.920 | 0.968 | 0.966 | 0.782 | 0.666 | 0.860 | 0.810 |
+
+Nearest random anchor to each real goal centroid (xy, cm; luis's earlier 3.5 / 8.0 / 1.6 / 5.4 / 5.1 were 3d):
+
+| regions | t1 | t2 | t3 | t4 | t5 |
+|---|---|---|---|---|---|
+| 20 | 3.6 | 6.0 | 1.5 | 5.4 | 5.1 |
+| 50 | 2.0 | 4.0 | 1.5 | 3.3 | 5.1 |
+
+What moved: task 2 0.830 to 0.962 as its anchor moved 6.0 to 4.0 cm, task 4 0.880 to 0.924 (5.4 to 3.3 cm), task 5
+0.902 to 0.850 with its anchor unchanged at 5.1 cm. Task 4's new nearest region (144) is sparse with teacher
+success 0.20 on it, and task 4 still rose. The 50-region random-only student is 0.016 above the teacher; the
+per-task half-width at 500 episodes is 0.02 to 0.03. Best steps 25,000 to 37,000 (20-region students 9,000).
+Adding the four other real tasks lowers task 5 from 0.850 to 0.666 (mode 0.422) and task 4 from 0.924 to 0.782;
+the same direction as with 20 regions (0.902 to 0.712, 0.880 to 0.854). luis 06-14-21Z withdrew the "real-task
+rows dominate" explanation after counting: 20,000 dataset-state labels per task or region, rollout labels 3,405 to
+4,542 per real task against 3,102 to 10,000 per random region, so the real tasks add about 7% of the rows. Regions
+120 and 147 are trivial (reset position already within 4 cm of the anchor, 50 rollout rows, teacher 1.00); without
+them the teacher's mean on the 30 new regions is 0.682. Ten of the 30 new regions are sparse. One student seed.
+
+Replied 06-20-56Z: yes to a second student seed on the saved 50-region labels (expected within 0.03 of 0.928 for the
+random-only student; if the leave-one-out cells for tasks 4 and 5 again sit more than 0.05 below the random-only
+value, the drop is not a seed draw); no row-weighting run; asked for the three random regions nearest the task-5
+centroid with distance, teacher success and rollout rows, from files on disk.
+
 ### 07:55 CEST, luis: D seed-1 and the sd2 random-region student started; task 4 on matched start states
 
 luis 05-36-15Z: D at student seed 1 (job 8764388, saved labels) and the random-region student on the nf2 sd2
