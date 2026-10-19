@@ -54,6 +54,33 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 09:25 CEST, luis: student seeds 1 and 2 on the 20-region labels give 0.957 and 0.860; three-seed mean 0.907 ± 0.121; the student-seed spread covers every single-seed gap reported today
+
+luis 07-13-42Z (jobs 8763933 / 8763934, CPU, saved sd0 real + 20-region labels, set student with early stopping,
+500 episodes per task at eval seed 0; files `runs/distill/distill_nf2sd0_500k_rand20_ss{1,2}.json`,
+`students_rand20_ss{1,2}_nf2sd0_500k/`, luis commit 7b3adbf):
+
+| student seed | t1 | t2 | t3 | t4 | t5 | mean sample | mean mode | best step | best val NLL |
+|---|---|---|---|---|---|---|---|---|---|
+| 0 | 0.924 | 0.830 | 0.984 | 0.880 | 0.902 | 0.904 | 0.920 | 9000 | 6.923 |
+| 1 | 0.960 | 0.970 | 0.966 | 0.930 | 0.960 | 0.957 | 0.955 | 12000 | 6.922 |
+| 2 | 0.920 | 0.974 | 0.978 | 0.520 | 0.908 | 0.860 | 0.834 | 7000 | 6.931 |
+| mean ± 95% CI (n = 3) | | | | | | 0.907 ± 0.121 | 0.903 ± 0.155 | | |
+| teacher best-of-64 | 0.914 | 0.938 | 0.950 | 0.850 | 0.910 | 0.912 | | | |
+
+Task 4 on the shared 125 start states: teacher 0.872; students 0.864 / 0.936 / 0.464. Stated "each seed within
+0.03 of 0.904": missed both ways (+0.053, -0.044). The three-seed mean equals the teacher. The best validation NLL
+is the same to 0.01 across seeds, so it does not predict which seed acts well. Sample SD across student seeds
+0.049; one task moves by up to 0.41 (task 4) with the student seed alone. Consequence: the single-seed gaps
+recorded today (D 0.877 against 0.813; rand50 0.928 against rand20 0.904; sd2 0.886 against 0.866; the task-2,
+task-4 and task-5 shifts from 20 to 50 regions; the task-5 coverage reading at 08:40) all sit inside this spread
+and are single-seed values until their seed means exist.
+
+Replied 07-23-19Z: yes to five CPU jobs from saved labels (D +ss2; sd2 random-only +ss1, +ss2; rand50 +ss2) and
+asked for student seeds 1 and 2 on A and A' after those. Expectation: each three-seed random-region mean within
+0.05 of its teacher or above; the ordering by teacher seed is not expected to survive. Rule from here: every
+distillation cell is quoted as mean ± 95% CI over three student seeds, single-seed cells flagged.
+
 ### 09:10 CEST, luis: the random-region student of the nf2 seed 2 teacher scores 0.886, above its teacher (0.866) and its in-task student (0.820); the three random-region students span 0.877 to 0.904
 
 luis 06-58-06Z (job 8764389; D recipe on the nf2 sd2 500k teacher: the same 20 random regions, fresh teacher
