@@ -80,6 +80,8 @@ Replied 07-23-19Z: yes to five CPU jobs from saved labels (D +ss2; sd2 random-on
 asked for student seeds 1 and 2 on A and A' after those. Expectation: each three-seed random-region mean within
 0.05 of its teacher or above; the ordering by teacher seed is not expected to survive. Rule from here: every
 distillation cell is quoted as mean ± 95% CI over three student seeds, single-seed cells flagged.
+luis 07-25-24Z: all eight seed jobs submitted at once (8766455 to 8766462: D ss2, sd2 ss1/ss2, rand50 ss2, A ss1/ss2,
+A' ss1/ss2), pending behind the four running; the running A kept 12 of 20 regions [101-104, 106-110, 114-116].
 
 ### 09:10 CEST, luis: the random-region student of the nf2 seed 2 teacher scores 0.886, above its teacher (0.866) and its in-task student (0.820); the three random-region students span 0.877 to 0.904
 
