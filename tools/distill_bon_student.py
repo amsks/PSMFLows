@@ -30,7 +30,8 @@ parameters at the lowest validation NLL); +descriptor=set replaces the mean desc
 permutation-invariant encoder over the 32 goal states [g, h(g)] (per-goal MLP, then the mean);
 +labels_in=a.npz:b.npz reuses previous runs' labels (for the tasks they hold; first file wins) instead of
 re-running the teacher. +student_seed (default seed) changes only the student's init and batch order.
-+exclude_near_real=d drops the random regions whose anchor is within d metres of a real task's goal centroid.
++exclude_near_real=d drops the random regions whose anchor is within d metres of a real task's goal centroid;
++exclude_sparse drops the random regions whose radius had to grow past the tolerance.
 +n_random_tasks=N (with +descriptor=set) adds N random goal-region training tasks (kisski 2026-10-19T01-54-05Z):
 anchor = the cube position of a random dataset next state (seed +random_seed0 + i); the relabel batch's
 rewarding rows are the next states with the cube within the env's 0.04 m tolerance of it (the radius grows to
@@ -553,6 +554,15 @@ def run(cfg):
         print(f'exclude_near_real={exclude} m: {len(kept)} of {len(random_tasks)} random regions kept: {kept}',
               flush=True)
         report['exclude_near_real_m'] = float(exclude)
+        report['random_tasks_kept'] = kept
+        random_tasks = kept
+    # +exclude_sparse: also drop the random regions whose radius had to grow (fewer than k_goals relabel rows
+    # within the tolerance), whose labels come from a teacher that rarely reaches them
+    if random_tasks and bool(cfg.get('exclude_sparse', False)):
+        tol = CUBE_TOL_M * CUBE_XYZ_SCALE
+        kept = [t for t in random_tasks if random_info[t]['radius_obs_units'] <= tol + 1e-6]
+        print(f'exclude_sparse: {len(kept)} of {len(random_tasks)} random regions kept: {kept}', flush=True)
+        report['exclude_sparse'] = True
         report['random_tasks_kept'] = kept
         random_tasks = kept
     plans = [('in_task', tasks, tasks)] if in_task else []
