@@ -54,6 +54,42 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 07:35 CEST, luis: the random-region student of the nf2 seed 1 teacher scores 0.877, above that teacher (0.813) and its in-task students (0.757, 0.787)
+
+luis 05-25-49Z (jobs 8763935, 8764020; 500 episodes, eval seed 0, set student with early stopping):
+
+| teacher nf2 sd1 500k | trained on | t1 | t2 | t3 | t4 | t5 | mean sample | mean mode | best step |
+|---|---|---|---|---|---|---|---|---|---|
+| teacher best-of-64 | | | | | | | 0.813 | | |
+| in-task student, student seed 0 | real 1..5 | 0.874 | 0.624 | 0.804 | 0.748 | 0.734 | 0.757 | 0.719 | 3000 |
+| in-task student, student seed 1 | real 1..5 | 0.916 | 0.762 | 0.802 | 0.768 | 0.688 | 0.787 | 0.747 | 4000 |
+| D, random regions 100..119 only | random | 0.948 | 0.958 | 0.956 | 0.612 | 0.910 | 0.877 | 0.800 | 12000 |
+
+Against the stated ranges: D expected within 0.03 of 0.825, came in 0.05 above; the second in-task student seed
+was expected near 0.81 or 0.76 and came in at 0.787, so the in-task gap to the teacher is 0.026 to 0.056 and
+about half of the 0.056 first reported was student-seed noise. D's mode values 0.880 / 0.988 / 0.962 / 0.306 /
+0.866; task 4 is the weak cell for every student so far. Validation NLL on the real tasks (student / prior) 7.72 /
+8.58, 9.12 / 8.57, 7.55 / 8.14, 7.95 / 8.83, 7.94 / 8.70: on task 2 the student's NLL is above the prior's and
+task 2 succeeds at 0.958, so D does not reproduce the teacher's choices on the real tasks. The sd1 teacher's own
+success on the 20 random regions: mean 0.732 (sd0 teacher 0.704), weakest 115 0.18, 119 0.24, 116 0.36. Files
+`runs/distill/distill_nf2sd1_500k_rand20.json`, `students_rand20_nf2sd1_500k/`, `student_a_nf2sd1_500k_ss1/`
+(luis commit b584a08). One student seed.
+
+Across teachers so far (five-task cube, 500 episodes, student seed 0):
+
+| teacher | teacher best-of-64 | in-task student | random-region student |
+|---|---|---|---|
+| nf2 sd0 | 0.912 | 0.918 | 0.904 |
+| nf2 sd1 | 0.813 | 0.757 / 0.787 (two student seeds) | 0.877 |
+| nf2 sd2 | 0.866 | 0.820 | running (asked 07:33) |
+
+Replied 05-33-24Z: yes to D at student seed 1 from the saved labels (expected within 0.04 of 0.877) and yes to a
+random-region student on the sd2 teacher (expected 0.85 to 0.90; if it lands at or above 0.866 the reading is
+that the random-region students sit at 0.88 to 0.90 whatever the teacher seed and the in-task students carry the
+teacher's spread). Asked for one added line per student: the teacher's task-4 success on the same start states,
+to place task 4 as a teacher gap or a student gap. Still running on luis: A (12 regions), A' (8 regions), B
+(student seeds 1, 2), the 50-region run.
+
 ### 06:25 CEST, antmaze: all six runs started, flags verified
 
 Jobs 2525758-2525763 running since about 06:05 CEST; every `flags.json`: env antmaze-medium-navigate-singletask-v0,
