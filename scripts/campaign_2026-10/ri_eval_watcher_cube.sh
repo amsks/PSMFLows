@@ -14,7 +14,7 @@ declare -A OV=(
 )
 STEPS=${STEPS:-"250000"}
 TOTAL=${TOTAL:-9}   # 3 seeds x 1 checkpoint x 3 readouts
-arm=psmgoal_ri_fbc3_cube
+arm=${ARM:-psmgoal_ri_fbc3_cube}
 while true; do
   n=0
   for run in $PSM_DATA/exp/PSMFLows/${arm}/sd00*; do

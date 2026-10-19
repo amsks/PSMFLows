@@ -1339,6 +1339,10 @@ keep A's shape, tasks 2, 4, 5 lose most of it; the actor at the index acts at BC
 since 10-05. aws reproduces the kisski cells within 0.05. Pending: seeds 1-2 at 250k (about 03:00 CEST), the
 sd000 ladder 50k to 200k under the best-of-64 readout (does the readout fall as the feature spread shrinks),
 luis's H200 seeds as replication once the luis login node returns.
+Ladder (01:20): sd000 best-of-64 at w 0.260 / 0.283 / 0.392 / 0.328 / 0.424 at 50k / 100k / 150k / 200k / 250k,
+rising 0.16 over the run while the feature spread shrinks 50x, so the shrink does not cost the readout and 250k
+is not the end of the curve. 500k line launched (seeds 3-5, `psmgoal_ri_fbc3_500k_cube`); expected 0.50 to 0.65
+at 500k if the slope continues at half rate.
 
 ## 7. Open questions and the next arms, with predictions
 

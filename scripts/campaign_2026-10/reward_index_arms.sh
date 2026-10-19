@@ -6,6 +6,7 @@
 # (best-of-64 by the goal mass at w) and gpi + ridge_score=reward (best-of-64 by the expected relabel reward).
 #
 #   SEEDS="0 1 2" STEPS=250000 bash scripts/campaign_2026-10/reward_index_arms.sh    # submit; prints job ids
+#   SEEDS="3 4 5" STEPS=500000 SUFFIX=_500k TIME=20:00:00 bash scripts/campaign_2026-10/reward_index_arms.sh  # 500k line (10-20)
 #   SMOKE=1 bash scripts/campaign_2026-10/reward_index_arms.sh                       # 200-step smokes instead
 REPO=${PSM_REPO:-/mnt/home/amohan/git/Austin/PSMFLows}; PSM_DATA=${PSM_DATA:-/mnt/home/amohan/psm-data}
 SEEDS=${SEEDS:-"0 1 2"}
@@ -16,7 +17,7 @@ COMMON="PSM_REPO=$REPO,PSM_DATA=$PSM_DATA,OGBENCH_DATASET_DIR=/mnt/home/amohan/.
 # critic A's recipe (ja_arms.sh fbc3_pt) with the goal index replaced by the reward index; the actor takes w.
 RI="agent.policy_index=reward agent.bootstrap_source=actor agent.train_actor=true agent.actor_input=w agent.goal_random_frac=0.0 agent.goal_cur_frac=0.0 agent.goal_sampling=geometric agent.measure_loss=softmax agent.acting=distill agent.eval_redistill=false agent.actor_kind=flowbc agent.fb_bc_coeff=3.0 agent.coef_source=ridge"
 for s in $SEEDS; do
-  G=${PFX}ri_fbc3_cube
+  G=${PFX}ri_fbc3${SUFFIX:-}_cube
   id=$(sbatch --parsable --partition=kisski-inference --account=general --time=$T --cpus-per-task=4 \
     --job-name=${G}_sd$s --output=$PSM_DATA/logs/slurm/%x-%j.out --error=$PSM_DATA/logs/slurm/%x-%j.err \
     --export="ALL,$COMMON,SEED=$s,GROUP=$G,EXTRA=$RI" $REPO/scripts/slurm/train_psmflow.sbatch)

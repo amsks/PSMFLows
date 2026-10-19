@@ -54,6 +54,31 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 01:25 CEST 10-20, reward-index sd000 ladder: best-of-64 at the ridge w rises with training, 0.26 at 50k to 0.42 at 250k; 500k line launched (seeds 3-5, `psmgoal_ri_fbc3_500k_cube`, 2525859-2525861)
+
+Packed ri_gpi evals of sd000 at 50k / 100k / 150k / 200k (2525851-2525854, five tasks, 500 episodes each):
+
+| checkpoint | task 1 | task 2 | task 3 | task 4 | task 5 | five-task |
+|---|---|---|---|---|---|---|
+| 50k | 0.234 | 0.200 | 0.368 | 0.198 | 0.298 | 0.260 |
+| 100k | 0.376 | 0.180 | 0.526 | 0.160 | 0.172 | 0.283 |
+| 150k | 0.450 | 0.340 | 0.772 | 0.190 | 0.208 | 0.392 |
+| 200k | 0.458 | 0.308 | 0.580 | 0.176 | 0.120 | 0.328 |
+| 250k | 0.682 | 0.360 | 0.638 | 0.348 | 0.092 | 0.424 |
+
+Neither stated outcome: the readout is not flat and does not fall as the index feature's spread shrinks. It
+rises 0.16 over the run (one seed, 500-episode cells, per-task spread 0.1 to 0.2 between neighbouring
+checkpoints), so the 50x shrink of index_cov_trace does not cost the best-of-64 readout. Task 5 falls from
+0.30 at 50k to 0.09 at 250k while tasks 1 and 4 rise. The 250k point is not the end of the curve.
+
+500k line: seeds 3, 4, 5 of the same arm under group `psmgoal_ri_fbc3_500k_cube` (launcher `SUFFIX=_500k`,
+STEPS=500000, 20 h limit, saves every 50k; jobs 2525859-2525861, pending at 01:22). The override string is the
+250k one; flags are re-read when each run starts. New seeds give three more 250k points beside sd0-2. Watcher
+`ARM=psmgoal_ri_fbc3_500k_cube STEPS="250000 500000"` submits the three readouts at both checkpoints. Expected,
+stated now: best-of-64 at w at 500k 0.50 to 0.65 if the 50k-to-250k slope continues at half rate, at or below
+0.45 if the curve has flattened; A at 500k 0.805; the actor at w stays at BC; the reward readout stays below the
+goal readout. The 250k three-seed line (sd0-2) lands about 03:30 CEST.
+
 ### 00:50 CEST 10-20, reward-index sd000 250k five-task: best-of-64 at the ridge w 0.424, by expected reward 0.272, actor at w 0.115 (BC 0.111; critic A sd0 0.818); aws parity within 0.05 on 11 cells
 
 The kisski packed jobs 2525848-2525850 started at submission (00:11 CEST) and finished by 00:44; the queue did
