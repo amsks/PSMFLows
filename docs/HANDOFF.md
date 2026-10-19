@@ -54,6 +54,44 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 17:00 CEST, aws: bank fullness parity to the third decimal; best-of-64 probes tv 0.51 / 0.60; luis: 50-region student 0.925 ± 0.011 on three seeds
+
+aws 14-36-26Z (code b361b6e, same checkpoint and settings, about 3 min per run; JSONs
+`runs/measure_fullness/fullness_pool_bank_sd000_250k_bc_{pool,random}[_probesame]_aws.json`). The probe-same
+pool line is identical to kisski's (tv 0.451, floor 0.382, Spearman 0.405, H(p) 4.34): parity. With the probe
+walked by best-of-64 under pool_reward instead of BC:
+
+| rollout BC, probe | reference | tv | floor | uniform | Spearman | H(p) | H(rho) | p(next) | rho(next) |
+|---|---|---|---|---|---|---|---|---|---|
+| best-of-64 | pool | 0.510 | 0.354 | 0.932 | 0.36 | 4.29 | 3.10 | 0.068 | 0.134 |
+| BC (same) | pool | 0.451 | 0.382 | 0.925 | 0.41 | 4.34 | 3.38 | 0.064 | 0.086 |
+| best-of-64 | random | 0.597 | 0.345 | 0.935 | 0.33 | 4.25 | 3.06 | 0.054 | 0.137 |
+
+Cube-position cells: tv 0.911 / 0.907 / 0.937 against floors 0.37 / 0.49 / 0.38 and uniform 0.91 / 0.89 / 0.91,
+Spearman 0.05 to 0.07, mass beyond the next cube cell 0.06, occupancy on the next cube cell 0.44 under the
+best-of-64 probe. aws's reading agrees with 16:50: the full-state agreement comes from the arm and gripper
+coordinates and the measure carries no information about where the cube goes, which is what every task reward
+reads. aws continues with best-of-64 rollouts, BC rollouts on random states with the BC probe, and the task-3
+eval parity, then the goal arms once their checkpoints are on HF.
+
+luis 14-44-17Z: the 50-region random-only student on three student seeds (the leave-one-out cells finish
+overnight, about 04:40 CEST):
+
+| 50 regions, random-only | t1 | t2 | t3 | t4 | t5 | mean sample | mean mode | t4 first 125 |
+|---|---|---|---|---|---|---|---|---|
+| student seed 0 | 0.946 | 0.962 | 0.958 | 0.924 | 0.850 | 0.928 | 0.930 | 0.904 |
+| student seed 1 | 0.938 | 0.964 | 0.970 | 0.820 | 0.908 | 0.920 | 0.882 | 0.792 |
+| student seed 2 | 0.926 | 0.944 | 0.968 | 0.944 | 0.854 | 0.927 | 0.916 | 0.936 |
+| mean ± 95% CI (n = 3) | | | | | | 0.925 ± 0.011 | 0.909 ± 0.061 | |
+| sd0 teacher | 0.914 | 0.938 | 0.950 | 0.850 | 0.910 | 0.912 | | 0.872 |
+| 20 regions, 3 seeds | | | | | | 0.907 ± 0.121 | 0.903 ± 0.155 | |
+
+Stated "within 0.03 of 0.928": met on all three seeds. The mean is 0.018 above the 20-region mean and 0.013 above
+the teacher, inside the 20-region CI; the student-seed SD falls from 0.049 to 0.004 and task 4 ranges 0.82 to
+0.94 against 0.52 to 0.93 with 20 regions; the lower CI bound 0.914 sits at the teacher's 0.912. Task 5 is the
+lowest task in two of three seeds (0.850, 0.854 against the teacher's 0.910). Leave-one-out on task 1 so far
+0.920 / 0.934 / 0.932. No replies needed.
+
 ### 16:50 CEST, fullness of the pool bank measure (sd000 250k, BC rollouts): tv 0.45 against a 0.38 floor on the pool, in full-state terms; 0.91 against 0.49 in cube-position terms
 
 `tools/diag_measure_fullness.py` on kisski (jobs 2525816 / 2525817, 3.5 min each), bank path (`coef_source
