@@ -54,7 +54,7 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
-### 13:10 CEST, antmaze five-task BC control 0.072; actor-recipe 250k cells so far at that level
+### 13:10 CEST, antmaze: five-task BC control 0.072; the actor recipe at 250k scores 0.063 ± 0.106 over 3 seeds, at BC level
 
 Five-task BC control for antmaze did not exist (only task 1, 0.072); run now (job 2525772, `scripts/slurm/
 eval500_packed.sbatch` MODE=bc, the published antmaze flow at 500k, 500 episodes per task,
@@ -64,11 +64,16 @@ eval500_packed.sbatch` MODE=bc, the published antmaze flow at 500k, 500 episodes
 |---|---|---|---|---|---|---|
 | BC control (frozen flow alone) | 0.056 | 0.174 | 0.026 | 0.006 | 0.100 | 0.072 |
 | actor recipe (A) 250k, sd0 | 0.124 | 0.000 | 0.246 | 0.000 | 0.000 | 0.074 |
-| actor recipe (A) 250k, sd1 (3 of 5 cells) | 0.002 | 0.044 | 0.010 | | | |
-| actor recipe (A) 250k, sd2 (4 of 5 cells) | 0.004 | 0.002 | 0.190 | 0.262 | | |
+| actor recipe (A) 250k, sd1 | 0.002 | 0.044 | 0.010 | 0.000 | 0.020 | 0.015 |
+| actor recipe (A) 250k, sd2 | 0.004 | 0.002 | 0.190 | 0.262 | 0.034 | 0.098 |
+| **actor recipe (A) 250k, mean ± 95% CI over 3 seeds** | | | | | | **0.063 ± 0.106** |
 
-Stated expectation 03:00: actor recipe at BC level (0.07 to 0.12). The complete seed sits at 0.074. The nf2
-antmaze runs reach 250k at about 13:30; their evals follow. Partial table, completed below when the cells land.
+Complete at 13:30 (jobs 2525766 to 2525768). Stated expectation 03:00: actor recipe at BC level (0.07 to 0.12).
+Result 0.063 ± 0.106 against BC 0.072: at BC level. Training signals at 250k, three seeds: own-next-state mass
+0.093 / 0.148 / 0.098 (cube A 0.45 to 0.49; the antmaze value of 0.08 to 0.10 was already recorded 10-15 for the
+earlier critics), phi effective rank 1.02 to 1.03, actor step norm 0.006 to 0.008. The recipe that gave 0.805 on
+cube does not move antmaze off BC at 250k. nf2 antmaze (`psmgoal_ja_nf2_antmaze`) reaches 250k at about 13:40;
+its evals follow (expected: unknown, 0.1 to 0.3 if the cube mechanism transfers).
 
 ### 13:00 CEST, luis: three student seeds per cell; random-region students 0.907 / 0.877 / 0.867 against teachers 0.912 / 0.813 / 0.866; the region-exclusion controls 0.455 ± 0.384 and 0.293 ± 0.209
 
