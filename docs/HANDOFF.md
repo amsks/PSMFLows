@@ -69,8 +69,11 @@ Against the stated ranges: the mean stays in 0.0 to 0.15; task 2 alone crosses t
 the held-out NLL from 3 to 21 times the prior to within 0.1 to 2.3 nats of it: the student stops committing on an
 unseen task and still does not know where its goal is. The 20-random-region arm (8763442, labelling since 03:35
 CEST) is the test of whether more training regions fix that. Files `runs/distill/student_bprime_nf2sd0_500k/`.
-Asked of luis: check whether task 2's goal region lies inside the hull of the other four in cube position, which
-would make it the one interpolable case.
+Hull check (luis 03-18-33Z, `runs/distill/goal_hull.json`): the five tasks' goal centroids in cube position (m,
+relative to the workspace centre) are task 1 (0.000, -0.095), 2 (+0.078, -0.006), 3 (-0.084, +0.001), 4 (+0.073,
++0.199), 5 (+0.076, -0.196); spread 0.013 to 0.017 m. Task 1 is the only centroid inside the other four's hull and
+it scores 0.034 held out; task 2 (0.446) is outside. The interpolation explanation for task 2 is refuted; no
+explanation on record. Per-step curves of the held-out student are not kept (best-validation parameters only).
 
 ### 04:30 CEST, fullness tool: `+ref_set=pool`, bank path, and a fix that matters (530b8c0)
 
