@@ -54,6 +54,51 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 18:40 CEST, user decision: port Density FB's z arm (the reward index) into psmgoal; built, tested, smoked, launched on luis and kisski; results wanted by about 00:00
+
+User, 18:00 to 18:15: the pool measure's fullness-without-acting result and the Density FB comparison led to
+"how can we port the Density FB z arm into our setup, given our constraints", then "give this a shot, results in
+6 hours, coordinate with luis". Design `docs/design/2026-10-19-reward-index.md` (9456243). What the z arm is:
+the critic's task index is a vector solved from reward samples (a centred ridge fit of the reward on the state
+feature), the same solve at training time on hindsight kernel rewards and at test time on the relabelled
+rewards; the loss stays Density FB's one-hot own-next-state softmax over the batch (`measure_density_hard: true`
+in every shipped cube run); on cube-single it scores 82.9 ± 4.0 (5 seeds, state tower on cube position) and
+91.7 ± 2.2 (full state) against 93.1 ± 1.8 for the goal arm (Factored-FB `docs/notes/2026-09-18-ogbench-five-
+seed-aggregate.md`, `2026-09-09-tdjtab-results-aggregate.md`). What was new against plain FB and against
+psmgoal's earlier reward coefficients (regression 0.30, 10-01): the index map used at test time is the one the
+critic trains on. The 09-30 "Factored-FB trick" arm (0.07) had the solve but on a BC measure with a code index,
+squared loss, no bootstrap from the actor at the index.
+
+Code (2d48a11, launcher b3567ba): `policy_index=reward` in `agents/psmgoal.py`. The index feature is the existing
+projected phi `fb_feature` at the slow basis copy (no new network); training rows w_i = `ridge_task` of the
+kernel reward (cube xyz, width 0.4) of the geometric hindsight goal over the batch's next states, half the rows a
+random sqrt(D) draw (`reward_index_rows`, computed once per update and merged into the batch); the softmax loss
+reads them as online and target rows; the bootstrap is the flowbc actor at (s', w_i); the actor loss
+`actor_loss_flowbc_reward` climbs Q = sum_j softmax_j(M/t) (f(y_j) - mu)^T w / sqrt(D) with the BC term; the
+index state (fb_zenc, fb_mu, fb_cov, anchors) updates as in `fb_actor_step`. Test time `coef_source=ridge` with
+three readouts: `acting=distill` (the actor at w), `acting=gpi` (best-of-64 by the goal mass at w), `acting=gpi
+ridge_score=reward` (best-of-64 by the expected relabel reward over the reference rows). main.py emits goals and
+fb_goals for the new index. Tests `tests/test_psmgoal_reward_index.py` (20); fbtrick, joint_actor, goalcond,
+bank_index files unchanged (11 / 29 / ... / 13 pass). Lint: no new findings (4 pre-existing in main.py).
+
+Smoke (CPU, 200 steps, exit 0, `$S/smoke_ri_cpu.log`): flags policy_index reward, coef_source ridge, actor_kind
+flowbc, actor_input w, measure_loss softmax, fb_rand_frac 0.5, fb_hit_spec 19:22:0.4, fb_enc_tau 0.0005,
+fb_sigma_tau 0.005, ridge_score goal; at step 200 index_proxy_corr 0.458, index_w_norm 11.31 (= sqrt 128),
+index_hindsight_frac 0.51 / 0.49 (measure / actor rows), measure_p_own_next 0.005, actor_delta_norm 0.026,
+phi_eff_rank 1.24; the in-loop eval ran under acting=distill at the ridge w.
+
+Launch: luis asked at 16-30-42Z (mailbox and `mailbox/tasks/`) to run `psmgoal_ri_fbc3_cube` seeds 0-2 to 250k on
+the H200s with the exact override string, the hyperparameter table and the three eval500 readouts; kisski jobs
+2525834 to 2525836 (250k, 10 h limit) queued behind the pool runs as the parity line. Expectation stated before
+results: five-task cube at 250k, best-of-64 at the ridge w 0.70 to 0.80, the actor at w within 0.10, the reward
+readout within 0.05; failure line 0.30; gate `index_proxy_corr` above 0.3 by 100k and 0.5 by 250k,
+`measure_p_own_next` 0.3 to 0.5.
+
+aws 16-26-42Z, pool fdplus sd000 250k fullness (goal index, frozen +step): under its own actor tv 0.60 to 0.69
+(floor 0.33 to 0.40), under best-of-64 0.75 to 0.84 (floor 0.19 to 0.26), cube-position cells at the uniform
+level in every line (tv 0.91 to 0.97, Spearman 0.03 to 0.07). The goal-indexed pool measure fits its own policy
+0.17 worse than the bank arm fits BC and keeps the same cube-position fault.
+
 ### 17:35 CEST, aws: bank gate complete, six fullness lines; under best-of-64 rollouts tv 0.65 / 0.71 against a 0.17 floor; eval parity 0.388 against 0.398
 
 aws 15-22-54Z (sd000 250k; JSONs `runs/measure_fullness/`, `runs/pool/aws/`):
