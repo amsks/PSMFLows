@@ -135,8 +135,19 @@ goal_random_frac: 0.3      # dataset off-trajectory random-goal fraction (OGBenc
 # acting=gpi; or acting=distill eval_redistill=false to act with the actor, fed a rewarding
 # dataset state (eval_goal_source=relabel) or the env's task goal (eval_goal_source=env).
 policy_index: code         # code (w(z) on the binary policy code) | goal (w = h(g))
-measure_loss: squared      # squared | softmax
+measure_loss: squared      # squared | softmax | pool
 measure_temp: 1.0          # softmax temperature, in the loss and the readouts
+# measure_loss=pool (2026-10-19, docs/design/2026-10-19-pool-measure.md): the softmax cross-entropy
+# with the batch's next states replaced by a FIXED reference pool of pool_size dataset states (the
+# next states of pool_size valid-preimage rows drawn once by pool_seed, utils.psm_common.
+# draw_pool_indices) and the one-hot on the pool state nearest the row's next state (per-dimension
+# standardised distance, sigma = the pool's std). Needs norm_future_k=0, ortho_coef=0. pool_hash is
+# written by the agent (sha1 of the pool's rows) and lands in the run's flags.json; eval rebuilds the
+# pool from (dataset, pool_seed) and asserts the same hash. Logged: measure_p_anchor, pool_entropy,
+# pool_u_tv (u-dependence of the measure on 32 rows), phi_eff_rank.
+pool_size: 1024
+pool_seed: 0
+pool_hash: null
 # norm_future_k (2026-10-15, measure_loss=softmax only): K later states of each row's own trajectory
 # (offset ~ Geometric(1 - goal_discount), clipped at the trajectory end, batch['future_states']) join
 # the batch's next states as the softmax normalisation set of the loss and its target. 0 = off.

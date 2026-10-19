@@ -12,7 +12,7 @@ import optax
 from agents.f_psmflow import _load_flow_params
 from utils.flax_utils import TrainState, nonpytree_field
 from utils.networks import ActorVectorField
-from utils.psm_common import _plain_config, polyak_update
+from utils.psm_common import _plain_config, polyak_update, pool_anchor, pool_hash, pool_sigma
 from utils.psm_networks import (
     FactorizedMeasure,
     GoalCoefficient,
@@ -128,7 +128,14 @@ def induced_value(M, r, mode, temp):
 #: policy_index options. code = w(z) on the binary policy code; goal = w = h(g) on the row's goal.
 POLICY_INDEXES = ("code", "goal")
 #: measure_loss options. squared = TD on the mesh; softmax = cross-entropy over the columns.
-MEASURE_LOSSES = ("squared", "softmax")
+#: pool (2026-10-19, docs/design/2026-10-19-pool-measure.md): the softmax cross-entropy with the
+#: batch's next states replaced by a FIXED reference pool of pool_size dataset states carried on
+#: the agent (`pool_states`), and the one-hot on the pool state nearest the row's next state.
+MEASURE_LOSSES = ("squared", "softmax", "pool")
+#: pool_u_tv: rows of the batch the u-dependence diagnostic is computed on each update.
+POOL_TV_ROWS = 32
+#: fold_in constant of the fresh prior draw the pool_u_tv diagnostic compares the row's u against.
+POOL_TV_KEY = 106
 #: actor_input options. w = the coefficient; goal = the raw goal state.
 ACTOR_INPUTS = ("w", "goal")
 #: eval_goal_source options: where the actor readout's goal comes from.
@@ -280,10 +287,21 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
     # coef_source=reward_gpi (2026-10-15, eval only; carried but unused otherwise).
     eval_cand_w: Any = None      # (k_goals, z_dim) h(g_c) per candidate goal
     eval_ref_reward: Any = None  # (R,) r(s_j) at the reference states eval_ref
+    # measure_loss=pool (2026-10-19): the reference pool R, fixed for the run, never trained. None
+    # under the other losses. main.py / tools/eval_checkpoint.py draw it from the dataset's
+    # valid-preimage rows by pool_seed (utils.psm_common.draw_pool_indices) and hand it to `create`.
+    pool_states: Any = None      # (P, ob) the pool states y_j (the rows' next states)
+    pool_indices: Any = None     # (P,) int32 dataset rows of the pool (sha1 -> config['pool_hash'])
+    pool_scale: Any = None       # (ob,) sigma of the anchor distance: per-dimension std of pool_states
 
     # ------------------------------------------------------------------ construction
     @classmethod
-    def create(cls, seed, ex_observations, ex_actions, config):
+    def create(cls, seed, ex_observations, ex_actions, config, pool_obs=None, pool_indices=None):
+        """measure_loss=pool needs the reference pool: `pool_obs` (pool_size, ob) the pool rows' next
+        states and `pool_indices` (pool_size,) their dataset rows, drawn by the caller
+        (utils.psm_common.draw_pool_indices from the valid-preimage rows at pool_seed). The hash of
+        the rows lands in config['pool_hash']; a config that already carries one (an eval reading
+        the run's flags.json) must match. Both are ignored under the other losses."""
         assert config.get("encoder", None) is None, "psmgoal does not support visual encoders."
         coef_source = str(config.get("coef_source", "lp"))
         assert coef_source in COEF_SOURCES + GOAL_COEF_SOURCES, \
@@ -361,7 +379,16 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         assert norm_future_k >= 0, "norm_future_k must be >= 0"
         if norm_future_k > 0:
             assert measure_loss == "softmax", "norm_future_k > 0 extends the softmax normalisation set: set measure_loss=softmax"
-        if measure_loss == "softmax":
+        if measure_loss == "pool":
+            # the pool REPLACES the candidate set; mixing it with the rows' future states is not defined
+            assert norm_future_k == 0, "measure_loss=pool replaces the candidate set by the pool: needs norm_future_k=0"
+            assert pool_obs is not None and pool_indices is not None, \
+                "measure_loss=pool needs the reference pool (create(..., pool_obs=, pool_indices=))"
+            pool_obs = np.asarray(pool_obs, np.float32)
+            pool_indices = np.asarray(pool_indices, np.int64).reshape(-1)
+            assert pool_obs.ndim == 2 and pool_obs.shape[0] == pool_indices.shape[0] == int(config["pool_size"]), \
+                f"pool_obs {pool_obs.shape} / pool_indices {pool_indices.shape} do not match pool_size={config['pool_size']}"
+        if measure_loss in ("softmax", "pool"):
             assert measure_form != "factorized", "measure_loss=softmax is not wired with measure_form=factorized"
             assert float(config.get("ortho_coef", 0.0)) == 0.0, "measure_loss=softmax needs ortho_coef=0"
             assert int(config["batch_size"]) > int(config["k_goals"]), \
@@ -483,6 +510,17 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         config["ob_dims"] = tuple(ex_observations.shape[1:])
         config["action_dim"] = action_dim
         ob_dim = int(ex_observations.shape[-1])
+        pool_states = pool_scale = pool_rows = None
+        if measure_loss == "pool":
+            h = pool_hash(pool_indices)
+            recorded = config.get("pool_hash", None)
+            assert recorded in (None, "") or str(recorded) == h, (
+                f"pool_hash mismatch: the config records {recorded!r} but the pool handed to create hashes "
+                f"to {h!r} (different dataset, pool_seed or pool_size than the run was trained with)")
+            config["pool_hash"] = h
+            pool_states = jnp.asarray(pool_obs, jnp.float32)
+            pool_scale = pool_sigma(pool_states)
+            pool_rows = jnp.asarray(pool_indices, jnp.int32)
         # Factored-FB state: the index tower starts as a copy of the basis, mu = 0, C = I
         # (density_fb _ZStatsState init). Built always so a restore has the slot.
         k_anchor = int(config.get("fb_k_anchor", 32))
@@ -507,7 +545,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                    delta=delta, log_alpha=log_alpha, frozen_delta_params=frozen_delta_params,
                    eval_cand_w=jnp.zeros((int(config["k_goals"]), z_dim), jnp.float32),
                    eval_ref_reward=jnp.zeros((max(int(config["batch_size"]) - int(config["k_goals"]), 1),),
-                                             jnp.float32))
+                                             jnp.float32),
+                   pool_states=pool_states, pool_indices=pool_rows, pool_scale=pool_scale)
 
     # ------------------------------------------------------------------ the measure
     def M(self, obs, u, g, w, params=None):
@@ -549,7 +588,18 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         return str(self.config.get("policy_index", "code")) == "goal"
 
     def _softmax(self):
-        return str(self.config.get("measure_loss", "squared")) == "softmax"
+        """The measure is a distribution over candidate states and is read as shares: measure_loss=softmax
+        and measure_loss=pool (the pool loss is the softmax cross-entropy over the pool). Every readout
+        and actor value that branches on this treats both the same; the loss itself branches on `_pool`."""
+        return str(self.config.get("measure_loss", "squared")) in ("softmax", "pool")
+
+    def _pool(self):
+        return str(self.config.get("measure_loss", "squared")) == "pool"
+
+    def pool_anchors(self, next_obs):
+        """measure_loss=pool: the anchor of each next state, the pool state nearest to it in the pool's
+        per-dimension scale (utils.psm_common.pool_anchor; first index on ties). (N,) int32."""
+        return pool_anchor(next_obs, self.pool_states, self.pool_scale)
 
     def _actor_takes_goal(self):
         return str(self.config.get("actor_input", "w")) == "goal"
@@ -854,6 +904,12 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         next_obs = jnp.asarray(batch["next_observations"])
         u = jnp.clip(jnp.asarray(batch["noise_preimage"]), -c["u_clip"], c["u_clip"])
         goals = next_obs                                         # g_j = s'_j
+        anchor = None
+        if self._pool():
+            # the fixed reference pool is the candidate set of every row; the row's own next state
+            # enters only through its anchor, the pool state nearest to it
+            goals = self.pool_states                                                # (P, ob)
+            anchor = self.pool_anchors(next_obs)                                    # (N,)
         if int(c.get("norm_future_k", 0)) > 0:
             assert "future_states" in batch, "norm_future_k > 0 needs batch['future_states'] (Dataset.norm_future_k)"
             fut = jnp.asarray(batch["future_states"])                           # (N, K, ob)
@@ -869,6 +925,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         else:
             M_bar = self.mesh_M(next_obs, u_next, goals, w_t, params=self.target_basis)
         target_M = jax.lax.stop_gradient(M_bar)
+        if self._pool():
+            return self._pool_measure_loss(M, target_M, phi, w, anchor, obs, basis_params)
         if self._softmax():
             return self._softmax_measure_loss(M, target_M, phi, w)
         # Successor-measure Bellman fit (PSM Eq. 2 + Cor. 4.2, arXiv 2411.19418 v2; RLU
@@ -939,6 +997,52 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                 "phi_eff_rank": jnp.trace(gram) ** 2 / jnp.maximum(jnp.sum(gram ** 2), 1e-12),
                 "m_diag_mean": jnp.mean(jnp.diagonal(M)),
                 "m_offdiag_mean": jnp.sum(M * off) / jnp.maximum(jnp.sum(off), 1.0),
+                "td_target_absmean": jnp.mean(jnp.abs(target_M)),
+                "w_norm": jnp.mean(jnp.linalg.norm(w, axis=-1))}
+        return loss, info
+
+    @staticmethod
+    def pool_td_loss(M, M_bar, anchor, discount, temp):
+        """measure_loss=pool: cross-entropy between softmax_j(M_ij / temp) and the stop-gradded target
+        (1 - discount) * onehot(j = anchor_i) + discount * softmax_j(M_bar_ij / temp), mean over rows.
+        M, M_bar (N, P) over the P pool states: row i is (s_i, u_i) resp. (s'_i, u'_i); anchor (N,) is the
+        pool state nearest s'_i. `softmax_td_loss` with the identity one-hot replaced by the anchor."""
+        onehot = jax.nn.one_hot(anchor, M.shape[1], dtype=M.dtype)
+        target = (1.0 - discount) * onehot + discount * jax.nn.softmax(M_bar / temp, axis=-1)
+        logp = jax.nn.log_softmax(M / temp, axis=-1)
+        return -jnp.mean(jnp.sum(jax.lax.stop_gradient(target) * logp, axis=-1))
+
+    def _pool_measure_loss(self, M, target_M, phi, w, anchor, obs, basis_params):
+        """measure_loss=pool: `pool_td_loss` over the pool, plus the diagnostics of the design doc.
+        measure_p_anchor: mean mass of the row softmax p_i on its anchor state. pool_entropy: mean
+        entropy of p_i over the pool, nats (ln P at most). pool_u_tv: on the first POOL_TV_ROWS rows,
+        the mean total variation 0.5 * sum_j |p_i(j) - p'_i(j)| between p_i (the row's own u_i) and
+        p'_i under a fresh clipped prior draw at the same (s_i, w_i), online params, no gradient -- the
+        number that says whether the measure depends on the action. phi_eff_rank, m_softmax_max,
+        m_logit_spread, td_target_absmean, w_norm as under measure_loss=softmax."""
+        c = self.config
+        temp = float(c["measure_temp"])
+        loss = self.pool_td_loss(M, target_M, anchor, c["discount"], temp)
+        logp = jax.nn.log_softmax(M / temp, axis=-1)
+        p = jnp.exp(logp)
+        N = M.shape[0]
+        p_anchor = jnp.mean(p[jnp.arange(N), anchor])
+        entropy = -jnp.mean(jnp.sum(p * logp, axis=-1))
+        n = min(POOL_TV_ROWS, N)
+        eps = jax.random.normal(jax.random.fold_in(self.rng, POOL_TV_KEY), (n, int(c["action_dim"])))
+        eps = jnp.clip(eps, -c["u_clip"], c["u_clip"])
+        M_prior = self.mesh_M(obs[:n], eps, self.pool_states, w[:n], params=basis_params)        # (n, P)
+        p_prior = jax.nn.softmax(jax.lax.stop_gradient(M_prior) / temp, axis=-1)
+        tv = jnp.mean(0.5 * jnp.sum(jnp.abs(jax.lax.stop_gradient(p[:n]) - p_prior), axis=-1))
+        phi_flat = phi.reshape(-1, phi.shape[-1])
+        gram = phi_flat.T @ phi_flat / phi_flat.shape[0]
+        info = {"psm_loss": loss,
+                "measure_p_anchor": p_anchor,
+                "pool_entropy": entropy,
+                "pool_u_tv": tv,
+                "m_softmax_max": jnp.mean(jnp.max(p, axis=-1)),
+                "m_logit_spread": jnp.mean(jnp.max(M, axis=-1) - jnp.min(M, axis=-1)) / temp,
+                "phi_eff_rank": jnp.trace(gram) ** 2 / jnp.maximum(jnp.sum(gram ** 2), 1e-12),
                 "td_target_absmean": jnp.mean(jnp.abs(target_M)),
                 "w_norm": jnp.mean(jnp.linalg.norm(w, axis=-1))}
         return loss, info
@@ -1952,8 +2056,14 @@ def get_config():
         "goal_random_frac": 0.3,    # dataset off-trajectory random-goal fraction (OGBench-style)
         # --- goal-conditioned training (2026-10-01; all OFF by default) ---
         "policy_index": "code",     # code (w(z) on the binary policy code) | goal (w = h(g), actor bootstrap at g)
-        "measure_loss": "squared",  # squared (TD on the mesh) | softmax (cross-entropy over the batch's next states)
+        # squared (TD on the mesh) | softmax (cross-entropy over the batch's next states) | pool
+        # (the softmax cross-entropy over a fixed pool of pool_size dataset states, one-hot on the
+        # pool state nearest the row's next state; docs/design/2026-10-19-pool-measure.md)
+        "measure_loss": "squared",
         "measure_temp": 1.0,        # softmax temperature, in the loss and the readouts
+        "pool_size": 1024,          # measure_loss=pool: P, states in the reference pool
+        "pool_seed": 0,             # measure_loss=pool: seed of the pool's draw from the valid-preimage rows
+        "pool_hash": ml_collections.config_dict.placeholder(str),   # set by create: sha1 of the pool's rows
         # measure_loss=softmax: K later states of each row's own trajectory (offset ~ Geometric(1 -
         # goal_discount), clipped at the trajectory end) join the batch's next states as the
         # softmax normalisation set of the loss and its target (S = N + N*K columns). 0 = off.

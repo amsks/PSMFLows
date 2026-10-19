@@ -302,13 +302,43 @@ def main(cfg: DictConfig):
         config['basis_goal_states'] = np.asarray(
             train_dataset['observations'][_idx], np.float32).tolist()
 
+    # psmgoal measure_loss=pool (2026-10-19): the reference pool R = pool_size dataset rows drawn once,
+    # without replacement, from the valid-preimage rows by pool_seed (utils.psm_common.draw_pool_indices;
+    # reproducible from the dataset and the seed alone, so tools/eval_checkpoint.py rebuilds the same R).
+    # The pool states are the rows' next states. `create` records sha1(rows) as agent.pool_hash, which is
+    # written back into flags.json below so an eval can assert it rebuilt the same pool.
+    agent_kw = {}
+    if config['agent_name'] == 'psmgoal' and str(config.get('measure_loss', 'squared')) == 'pool':
+        from utils.flow_inversion import PREIMAGE_VALID_KEY
+        from utils.psm_common import draw_pool_indices
+        _n_rows = int(train_dataset.size)
+        if PREIMAGE_VALID_KEY in train_dataset:
+            _valid_rows = np.nonzero(np.asarray(train_dataset[PREIMAGE_VALID_KEY][:_n_rows]) > 0.5)[0]
+        else:
+            _valid_rows = np.arange(_n_rows)
+        _pool_rows = draw_pool_indices(_valid_rows, int(config['pool_size']), int(config['pool_seed']))
+        agent_kw = {'pool_obs': np.asarray(train_dataset['next_observations'][_pool_rows], np.float32),
+                    'pool_indices': _pool_rows}
+        print(f"pool measure: {len(_pool_rows)} rows drawn from {len(_valid_rows)} valid-preimage rows "
+              f"(of {_n_rows}) at pool_seed={int(config['pool_seed'])}")
+
     agent_class = agents[config['agent_name']]
     agent = agent_class.create(
         cfg.seed,
         example_batch['observations'],
         example_batch['actions'],
         config,
+        **agent_kw,
     )
+    if agent_kw:
+        _pool_hash = str(agent.config['pool_hash'])
+        _flags_path = os.path.join(save_dir, 'flags.json')
+        with open(_flags_path) as f:
+            _flags = json.load(f)
+        _flags['agent']['pool_hash'] = _pool_hash
+        with open(_flags_path, 'w') as f:
+            json.dump(_flags, f, default=str)
+        print(f'pool measure: pool_hash={_pool_hash} recorded in {_flags_path}')
 
     # Restore agent.
     if cfg.restore_path is not None:
