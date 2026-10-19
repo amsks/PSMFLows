@@ -4,10 +4,15 @@
 orthonormality regulariser (PSM Eq. 7, Table 2); `targets_uncertainty` is the ensemble
 mean and spread the pessimism penalties are built from; `project_z`, `off_diagonal_mask`
 and `polyak_update` are one-liners with a single sensible definition. `_plain_config` flattens a ConfigDict for the jitted update's static aux.
+`draw_pool_indices`, `pool_hash`, `pool_sigma` and `pool_anchor` are the pool measure's reference
+set R and its nearest-state anchor (docs/design/2026-10-19-pool-measure.md).
 """
+
+import hashlib
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 
 def contrastive_loss(M, target_M, discount, off_diag, off_diag_sum, row_weight=None):
@@ -95,3 +100,34 @@ def _plain_config(x):
     if hasattr(x, "items"):
         return {k: _plain_config(v) for k, v in x.items()}
     return x
+
+
+# ------------------------------------------------ the pool measure (2026-10-19)
+
+def draw_pool_indices(valid_rows, pool_size, pool_seed):
+    """The reference pool R of the pool measure (docs/design/2026-10-19-pool-measure.md):
+    `pool_size` dataset rows drawn once, without replacement, from the valid-preimage rows,
+    reproducible from `pool_seed` alone (numpy default_rng, independent of the global stream).
+    Sorted int64. Asserts rather than drawing with replacement when the pool is too big."""
+    valid_rows = np.asarray(valid_rows, dtype=np.int64).reshape(-1)
+    assert 0 < int(pool_size) <= len(valid_rows), (int(pool_size), len(valid_rows))
+    rng = np.random.default_rng(int(pool_seed))
+    return np.sort(rng.choice(valid_rows, size=int(pool_size), replace=False))
+
+
+def pool_hash(indices):
+    """sha1 hex of the pool's row indices as int64 bytes: the run's record of R, checked at eval."""
+    return hashlib.sha1(np.asarray(indices, dtype=np.int64).tobytes()).hexdigest()
+
+
+def pool_sigma(pool_obs):
+    """Per-dimension standard deviation of the pool's states (P, ob) -> (ob,), floored at 1e-6."""
+    return jnp.maximum(jnp.std(pool_obs, axis=0), 1e-6)
+
+
+def pool_anchor(next_obs, pool_obs, sigma):
+    """The anchor of each next state: the index of the pool state nearest to it in standardised
+    squared distance sum_d ((s' - y)_d / sigma_d)^2. next_obs (N, ob), pool_obs (P, ob), sigma (ob,)
+    -> (N,) int32. Ties go to the first index (jnp.argmin)."""
+    d = ((next_obs[:, None, :] - pool_obs[None, :, :]) / sigma) ** 2
+    return jnp.argmin(d.sum(-1), axis=1).astype(jnp.int32)
