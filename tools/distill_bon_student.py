@@ -28,7 +28,8 @@ the repo config sets 10, which overrides this tool's 500 (the 10-17 run evaluate
 Options added 2026-10-19 (kisski 2026-10-19T00-42-34Z): +weight_decay (AdamW) and +early_stop (keep the
 parameters at the lowest validation NLL); +descriptor=set replaces the mean descriptor by a
 permutation-invariant encoder over the 32 goal states [g, h(g)] (per-goal MLP, then the mean);
-+labels_in reuses a previous run's labels npz (for the tasks it holds) instead of re-running the teacher.
++labels_in=a.npz:b.npz reuses previous runs' labels (for the tasks they hold; first file wins) instead of
+re-running the teacher.
 +n_random_tasks=N (with +descriptor=set) adds N random goal-region training tasks (kisski 2026-10-19T01-54-05Z):
 anchor = the cube position of a random dataset next state (seed +random_seed0 + i); the relabel batch's
 rewarding rows are the next states with the cube within the env's 0.04 m tolerance of it (the radius grows to
@@ -409,17 +410,17 @@ def run(cfg):
     data = {t: {} for t in all_tasks}
     teacher_success = {}
     have = set()
-    if labels_in:                                 # reuse a previous run's labels (same teacher)
-        z = np.load(labels_in)
+    for path in (str(labels_in).split(':') if labels_in else []):   # reuse previous runs' labels (same teacher)
+        z = np.load(path)
         for t in all_tasks:
-            if f't{t}_data_obs' not in z.files:
+            if f't{t}_data_obs' not in z.files or t in have:
                 continue
             data[t] = {k: z[f't{t}_{k}']
                        for k in ('data_obs', 'data_v', 'roll_obs', 'roll_v', 'roll_ep', 'roll_extra_v')}
             teacher_success[t] = None
             have.add(t)
         n_extra = int(data[min(have)]['roll_extra_v'].shape[0])
-        print(f'labels <- {labels_in} for tasks {sorted(have)} (n_extra_labels {n_extra})', flush=True)
+        print(f'labels <- {path} for tasks {sorted(have)} (n_extra_labels {n_extra})', flush=True)
     for t in [t for t in all_tasks if t not in have]:
         pt = per_task[t]
         ag, env = pt['agent'], pt['env']
