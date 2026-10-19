@@ -54,6 +54,19 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 06:10 CEST, pool runs: all nine started with the right flags; step cost 0.15-0.16 s against the 0.06 planned
+
+All nine `flags.json` re-read: `measure_loss pool`, `pool_size 1024`, `pool_hash dfea8933`, `policy_index` bank /
+goal / goal, `bootstrap_source` actor / frozen_delta / actor, `train_actor` false / true / true. The design doc
+estimated 0.06 s per step; measured 0.152 (bank) and 0.164 (fdplus) all-in, so 500k takes 21 to 23 h against the
+24 h limit, which cannot be raised on a running job (scontrol refused). The 250k checkpoints land at about 11 h
+(bank about 15:00 CEST, goal arms about 17:00). If a run is cut before 500k, the fallback is a second run with
+`restore_path=<run dir> restore_epoch=250000 offline_steps=250000` (main.py restores the agent and starts its loop
+at step 1, so that run's `params_250000` is the 500k checkpoint; the target nets and random stream restart).
+Bank arm at 50k, three seeds: pool_u_tv 0.058 / 0.062 / 0.064 (criterion: above 0.05 by 100k), pool_entropy 4.2 to
+4.4 of 6.93, measure_p_anchor 0.07 to 0.08, phi_eff_rank 1.13 to 1.20. fdplus at 5k: pool_u_tv 0.050 to 0.053.
+Whether pool_u_tv rises or decays from here is the first thing to read at 100k.
+
 ### 06:00 CEST, luis: a student trained on 20 random goal regions only scores 0.904 / 0.920 on the five real tasks (teacher 0.912)
 
 luis 03-55-35Z (job 8763442; teacher nf2 sd0 500k; set-encoder descriptor over the 32 goal states; early_stop +
