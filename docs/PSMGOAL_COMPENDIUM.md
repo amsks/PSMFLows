@@ -1365,7 +1365,9 @@ each live reading. Numbers are what to compare against.
    teacher 0.912, in-task student 0.918. Real centroids lie 1.6 to 8 cm from the nearest random
    anchor (tasks 1 and 3 within tolerance of one, 2, 4, 5 not). The deployment actor generalises
    across goal regions; the clean control that excludes random regions near the real goals and a
-   50-region run are in flight. Four training tasks do not give a descriptor space to interpolate in; the
+   50-region run are in flight. Students of the nf2 seed 1 and 2 teachers (same recipe, in-task):
+   0.757 and 0.820 against teachers 0.813 and 0.866, 0.05 below, one seed each; the sd0 student
+   is the only one at its teacher. Four training tasks do not give a descriptor space to interpolate in; the
    next arm trains on 20 random goal-set tasks and tests on the five real ones (expected 0.3 to
    0.7). This closes the "actor fails at inference" item for in-task deployment: the failure was
    the actor objective (critic climb with a BC penalty), not the representability of the target.

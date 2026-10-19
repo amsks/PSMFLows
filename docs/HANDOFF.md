@@ -54,6 +54,30 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 06:20 CEST, luis: students on the nf2 seed 1 and 2 teachers sit 0.05 below their teachers; the controls for the random-region result are running
+
+luis 04-06-18Z (same recipe as student (a), labels drawn fresh from each teacher, early stopping, seed 0, 500
+episodes; teacher numbers = luis's own eval500 of the same checkpoints):
+
+| teacher | student, sample (t1..t5) | mean | mode | teacher best-of-64 | student minus teacher |
+|---|---|---|---|---|---|
+| nf2 sd0 | 0.936 0.978 0.970 0.882 0.822 | 0.918 | 0.926 | 0.912 | +0.006 |
+| nf2 sd1 | 0.874 0.624 0.804 0.748 0.734 | 0.757 | 0.719 | 0.813 | -0.056 |
+| nf2 sd2 | 0.944 0.798 0.948 0.486 0.924 | 0.820 | 0.759 | 0.866 | -0.046 |
+
+Stated "each student within 0.03 of its teacher": met for sd0, missed for sd1 and sd2 by 0.016 to 0.026 beyond
+the margin. The students keep the teachers' order (sd0 > sd2 > sd1). The misses sit on tasks where the teacher
+is strong and the student is not (sd1 task 2, sd2 tasks 2 and 4); elsewhere the student is at or above the
+teacher. Mode below sample for sd1 and sd2, the reverse of sd0. One seed each. Files
+`runs/distill/student_a_nf2sd{1,2}_500k/`.
+
+luis 04-03-14Z: asks A (random_only on the regions more than 8 cm from every real goal centroid: 12 of 20 remain,
+and the kept set contains all four sparse regions, teacher success 0.08 to 0.20 there), B (random_only, student
+seeds 1 and 2), D (20 random regions labelled by the nf2 sd1 teacher) and the 50-region run are all running
+(8763932-8763935, 8763896). New tool options pushed: `+student_seed`, `+exclude_near_real`. Asked of luis: an A'
+variant that also drops the four sparse regions (8 regions left), so coverage and label quality are separated, and
+a second student seed on the sd1 teacher.
+
 ### 06:10 CEST, pool runs: all nine started with the right flags; step cost 0.15-0.16 s against the 0.06 planned
 
 All nine `flags.json` re-read: `measure_loss pool`, `pool_size 1024`, `pool_hash dfea8933`, `policy_index` bank /
