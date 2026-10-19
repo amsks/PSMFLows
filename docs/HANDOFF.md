@@ -54,6 +54,25 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 08:35 CEST, pool bank arm at 100k: pool_u_tv 0.060 to 0.065, above the 0.05 criterion, unchanged since 50k
+
+Training-log read at 100k (the plan's first checkpoint for the action-dependence signal; bank arm, three seeds),
+with the goal arms at 55k:
+
+| arm | step | pool_u_tv | measure_p_anchor | pool_entropy (max 6.93) | phi_eff_rank |
+|---|---|---|---|---|---|
+| bank sd0 / sd1 / sd2 | 50k | 0.062 / 0.058 / 0.064 | 0.069 / 0.082 / 0.068 | 4.38 / 4.21 / 4.30 | 1.13 / 1.16 / 1.19 |
+| bank sd0 / sd1 / sd2 | 100k | 0.061 / 0.060 / 0.065 | 0.081 / 0.093 / 0.072 | 4.23 / 4.17 / 4.23 | 1.13 / 1.18 / 1.20 |
+| fdplus sd0 / sd1 / sd2 | 55k | 0.064 / 0.073 / 0.066 | 0.091 / 0.095 / 0.089 | 3.68 / 3.77 / 3.74 | 1.09 / 1.19 / 1.17 |
+| ja sd0 / sd1 / (sd2 at 50k) | 55k | 0.064 / 0.064 / 0.052 | 0.092 / 0.095 / 0.080 | 3.64 / 3.75 / 3.84 | 1.08 / 1.19 / 1.18 |
+
+The criterion "pool_u_tv above 0.05 by 100k" is met on all three bank seeds. The value has not risen from 5k
+(0.050 to 0.053) through 100k; the per-log-interval values swing 0.050 to 0.084 on 32 rows. The anchor mass is
+0.07 to 0.09 (arm A's own-next mass was 0.45 to 0.49), entropy 4.2 nats of 6.93 on the bank arm and 3.6 to 3.8 on
+the goal arms, phi effective rank 1.1 to 1.2 as before. Whether a pool_u_tv of 0.06 is a measure that depends on
+the action, or the floor of a near-flat distribution, is what aws's fullness lines at 250k answer (noise floor
+0.35 for tv against the rollout occupancy).
+
 ### 08:25 CEST, luis: 50 random regions, random-only student 0.928 / 0.930 on the real tasks (teacher 0.912, 20 regions 0.904); adding the real tasks lowers tasks 4 and 5 again
 
 luis 06-13-48Z (job 8763896; nf2 sd0 500k teacher; regions 100..119 reuse the rand20 labels, 120..149 fresh
