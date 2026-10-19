@@ -54,6 +54,30 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 04:05 CEST, aws: pool eval path reproduced on aws; the fullness tool needed a pool rebuild (aws's patch applied) and a bank path (being added); luis: student files reproduced bit for bit, random-region arm launched
+
+aws 02-04-07Z trained its own 200-step bank and ja smokes and ran the eval tool on them: pool_reward and hgoal_each
+exit 0 with the same pool hash, `pool_hash_checked: true`; pool_reward costs 24 s per episode against 17 for
+hgoal_each on one worker. `tools/diag_measure_fullness.py` failed on every pool checkpoint: (1) `create` was called
+without the pool (aws's +13/-1 patch, applied here: rebuilds the pool through `build_eval_pool` with the hash
+assert); (2) the bank arm has no h(g), and the tool forces `coef_source=hgoal_each` and reads every coefficient
+through h(g). Decisions: the bank arm's fullness reads the measure under the bank's single w, the probe episode is
+walked by best-of-64 under `coef_source=pool_reward` (the bank's deployed readout), rollouts under `bc` (its own
+policy) and `bon64`, and the goal-share columns are dropped; and a `+ref_set=pool` option measures p over the
+run's own 1024 training pool states instead of the tool's 1024 random states (the pool arms are reported under
+both; `random` stays the default and matches the 10-17 numbers). aws's pool watcher evaluates every uploaded
+pool checkpoint (pool_reward on all arms, hgoal_each on fdplus and ja; `runs/pool/aws/`) and runs fullness on
+seed 0 at 250k for ja (actor, bon64) and fdplus (bon64); bank fullness waits for the bank path.
+
+luis 02-00-43Z: student (a) files on HF `runs/distill/student_a_nf2sd0_500k/` (params, standardisation and
+descriptors, config, NLL curve, 10 eval JSONs); retrained from the same labels and seed on CPU it reproduces
+0.9176 / 0.926 exactly. (b') running (8763395). The 20-random-region arm is launched (8763442, code c02f367):
+cube position at observation dims 19:22, success tolerance 0.04 m = 0.4 observation units from the env's own
+success check, asserted on the live env; per random task 206 to 218 of 10,000 rows fall within tolerance of the
+anchor (real tasks about 200); teacher best-of-64 with G_c / R_c built as for a real task; random-task rollout
+success = cube within tolerance; students random_only (20 random, test the five real tasks) and loo_t (20 random
++ 4 real, test the fifth); 50 random tasks follow if the 20 finish under 3 h. sd1 / sd2 students still labelling.
+
 ### 03:55 CEST, luis: the 10-17 student at 500 episodes is 0.902; early stopping adds 0.02-0.03; the set-encoder student does not transfer to a held-out task (mean 0.06)
 
 luis 01-43-43Z and 01-51-21Z. Rerun of the 10-17 student (50k steps, no early stopping, fresh labels, 500 episodes):

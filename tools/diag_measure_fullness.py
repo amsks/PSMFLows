@@ -253,7 +253,19 @@ def run(cfg):
     ex = ds.sample(1)
     base = {}
     for side, rp in runs.items():
-        a = agents['psmgoal'].create(base_seed, ex['observations'], ex['actions'], configs[side])
+        # measure_loss=pool (2026-10-19): rebuild the run's reference pool and check its hash, as eval does
+        pool_kw = {}
+        if str(configs[side].get('measure_loss', 'squared')) == 'pool':
+            from tools.eval_checkpoint import build_eval_pool
+            from utils.flow_inversion import PREIMAGE_VALID_KEY, load_augmented_dataset, repair_invalid_preimages
+            src = {'next_observations': train_dataset['next_observations']}
+            if configs[side].get('preimage_path'):
+                aug, _ = repair_invalid_preimages(load_augmented_dataset(configs[side]['preimage_path']))
+                if aug.get(PREIMAGE_VALID_KEY) is not None:
+                    src[PREIMAGE_VALID_KEY] = aug[PREIMAGE_VALID_KEY]
+            pool_obs, pool_rows = build_eval_pool(src, configs[side])
+            pool_kw = {'pool_obs': pool_obs, 'pool_indices': pool_rows}
+        a = agents['psmgoal'].create(base_seed, ex['observations'], ex['actions'], configs[side], **pool_kw)
         base[side] = restore_agent(a, rp, cfg.restore_epoch)
 
     @jax.jit
