@@ -54,6 +54,30 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 03:55 CEST, luis: the 10-17 student at 500 episodes is 0.902; early stopping adds 0.02-0.03; the set-encoder student does not transfer to a held-out task (mean 0.06)
+
+luis 01-43-43Z and 01-51-21Z. Rerun of the 10-17 student (50k steps, no early stopping, fresh labels, 500 episodes):
+0.902 sample / 0.898 mode (per task 0.922 0.962 0.946 0.800 0.882 sample); (a) is +0.016 / +0.028 over it, inside
+the stated "within 0.03", so calibration changes acting little and both students are at the teacher's 0.912.
+Held-out task 5 with the mean descriptor at 500 episodes: 0.002 / 0.000.
+
+(b) set-encoder descriptor (per-goal MLP over [g, h(g)] of the 32 goals, mean-pooled), leave-one-out over the
+five tasks, 50k steps without early stopping, 500 episodes per held-out task:
+
+| held-out task | 1 | 2 | 3 | 4 | 5 | mean |
+|---|---|---|---|---|---|---|
+| sample | 0.072 | 0.230 | 0.002 | 0.000 | 0.000 | 0.061 |
+| mode | 0.124 | 0.146 | 0.006 | 0.000 | 0.000 | 0.055 |
+
+Validation NLL on the held-out task's rollout states 12 to 21 times the prior's: the student is confidently
+wrong off its training tasks. Against the stated ranges: the "gap is the number of training tasks" case (0.0 to
+0.1), not "the set encoder generalises" (0.2 to 0.6). Confound noted by luis: (b) ran without early stopping.
+Decisions sent: (b') = (b) with early stopping and weight decay from the same labels (1 h), and the next arm,
+20 random goal-set training tasks built the eval way (a random anchor row, the 32 rows whose cube position lies
+within the task tolerance of it, 224 non-members as refs), test on the five real tasks; expectation on record
+0.3 to 0.7. luis is also saving student files (`+student_out`, 8cf6448) and training (a) students on the nf2
+sd1 / sd2 teachers (expected within 0.03 of each teacher's 0.825 / 0.861).
+
 ### 03:50 CEST, pool-measure arms launched (9 jobs); antmaze relaunched after a launch error
 
 Pool measure, code e331513 / a0ad48e / b24899e / 0f83c3b (rebased) / 914e63a: 44 new CPU tests, 13 regression

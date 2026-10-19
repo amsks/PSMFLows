@@ -1353,9 +1353,13 @@ each live reading. Numbers are what to compare against.
    at step 3,000) and weight decay 1e-4: eval500 five-task **0.918** with one sample per step and
    0.926 with the mode, against the teacher's 0.912 on the same checkpoint and BC 0.111; per task
    0.936 0.978 0.970 0.882 0.822 (sample). Without early stopping the student overfit (validation
-   NLL above the prior on 4 of 5 tasks) and still acted at 0.88 on 10 episodes. Held-out task
-   (trained on four tasks, mean descriptor): 0.00; the set-encoder leave-one-out run is the open
-   test. This closes the "actor fails at inference" item for in-task deployment: the failure was
+   NLL above the prior on 4 of 5 tasks) and still acted at 0.902 / 0.898 on 500 episodes, so
+   calibration changes acting by 0.02 to 0.03. Held-out task (trained on four tasks): mean
+   descriptor 0.002; set-encoder descriptor, leave-one-out over the five tasks, 0.072 / 0.230 /
+   0.002 / 0.000 / 0.000 (mean 0.061), validation NLL 12 to 21 times the prior's on the held-out
+   task's states. Four training tasks do not give a descriptor space to interpolate in; the
+   next arm trains on 20 random goal-set tasks and tests on the five real ones (expected 0.3 to
+   0.7). This closes the "actor fails at inference" item for in-task deployment: the failure was
    the actor objective (critic climb with a BC penalty), not the representability of the target.
 
 4. Why nf2 raised success without action dependence.
