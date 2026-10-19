@@ -1341,9 +1341,22 @@ each live reading. Numbers are what to compare against.
    on all three machines (`scripts/campaign_2026-10/nf2_threeway_watcher.sh` on kisski; luis and
    aws upload to HF `runs/nf2_threeway/<machine>/`); expected agreement within 0.01 on the
    five-task mean. Result 2026-10-19: 500k over 3 seeds **0.866** (0.912 / 0.825 / 0.861), equal
-   to the 250k mean; kisski and aws within 0.01 per seed (luis's own evals pending). The 0.88 to
-   0.92 prediction was not met; seed 0 is the high seed. Settled: nf2 is 0.865 at both
+   to the 250k mean; kisski, aws and luis within 0.012 per seed (luis 0.813 / 0.866). The 0.88
+   to 0.92 prediction was not met; seed 0 is the high seed. Settled: nf2 is 0.865 at both
    checkpoints, 0.06 to 0.08 above A.
+
+3b. The deployment actor (luis, `tools/distill_bon_student.py`, 2026-10-17 to 10-19). A
+   full-covariance Gaussian over the 5-dim latent, conditioned on the state and a fixed per-task
+   descriptor (mean of h(g) and of g over the task's 32 rewarding goals), fit by maximum
+   likelihood to the raw winning latent of best-of-64 under the nf2 seed 0 500k critic at 20,000
+   dataset states plus 50 teacher rollouts per task. With early stopping on validation NLL (best
+   at step 3,000) and weight decay 1e-4: eval500 five-task **0.918** with one sample per step and
+   0.926 with the mode, against the teacher's 0.912 on the same checkpoint and BC 0.111; per task
+   0.936 0.978 0.970 0.882 0.822 (sample). Without early stopping the student overfit (validation
+   NLL above the prior on 4 of 5 tasks) and still acted at 0.88 on 10 episodes. Held-out task
+   (trained on four tasks, mean descriptor): 0.00; the set-encoder leave-one-out run is the open
+   test. This closes the "actor fails at inference" item for in-task deployment: the failure was
+   the actor objective (critic climb with a BC penalty), not the representability of the target.
 
 4. Why nf2 raised success without action dependence.
    Measurement: the per-goal share at test time along a trajectory toward the goal, for A and

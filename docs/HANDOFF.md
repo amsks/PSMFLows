@@ -22,7 +22,7 @@ Date: **2026-10-19** (latest) · prior: 2026-10-17, 2026-10-15, 2026-10-07, 2026
 
 ---
 
-## 2026-10-19 — nf2 500k over 3 seeds 0.866 (= 250k); antmaze and the pool-measure build launched; luis: nf2 seeds 1-2 uploaded, Gaussian student of the best-of-64 teacher acts at teacher level in-task (10-episode interim), 0.00 on the held-out task
+## 2026-10-19 — early-stopped Gaussian student matches the best-of-64 teacher (0.918 vs 0.912, one sample per step); nf2 500k over 3 seeds 0.866 (= 250k); antmaze and the pool-measure build launched; luis: nf2 seeds 1-2 uploaded, Gaussian student of the best-of-64 teacher acts at teacher level in-task (10-episode interim), 0.00 on the held-out task
 
 luis post 2026-10-19T00-23-13Z (first since 10-17 01:39Z). Both nf2 seeds finished 500k on 10-17 (11.9 h each on
 an H200); flags checked (norm_future_k 2, flowbc, fb_bc_coeff 3.0, bootstrap actor, softmax, point); params 250k /
@@ -53,6 +53,30 @@ space does not interpolate). If the 500-episode numbers hold, this is the first 
 best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply to luis: wait for the 500-episode
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
+
+### 03:30 CEST, luis: three-way table complete; the early-stopped student matches the best-of-64 teacher at 500 episodes
+
+luis 01-25-45Z. nf2 seeds 1-2 at 500k on luis: 0.813 / 0.866 (kisski 0.825 / 0.861, aws 0.815 / 0.870; all within
+0.012). The three-way check is closed: machines agree, nf2 500k over 3 seeds is 0.866. luis's 250k evals of the
+same seeds: 0.840 / 0.866. actor alone 0.13 / 0.12. 40 JSONs in HF `runs/nf2_threeway/luis/`.
+
+**Distillation (a)** (luis job 8763113, `tools/distill_bon_student.py` bd57302, `+early_stop +weight_decay=1e-4`,
+same labels and states as the 10-17 student; best validation NLL at step 3,000 of 50,000; eval500, five tasks):
+
+| | t1 | t2 | t3 | t4 | t5 | five-task |
+|---|---|---|---|---|---|---|
+| student (a), one sample per step | 0.936 | 0.978 | 0.970 | 0.882 | 0.822 | **0.918** |
+| student (a), mode | 0.932 | 0.936 | 0.976 | 0.890 | 0.896 | **0.926** |
+| teacher, best of 64 on the same checkpoint (nf2 sd0 500k, kisski eval500) | 0.914 | 0.938 | 0.950 | 0.850 | 0.910 | 0.912 |
+| BC | | | | | | 0.111 |
+
+Validation NLL now below the prior's on every task (6.6 to 7.5 against 8.1 to 8.8; the 10-17 student was 7.5 to
+20.8). Reading: a calibrated full-covariance Gaussian over the 5-dim latent, conditioned on state and a fixed
+per-task descriptor, reproduces the best-of-64 selection with one flow decode per step. This is the first
+single-sample actor on the branch at the teacher's level (every earlier actor arm 0.10 to 0.19). It is
+in-task only: the 10-17 held-out-task student scored 0.00, and (b) (set-encoder descriptor, leave-one-out over
+the five tasks, job 8763114) is the generalisation test, running. The 500-episode rerun of the 10-17 student
+(8762987) is also running, for the stated "(a) within 0.03 of the current student" check.
 
 ### 03:10 CEST, three-way check done: nf2 500k over 3 seeds 0.866, equal to its 250k 0.865; machines within 0.01
 
