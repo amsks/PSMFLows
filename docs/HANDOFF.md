@@ -54,6 +54,13 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 06:25 CEST, antmaze: all six runs started, flags verified
+
+Jobs 2525758-2525763 running since about 06:05 CEST; every `flags.json`: env antmaze-medium-navigate-singletask-v0,
+discount 0.99, goal_discount 0.99, fb_bc_coeff 3.0, bootstrap actor, norm_future_k 0 (fbc3_pt) / 2 (nf2). 250k
+checkpoints due about 09:30 (fbc3_pt) and 14:00 (nf2); the antmaze eval watcher (6 h limit) and the upload watcher
+for aws are on.
+
 ### 06:20 CEST, luis: students on the nf2 seed 1 and 2 teachers sit 0.05 below their teachers; the controls for the random-region result are running
 
 luis 04-06-18Z (same recipe as student (a), labels drawn fresh from each teacher, early stopping, seed 0, 500
