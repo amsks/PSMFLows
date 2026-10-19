@@ -54,6 +54,15 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 19:15 CEST, aws parity on the pool goal arms and nf2 antmaze; aws pool evals stopped
+
+aws 17-09-44Z (eval500, 500 episodes, 4 workers): pool fdplus sd000 250k task 2 hgoal_each 0.480 against kisski
+0.494; pool ja sd000 task 2 hgoal_each 0.606 against 0.592 (pool_hash_checked true, both); nf2 antmaze sd000 250k
+task 2 0.216 against 0.260 (about 1.6 standard errors of the difference, the same size and direction as the
+actor-recipe task-3 gap, 0.204 against 0.246; two cells, not yet a pattern). aws's pool and antmaze watchers are
+off; aws watches HF `runs/psmgoal_ri_fbc3_cube/` and will run sd000 task 2 under ri_gpi and ri_actor when a
+checkpoint appears.
+
 ### 18:50 CEST, pool arms complete at 250k: goal index with the frozen field 0.326 ± 0.041, with the live actor 0.328 ± 0.092 (goal readout); the reward readout 0.29 / 0.26; bank 0.252 ± 0.063; critic A on the same readout 0.805
 
 kisski eval500, 500 episodes per task, 3 seeds each, 250k (jobs 2525800 to 2525802, 2525819 to 2525832):
