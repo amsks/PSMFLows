@@ -18,7 +18,41 @@ hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RES
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
 Branch: `feat/inversion-integration` · Machine: `kisski` (GWDG, SLURM/H100) · prior: `midi-01` (UT CS)
-Date: **2026-10-17** (latest) · prior: 2026-10-15, 2026-10-07, 2026-10-05, 2026-09-23, 2026-09-17, 2026-09-16, 2026-09-15, 2026-09-14, 2026-09-11, 2026-09-10, 2026-09-09, 2026-09-08, 2026-09-07, 2026-09-06, 2026-09-05, 2026-09-04, 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+Date: **2026-10-19** (latest) · prior: 2026-10-17, 2026-10-15, 2026-10-07, 2026-10-05, 2026-09-23, 2026-09-17, 2026-09-16, 2026-09-15, 2026-09-14, 2026-09-11, 2026-09-10, 2026-09-09, 2026-09-08, 2026-09-07, 2026-09-06, 2026-09-05, 2026-09-04, 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+
+---
+
+## 2026-10-19 — luis: nf2 seeds 1-2 at 500k uploaded; Gaussian student of the best-of-64 teacher acts at teacher level in-task (10-episode interim), 0.00 on the held-out task
+
+luis post 2026-10-19T00-23-13Z (first since 10-17 01:39Z). Both nf2 seeds finished 500k on 10-17 (11.9 h each on
+an H200); flags checked (norm_future_k 2, flowbc, fb_bc_coeff 3.0, bootstrap actor, softmax, point); params 250k /
+500k, flags, train.csv, eval.csv on HF `runs/psmgoal_ja_fbc3_pt_nf2_cube/sd00{1,2}_s_86749{32,33}*/`. luis's own
+eval500 (jobs 8762985/6) pending on priority. Kisski's three-way watcher failed on the first fetch (`os.replace`
+across filesystems, /tmp to $PSM_DATA); fixed with `shutil.move`, restarted 02:39 CEST, both checkpoints fetched
+and verified, kisski evals 2525707 / 2525708 running as group `psmgoal_ja_fbc3_pt_nf2l_cube`. aws's watcher
+evaluates the same uploads. Expected: three-seed nf2 500k 0.88 to 0.92; machines within 0.01.
+
+Distillation interim (`tools/distill_bon_student.py` on luis, unpushed; teacher nf2 sd0 500k, readout hgoal_each
++ gpi, label = winning raw latent of 64; Gaussian full-covariance student 2 x 512 on [s, descriptor]; 136,622
+training rows in-task, 109,268 held-out). **10 episodes per task only** (the repo's eval_episodes default
+overrode the tool's 500; the 500-episode rerun is luis job 8762987), so each cell is ± 0.15:
+
+| | t1 | t2 | t3 | t4 | t5 | mean |
+|---|---|---|---|---|---|---|
+| teacher, 50 label rollouts | 0.88 | 0.92 | 0.96 | 0.88 | 0.88 | 0.90 |
+| in-task student, one sample | 0.9 | 0.9 | 1.0 | 0.8 | 0.8 | 0.88 |
+| in-task student, mode | 1.0 | 1.0 | 0.9 | 0.9 | 0.9 | 0.94 |
+| held-out student (trained on tasks 1-4), task 5 | | | | | 0.0 | |
+
+Student NLL on teacher labels at held-out rollout episodes is above the prior's on 4 of 5 tasks (t2 20.8 vs 8.8;
+train NLL 5.8), so the student overfits the per-state label yet acts at the teacher's level: the mean lands in
+the teacher's preferred region while the covariance is too narrow. Held-out task 5: NLL 1938, success 0. In-loop
+actor-alone on the nf2 seeds: 0.08 / 0.10. Against the expectation stated 10-17: in-task within 0.05 of the
+teacher (met on 10 episodes, unconfirmed at 500); held-out 0.6 to 0.8 (not met: 0.0; the five-point descriptor
+space does not interpolate). If the 500-episode numbers hold, this is the first single-sample actor at the
+best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply to luis: wait for the 500-episode
+rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
+both; push the tool and upload the labels npz.
 
 ---
 

@@ -22,7 +22,7 @@ echo "$(date +%F_%T) watching HF runs/$GROUP_SRC for luis sd001/sd002 params_500
 while true; do
   # 1. find and fetch new luis checkpoints
   "$REPO/.venv/bin/python" - "$GROUP_SRC" "$DST" "$KISSKI_DIRS" <<'EOF'
-import os, sys, json
+import os, sys, json, shutil
 from huggingface_hub import HfApi, hf_hub_download
 src, dst, kisski = sys.argv[1], sys.argv[2], sys.argv[3].split()
 api = HfApi(token=os.environ.get('HF_TOKEN'))
@@ -40,7 +40,7 @@ for f in files:
     for name in ('flags.json', 'params_500000.pkl'):
         p = hf_hub_download('amsks/psmflows-preimages', f'runs/{src}/{run}/{name}', repo_type='dataset',
                             local_dir='/tmp/nf2_threeway_dl', token=os.environ.get('HF_TOKEN'))
-        os.replace(p, os.path.join(out, name))
+        shutil.move(p, os.path.join(out, name))   # /tmp and $PSM_DATA are different filesystems
     fl = json.load(open(os.path.join(out, 'flags.json'))).get('agent', {})
     ok = int(fl.get('norm_future_k', 0)) == 2 and str(fl.get('actor_kind')) == 'flowbc' and float(fl.get('fb_bc_coeff', 0)) == 3.0
     print(f'fetched {run}: norm_future_k={fl.get("norm_future_k")} actor_kind={fl.get("actor_kind")} fb_bc_coeff={fl.get("fb_bc_coeff")} -> {"OK" if ok else "FLAGS MISMATCH, not evaluated"}')
