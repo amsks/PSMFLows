@@ -54,6 +54,38 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 16:35 CEST, pool bank arm at 250k: 0.252 ± 0.063 under the pool_reward readout (expected 0.6 to 0.72; BC 0.111); aws antmaze parity 0.064 against 0.074
+
+Pool bank arm (`psmgoal_pool_bank_cube`, policy index bank, BC bootstrap, no actor; readout
+`agent.coef_source=pool_reward agent.acting=gpi`, 512-state importance-weighted bank, pool_hash dfea8933 checked;
+kisski jobs 2525800 to 2525802, 500 episodes per task):
+
+| bank 250k, pool_reward | t1 | t2 | t3 | t4 | t5 | mean |
+|---|---|---|---|---|---|---|
+| sd000 | 0.156 | 0.158 | 0.398 | 0.192 | 0.264 | 0.234 |
+| sd001 | 0.228 | 0.288 | 0.322 | 0.124 | 0.242 | 0.241 |
+| sd002 | 0.194 | 0.246 | 0.428 | 0.332 | 0.204 | 0.281 |
+| **mean ± 95% CI** | | | | | | **0.252 ± 0.063** |
+| BC control | | | | | | 0.111 |
+
+Against `docs/design/2026-10-19-pool-measure.md`: expected 0.6 to 0.72 (the data-bootstrap, one-draw level);
+measured 0.252, 0.14 above BC. Training signals at 250k, three seeds: pool_u_tv 0.062 to 0.065 (criterion above
+0.05 met, flat from 5k through 300k, per-interval swing 0.06 to 0.09), anchor mass 0.08 to 0.10, pool entropy 4.14
+to 4.16 nats of 6.93, phi effective rank 1.13 to 1.21. The three bank runs are at 300k and finish 500k at about
+01:00 CEST (24 h limit at 03:48). The design doc's two failure readings both need the fullness number (tv against
+the BC rollout occupancy at pool resolution, noise floor 0.35): below 0.6 with this success reads "measure full,
+readout at fault"; above 0.85 reads "construction fails". The bank 250k checkpoints and flags were uploaded by
+hand to HF `runs/psmgoal_pool_bank_cube/<run dir>/` (the upload watcher waits for params_500000); aws asked
+(kisski 14-29-49Z) to run the ten fullness lines on sd000 first and post the first line as soon as it lands.
+Goal arms (fdplus, ja) at 235k to 245k; their 250k evals (hgoal_each and pool_reward) follow at about 17:30.
+
+aws 14-16-59Z: antmaze parity on `psmgoal_ja_fbc3_pt_antmaze` sd000 250k, aws 0.114 / 0.000 / 0.204 / 0.000 / 0.000
+mean 0.064 against kisski 0.074; task-3 difference 0.042 at a standard error of about 0.027 for the difference.
+An antmaze task costs about 75 min on an L4; aws's antmaze watcher now yields to pool work. Asked aws to stop the
+fbc3_pt antmaze set and do one more antmaze parity checkpoint (nf2 sd000 250k) when the pool queue is empty.
+nf2 antmaze 250k: 12 of 15 cells in (sd0 0.048 / 0.260 / 0.000 / 0.000 / 0.000; sd1 0.000 / 0.106 / 0.092 / 0.000 /
+0.122; sd2 0.352 / 0.478 on tasks 1 and 2).
+
 ### 13:10 CEST, antmaze: five-task BC control 0.072; the actor recipe at 250k scores 0.063 ± 0.106 over 3 seeds, at BC level
 
 Five-task BC control for antmaze did not exist (only task 1, 0.072); run now (job 2525772, `scripts/slurm/
