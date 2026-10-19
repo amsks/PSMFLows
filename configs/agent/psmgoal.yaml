@@ -107,6 +107,7 @@ train_goal_head: false     # train h(g) by J(theta|g)+constraint during update()
 # sqrt(D) sphere. No Lagrangian or regression is run. Under policy_index=goal it raises:
 # there coef_source=amortized is the trained coefficient.
 coef_source: lp            # lp (RLU Lagrangian inference) | amortized (h(g) head) | regression (lstsq on phi) | ridge (actor_value) | trained (mean of w(z)) | hgoal_each, reward_gpi (policy_index=goal, eval only) | pool_reward (policy_index=goal|bank, eval only)
+reward_actor_reward: latent_centered  # policy_index=reward, the actor's reward rows: the index's centered view (latent_centered) | the exact kernel reward on hindsight rows, centered view on random rows (kernel)
 ridge_score: goal          # policy_index=reward, eval: best-of-64 by the goal mass at the ridge w (goal) | by the expected relabel reward over eval_ref at w (reward)
 # coef_source=pool_reward (2026-10-19, eval only, docs/design/2026-10-19-pool-measure.md): per task a
 # bank of pool_eval_size next states from the relabel batch, n_r = min(pool_eval_size/4, rewarding rows)

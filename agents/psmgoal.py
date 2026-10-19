@@ -138,6 +138,7 @@ POLICY_INDEXES = ("code", "goal", "bank", "reward")
 #: sphere draw), at test the relabel rewards (coef_source=ridge). Critic A's loss, bootstrap and flowbc
 #: actor otherwise; the actor takes w. ridge_score picks the best-of-64 score at test time.
 RIDGE_SCORES = ("goal", "reward")
+REWARD_ACTOR_REWARDS = ("latent_centered", "kernel")
 REWARD_INDEX_KEY = 107
 REWARD_ACTOR_KEY = 108
 BANK_CODE = 1.0
@@ -431,6 +432,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             assert coef_source in ("ridge", "lp"), \
                 "policy_index=reward is read at test time by coef_source=ridge (lp only as a diagnostic)"
             assert str(config.get("ridge_score", "goal")) in RIDGE_SCORES, f"ridge_score must be one of {RIDGE_SCORES}"
+            assert str(config.get("reward_actor_reward", "latent_centered")) in REWARD_ACTOR_REWARDS, \
+                f"reward_actor_reward must be one of {REWARD_ACTOR_REWARDS}"
             assert str(config.get("bootstrap_switch", "none")) == "none" and float(config.get("bootstrap_delta_scale", 1.0)) == 1.0, \
                 "policy_index=reward: bootstrap_switch=none, bootstrap_delta_scale=1"
             assert str(config["acting"]) in ("gpi", "distill"), "policy_index=reward acts by gpi (best-of-64 at w) or distill (the actor at w)"
@@ -1402,17 +1405,31 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                 "index_hindsight_frac": jnp.mean(hs),
                 "index_cov_trace": jnp.trace(self.fb_cov)}
 
-    def actor_loss_flowbc_reward(self, delta_params, obs, pool, w_rows, f_centered, eps, u_data):
+    def reward_actor_rows(self, batch, w_rows, f_centered):
+        """The reward r_i(y_j) (N, P) the reward-index actor climbs over the batch's next states y_j.
+        reward_actor_reward=latent_centered: the index's own reward view (f(y_j) - mu)^T w_i / sqrt(D) on every
+        row (Density FB Eq. pretraining-reward). kernel: the exact kernel reward k(g_i, y_j) of the row's own
+        hindsight goal on the hindsight rows (index_hindsight_actor == 1), the centered view on the random
+        rows, which carry no goal (Density FB `measure_density_z_actor_reward=kernel`). Stop-gradded."""
+        c = self.config
+        latent = w_rows @ f_centered.T / jnp.sqrt(float(c["z_dim"]))                            # (N, P)
+        if str(c.get("reward_actor_reward", "latent_centered")) == "kernel":
+            kern = kernel_reward(jnp.asarray(batch["fb_goals"]), jnp.asarray(batch["next_observations"]),
+                                 parse_hit_spec(c["fb_hit_spec"]))                             # (N, P)
+            hs = jnp.asarray(batch["index_hindsight_actor"]).reshape(-1, 1)
+            latent = hs * kern + (1.0 - hs) * latent
+        return jax.lax.stop_gradient(latent)
+
+    def actor_loss_flowbc_reward(self, delta_params, obs, pool, w_rows, r, eps, u_data):
         """policy_index=reward, actor_kind=flowbc. u_i = clip(eps_i + delta(s_i, w_i, eps_i)); value
-        Q_i = sum_j softmax_j(M(s_i,u_i,y_j; w_i)/measure_temp) r_i(y_j) with r_i(y) = (f(y) - mu)^T w_i / sqrt(D),
-        the index's own reward view (Density FB `latent_centered`); loss -q_coeff mean Q / sg|Q| + fb_bc_coeff
-        mean delta^2. phi, b stop-gradded; only delta moves."""
+        Q_i = sum_j softmax_j(M(s_i,u_i,y_j; w_i)/measure_temp) r_i(y_j), r the rows of `reward_actor_rows`;
+        loss -q_coeff mean Q / sg|Q| + fb_bc_coeff mean delta^2. phi, b stop-gradded; only delta moves."""
         c = self.config
         bp = jax.lax.stop_gradient(self.basis.params)
         temp = float(c["measure_temp"])
         u, d = self.flowbc_latent(obs, w_rows, eps, params=delta_params)
         M = self.mesh_M(obs, u, pool, w_rows, params=bp)                                       # (N, P)
-        r = jax.lax.stop_gradient(w_rows @ f_centered.T / jnp.sqrt(float(c["z_dim"])))         # (N, P)
+        r = jax.lax.stop_gradient(r)                                                           # (N, P)
         p = jax.nn.softmax(M / temp, axis=1)
         q = jnp.sum(p * r, axis=1)
         qscale = jax.lax.stop_gradient(jnp.maximum(jnp.abs(q).mean(), 1e-6))
@@ -1439,8 +1456,9 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         f_centered = f_pool - self.fb_mu[None]
         eps = jax.random.normal(jax.random.fold_in(self.rng, 102), (obs.shape[0], int(c["action_dim"])))
         u_data = jnp.clip(jnp.asarray(batch["noise_preimage"]), -c["u_clip"], c["u_clip"])
+        r = self.reward_actor_rows(batch, w_a, f_centered)
         (_, info), g_d = jax.value_and_grad(self.actor_loss_flowbc_reward, has_aux=True)(
-            self.delta.params, obs, pool, w_a, f_centered, eps, u_data)
+            self.delta.params, obs, pool, w_a, r, eps, u_data)
         delta = self.delta.apply_gradients(grads=g_d)
         tz, ts = float(c["fb_enc_tau"]), float(c["fb_sigma_tau"])
         zenc = jax.tree_util.tree_map(lambda p, e: p * tz + e * (1.0 - tz), self.basis.params, self.fb_zenc)
@@ -2338,6 +2356,7 @@ def get_config():
         # | hgoal_each, reward_gpi (policy_index=goal, eval only) | pool_reward (policy_index=goal|bank,
         # eval only: the importance-weighted reward integral over a bank of pool_eval_size relabel next states)
         "coef_source": "lp",
+        "reward_actor_reward": "latent_centered",  # policy_index=reward, actor reward rows: the index's centered view | the exact kernel reward on hindsight rows (kernel)
         "ridge_score": "goal",      # policy_index=reward, eval: best-of-64 by the goal mass at w (goal) | the expected relabel reward over eval_ref at w (reward)
         "pool_eval_size": 512,      # coef_source=pool_reward: bank size (a quarter rewarding at most)
         # coef_source=reward_gpi: candidate goals = top (k_goals highest-reward rows) | random

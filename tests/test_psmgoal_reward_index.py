@@ -78,6 +78,7 @@ def _leaves_equal(a, b):
     {"measure_loss": "squared"}, {"train_actor": False}, {"actor_kind": "tanh"}, {"actor_input": "goal"},
     {"bootstrap_source": "data"}, {"coef_source": "hgoal_each"}, {"ridge_score": "x"}, {"norm_future_k": 2},
     {"acting": "sfbc"}, {"actor_value": "measure_reward_softmax"},
+    {"reward_actor_reward": "x"},
 ])
 def test_reward_index_asserts(bad):
     with pytest.raises(AssertionError):
@@ -204,3 +205,37 @@ def test_eval_distill_acts_with_the_flowbc_actor_at_w():
     eps = jax.random.normal(jax.random.PRNGKey(1), (1, DA))
     u = ag.flowbc_latent(obs[None], ag.eval_w_star[None], eps)[0][0]
     np.testing.assert_allclose(np.asarray(a), np.asarray(ag.decode(obs[None], u[None])[0]), atol=1e-6)
+
+
+# ------------------------------------------------------------------ kernel actor reward
+def test_actor_reward_rows_kernel_on_hindsight_rows_centered_view_elsewhere():
+    """reward_actor_reward=kernel: on hindsight actor rows the actor's reward over the batch's next states is the
+    exact kernel reward of the row's own goal; on random rows it is the index's centered view; latent_centered
+    gives the centered view on every row."""
+    from agents.psmgoal import kernel_reward, parse_hit_spec
+    b = _batch()
+    ag_l = _agent()
+    ag_k = _agent(reward_actor_reward="kernel")
+    rows = ag_k.reward_index_rows(b)
+    bb = {**b, **rows}
+    w_a = jnp.asarray(rows["index_w_actor"])
+    f_c = jnp.asarray(rows["index_f"]) - ag_k.fb_mu[None]
+    latent = np.asarray(w_a @ f_c.T / np.sqrt(float(ag_k.config["z_dim"])))
+    kern = np.asarray(kernel_reward(jnp.asarray(b["fb_goals"]), jnp.asarray(b["next_observations"]),
+                                    parse_hit_spec(ag_k.config["fb_hit_spec"])))
+    hs = np.asarray(rows["index_hindsight_actor"]).reshape(-1)
+    r_k = np.asarray(ag_k.reward_actor_rows(bb, w_a, f_c))
+    r_l = np.asarray(ag_l.reward_actor_rows(bb, w_a, f_c))
+    assert hs.sum() > 0 and (1 - hs).sum() > 0
+    assert np.allclose(r_k[hs == 1], kern[hs == 1], atol=1e-5)
+    assert np.allclose(r_k[hs == 0], latent[hs == 0], atol=1e-5)
+    assert np.allclose(r_l, latent, atol=1e-5)
+    assert not np.allclose(r_k, r_l)
+
+
+def test_update_runs_under_kernel_actor_reward_and_moves_delta():
+    ag = _agent(reward_actor_reward="kernel")
+    before = ag.delta.params
+    ag2, info = ag.update(_batch())
+    assert np.isfinite(float(info["actor_loss"]))
+    assert not _leaves_equal(before, ag2.delta.params)
