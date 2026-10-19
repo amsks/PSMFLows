@@ -18,17 +18,24 @@ state of +n_rollout_eps teacher rollouts (the label is the teacher's own pick at
 +n_extra_labels fresh draws of the 64-set). Rollout episodes are split by episode into train and
 validation (+val_frac); the validation NLL is reported beside the NLL of the prior N(0, I).
 
-Students: `in_task` trains on +train_tasks and is evaluated on +train_tasks; `holdout` (if
-+holdout_task is set) trains on +train_tasks minus that task and is evaluated on it. Each student acts
-with a sample a = G(s, clip(mu + L xi)) and with the mode a = G(s, clip(mu)); eval is utils.evaluation
-`evaluate` with seed=+eval_seed, +eval_episodes episodes per task, as eval500.
+Students: `in_task` (unless +in_task=false) trains on +train_tasks and is evaluated on +train_tasks;
+`holdout` (if +holdout_task is set) trains on +train_tasks minus that task and is evaluated on it;
++loo=true adds one such student per training task (leave-one-out). Each student acts with a sample
+a = G(s, clip(mu + L xi)) and with the mode a = G(s, clip(mu)); eval is utils.evaluation
+`evaluate` with seed=+eval_seed, eval_episodes episodes per task, as eval500. Pass eval_episodes=500:
+the repo config sets 10, which overrides this tool's 500 (the 10-17 run evaluated 10 episodes).
+
+Options added 2026-10-19 (kisski 2026-10-19T00-42-34Z): +weight_decay (AdamW) and +early_stop (keep the
+parameters at the lowest validation NLL); +descriptor=set replaces the mean descriptor by a
+permutation-invariant encoder over the 32 goal states [g, h(g)] (per-goal MLP, then the mean);
++labels_in reuses a previous run's labels npz instead of re-running the teacher.
 
 Run (GPU):
   .venv/bin/python tools/distill_bon_student.py agent=psmgoal env_name=cube-single-play-singletask-v0 \\
     agent.flow_ckpt_path=$PSM_DATA/flow/cube-single-play agent.flow_ckpt_epoch=500000 \\
     agent.preimage_path=$PSM_DATA/preimages/cube-single-play.npz \\
     restore_path=<teacher run dir> restore_epoch=500000 seed=0 \\
-    +train_tasks=1:2:3:4:5 +holdout_task=5 report_out=$PSM_DATA/logs/distill/<tag>.json
+    +train_tasks=1:2:3:4:5 +holdout_task=5 eval_episodes=500 report_out=$PSM_DATA/logs/distill/<tag>.json
 """
 import json
 import os
@@ -87,12 +94,22 @@ def split_episodes(ep_ids, val_frac, seed):
 
 
 # ------------------------------------------------------------------ student
-def make_student(d_in, d, hidden, n_layers):
+def make_student(d, hidden, n_layers, ob_dim=None, set_table=None, set_hidden=256):
+    """The student head. set_table=None: the input is the standardised [s, c] (mean descriptor).
+    set_table (T, K_g, f), standardised: the input is [standardised s, task index]; the task's goal
+    set is embedded per goal by an MLP and averaged (permutation-invariant), then joined with s."""
     import flax.linen as nn
+    import jax.numpy as jnp
 
     class Student(nn.Module):
         @nn.compact
         def __call__(self, x):
+            if set_table is not None:
+                s, t = x[..., :ob_dim], x[..., ob_dim].astype(jnp.int32)
+                e = jnp.asarray(set_table)[t]                                   # (B, K_g, f)
+                for _ in range(2):
+                    e = nn.gelu(nn.Dense(set_hidden)(e))
+                x = jnp.concatenate([s, e.mean(axis=-2)], axis=-1)
             for _ in range(n_layers):
                 x = nn.gelu(nn.Dense(hidden)(x))
             out = nn.Dense(d + d * (d + 1) // 2, kernel_init=nn.initializers.zeros)(x)
@@ -103,7 +120,10 @@ def make_student(d_in, d, hidden, n_layers):
     return Student()
 
 
-def train_student(x, v, x_val, v_val, cfg, key):
+def train_student(x, v, x_val, v_val, cfg, key, ob_dim=None, set_table=None, set_train_rows=None):
+    """Fit the student by NLL. +weight_decay > 0 uses AdamW. +early_stop keeps the parameters at the
+    lowest validation NLL (checked +val_checks times over training). set_table: see make_student;
+    its features are standardised over set_train_rows (the training tasks' rows of the table)."""
     import jax
     import jax.numpy as jnp
     import optax
@@ -111,10 +131,17 @@ def train_student(x, v, x_val, v_val, cfg, key):
     d = v.shape[-1]
     # floor the std: a descriptor dim constant over the training tasks must not blow up on a held-out task
     x_mean, x_std = x.mean(0), np.maximum(x.std(0), 1e-2)
+    if set_table is not None:
+        x_mean[ob_dim:], x_std[ob_dim:] = 0.0, 1.0                    # the task index passes through
+        g = set_table[set_train_rows].reshape(-1, set_table.shape[-1])
+        set_table = (set_table - g.mean(0)) / np.maximum(g.std(0), 1e-2)
     norm = lambda a: (a - x_mean) / x_std  # noqa: E731
-    net = make_student(x.shape[-1], d, int(cfg.get('hidden', 512)), int(cfg.get('n_layers', 2)))
+    net = make_student(d, int(cfg.get('hidden', 512)), int(cfg.get('n_layers', 2)), ob_dim=ob_dim,
+                       set_table=set_table)
     params = net.init(key, jnp.zeros((1, x.shape[-1])))
-    tx = optax.adam(float(cfg.get('lr', 3e-4)))
+    wd = float(cfg.get('weight_decay', 0.0))
+    lr = float(cfg.get('lr', 3e-4))
+    tx = optax.adamw(lr, weight_decay=wd) if wd > 0 else optax.adam(lr)
     opt = tx.init(params)
 
     def loss_fn(p, xb, vb):
@@ -129,24 +156,34 @@ def train_student(x, v, x_val, v_val, cfg, key):
 
     eval_loss = jax.jit(loss_fn)
     steps, bs = int(cfg.get('train_steps', 50000)), int(cfg.get('train_batch', 1024))
+    early = bool(cfg.get('early_stop', False))
+    n_checks = int(cfg.get('val_checks', 50 if early else 20))
+    has_val = x_val is not None and len(x_val) > 0
     rng = np.random.default_rng(int(cfg.seed))
     xj, vj = jnp.asarray(x), jnp.asarray(v)
-    curve = []
+    curve, best = [], (float('inf'), params, 0)
     for i in range(steps):
         idx = jnp.asarray(rng.integers(0, x.shape[0], bs))
         params, opt, loss = step(params, opt, xj[idx], vj[idx])
-        if (i + 1) % max(steps // 20, 1) == 0 or i == 0:
+        if (i + 1) % max(steps // n_checks, 1) == 0 or i == 0:
             row = {'step': i + 1, 'train_nll': float(loss)}
-            if x_val is not None and len(x_val):
+            if has_val:
                 row['val_nll'] = float(eval_loss(params, jnp.asarray(x_val), jnp.asarray(v_val)))
+                if row['val_nll'] < best[0]:
+                    best = (row['val_nll'], params, i + 1)
             curve.append(row)
             print(f'  student step {i + 1}: {row}', flush=True)
+    stop = {'early_stop': early, 'weight_decay': wd, 'final_step': steps}
+    if early and has_val:
+        params = best[1]
+        stop.update({'best_step': best[2], 'best_val_nll': best[0]})
+        print(f'  early stop: keeping step {best[2]} (val NLL {best[0]:.3f})', flush=True)
 
     def apply(xb):
         mu, raw = net.apply(params, norm(xb))
         return mu, tril_from_raw(raw, d)
 
-    return jax.jit(apply), curve
+    return jax.jit(apply), curve, stop
 
 
 class StudentActor:
@@ -229,6 +266,10 @@ def run(cfg):
     relabel_size = int(cfg.get('eval_relabel_size', 10000))
     reward_shift = float(cfg.get('eval_reward_shift', 1.0))
     labels_out = cfg.get('labels_out', None)
+    labels_in = cfg.get('labels_in', None)
+    descriptor = str(cfg.get('descriptor', 'mean'))
+    assert descriptor in ('mean', 'set'), 'descriptor must be mean | set'
+    in_task, loo = bool(cfg.get('in_task', True)), bool(cfg.get('loo', False))
     all_tasks = sorted(set(tasks) | ({holdout} if holdout else set()))
 
     config, merged, agents = load_teacher(cfg)
@@ -249,8 +290,13 @@ def run(cfg):
             label_fn = make_label_fn(base)
         zb = ds.sample(min(ds.size, relabel_size))
         ag = base.infer_eval_goals(zb, zb['rewards'] + reward_shift)
-        desc = np.concatenate([np.asarray(ag.eval_goal_w).mean(0), np.asarray(ag.eval_goals).mean(0)]).astype(np.float32)
-        per_task[t] = {'agent': ag, 'env': eval_env, 'desc': desc,
+        goal_set = np.concatenate([np.asarray(ag.eval_goals), np.asarray(ag.eval_goal_w)], 1).astype(np.float32)
+        if descriptor == 'mean':
+            desc = np.concatenate([np.asarray(ag.eval_goal_w).mean(0),
+                                   np.asarray(ag.eval_goals).mean(0)]).astype(np.float32)
+        else:                                     # the task's row in the goal-set table
+            desc = np.asarray([all_tasks.index(t)], np.float32)
+        per_task[t] = {'agent': ag, 'env': eval_env, 'desc': desc, 'goal_set': goal_set,
                        'obs_pool': np.asarray(train_dataset['observations'], np.float32)}
         print(f'task {t}: goals {np.asarray(ag.eval_goals).shape} refs {np.asarray(ag.eval_ref).shape} '
               f'desc dim {desc.shape[0]}', flush=True)
@@ -260,7 +306,15 @@ def run(cfg):
     rng = np.random.default_rng(seed)
     data = {t: {} for t in all_tasks}
     teacher_success = {}
-    for t in all_tasks:
+    if labels_in:                                 # reuse a previous run's labels (same teacher)
+        z = np.load(labels_in)
+        for t in all_tasks:
+            data[t] = {k: z[f't{t}_{k}']
+                       for k in ('data_obs', 'data_v', 'roll_obs', 'roll_v', 'roll_ep', 'roll_extra_v')}
+            teacher_success[t] = None
+        n_extra = int(data[all_tasks[0]]['roll_extra_v'].shape[0])
+        print(f'labels <- {labels_in} (n_extra_labels {n_extra})', flush=True)
+    for t in ([] if labels_in else all_tasks):
         pt = per_task[t]
         ag, env = pt['agent'], pt['env']
         # dataset states
@@ -284,7 +338,8 @@ def run(cfg):
                 r_obs.append(np.asarray(ob, np.float32))
                 r_v.append(v)
                 r_ep.append(ep)
-                a = np.clip(np.asarray(decode(jnp.asarray(ob, jnp.float32), jnp.clip(jnp.asarray(v), -u_clip, u_clip))), -1, 1)
+                u = jnp.clip(jnp.asarray(v), -u_clip, u_clip)
+                a = np.clip(np.asarray(decode(jnp.asarray(ob, jnp.float32), u)), -1, 1)
                 ob, _, term, trunc, info = env.step(a)
                 done = term or trunc
             succ.append(float(info.get('success', 0.0)))
@@ -301,7 +356,7 @@ def run(cfg):
         teacher_success[t] = float(np.mean(succ))
         print(f'task {t}: {n_data} dataset labels, {r_obs.shape[0]} rollout states over {n_roll} episodes, '
               f'teacher rollout success {teacher_success[t]:.3f} ({time.time() - t_start:.0f} s)', flush=True)
-    if labels_out:
+    if labels_out and not labels_in:
         os.makedirs(os.path.dirname(os.path.abspath(labels_out)), exist_ok=True)
         np.savez_compressed(labels_out, **{f't{t}_{k}': v for t in all_tasks for k, v in data[t].items()},
                             **{f't{t}_desc': per_task[t]['desc'] for t in all_tasks})
@@ -358,22 +413,31 @@ def run(cfg):
               'teacher_config': {k: merged.get(k) for k in ('norm_future_k', 'gpi_num_u', 'u_clip', 'k_goals',
                                                              'batch_size', 'measure_temp', 'actor_kind')},
               'settings': {'n_data': n_data, 'n_rollout_eps': n_roll, 'n_extra_labels': n_extra, 'val_frac': val_frac,
-                           'train_steps': int(cfg.get('train_steps', 50000)), 'train_batch': int(cfg.get('train_batch', 1024)),
+                           'train_steps': int(cfg.get('train_steps', 50000)),
+                           'train_batch': int(cfg.get('train_batch', 1024)),
                            'lr': float(cfg.get('lr', 3e-4)), 'hidden': int(cfg.get('hidden', 512)),
-                           'n_layers': int(cfg.get('n_layers', 2)), 'eval_episodes': n_eval, 'eval_seed': eval_seed},
+                           'n_layers': int(cfg.get('n_layers', 2)), 'eval_episodes': n_eval, 'eval_seed': eval_seed,
+                           'descriptor': descriptor, 'weight_decay': float(cfg.get('weight_decay', 0.0)),
+                           'early_stop': bool(cfg.get('early_stop', False)), 'labels_in': labels_in},
               'teacher_rollout_success': teacher_success, 'students': {}}
-    plans = [('in_task', tasks, tasks)]
-    if holdout is not None:
+    plans = [('in_task', tasks, tasks)] if in_task else []
+    if holdout is not None and not (loo and holdout in tasks):
         plans.append(('holdout', [t for t in tasks if t != holdout], [holdout]))
+    if loo:                                       # leave-one-out over the training tasks
+        plans += [(f'loo_{t}', [u for u in tasks if u != t], [t]) for t in tasks]
+    ob_dim = per_task[all_tasks[0]]['obs_pool'].shape[1]
+    table = np.stack([per_task[t]['goal_set'] for t in all_tasks]) if descriptor == 'set' else None
     for name, tr_tasks, ev_tasks in plans:
         x, v, xv, vv = build_xy(tr_tasks)
         print(f'=== student {name}: train tasks {tr_tasks} ({x.shape[0]} rows), eval tasks {ev_tasks}', flush=True)
-        apply_fn, curve = train_student(x, v, xv, vv, cfg, jax.random.PRNGKey(seed + 7))
+        apply_fn, curve, stop = train_student(x, v, xv, vv, cfg, jax.random.PRNGKey(seed + 7), ob_dim=ob_dim,
+                                              set_table=table,
+                                              set_train_rows=[all_tasks.index(t) for t in tr_tasks])
         nll = held_nll(apply_fn, ev_tasks)
         succ = eval_student(apply_fn, ev_tasks)
         report['students'][name] = {
             'train_tasks': tr_tasks, 'eval_tasks': ev_tasks, 'n_train_rows': int(x.shape[0]), 'curve': curve,
-            'val_nll': nll, 'success': succ,
+            'stop': stop, 'val_nll': nll, 'success': succ,
             'success_mean': {m: float(np.mean([succ[t][m] for t in ev_tasks])) for m in ('sample', 'mode')},
         }
         print(f'student {name}: success {report["students"][name]["success_mean"]}', flush=True)

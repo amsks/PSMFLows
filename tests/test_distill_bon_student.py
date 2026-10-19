@@ -54,3 +54,42 @@ def test_split_holds_out_whole_episodes():
     for e in np.unique(ep):
         assert len(set(tr[ep == e])) == 1
     assert split_episodes(ep, 0.0, 0).all()
+
+
+def _set_student():
+    import jax
+    from tools.distill_bon_student import make_student
+    table = np.random.default_rng(2).standard_normal((3, 6, 4)).astype(np.float32)
+    net = make_student(5, 16, 2, ob_dim=3, set_table=table, set_hidden=8)
+    x = np.concatenate([np.random.default_rng(3).standard_normal((4, 3)), np.array([[0], [1], [2], [1]])], 1)
+    params = net.init(jax.random.PRNGKey(0), jnp.zeros((1, 4)))
+    # perturb the zero-init head so the output depends on the input
+    params = jax.tree_util.tree_map(lambda p: p + 0.1, params)
+    return net, params, table, x.astype(np.float32)
+
+
+def test_set_student_reads_its_task_row():
+    from tools.distill_bon_student import make_student
+    net, params, table, x = _set_student()
+    mu, _ = net.apply(params, jnp.asarray(x))
+    assert mu.shape == (4, 5)
+    # rows 1 and 3 have the same task; changing only s changes mu
+    assert not np.allclose(np.asarray(mu[1]), np.asarray(mu[3]))
+    # permuting the goals inside each task's set leaves the output unchanged
+    perm = make_student(5, 16, 2, ob_dim=3, set_table=table[:, ::-1].copy(), set_hidden=8)
+    np.testing.assert_allclose(np.asarray(perm.apply(params, jnp.asarray(x))[0]), np.asarray(mu), rtol=1e-5, atol=1e-6)
+
+
+def test_early_stop_keeps_the_best_validation_step():
+    from omegaconf import OmegaConf
+
+    from tools.distill_bon_student import train_student
+    rng = np.random.default_rng(4)
+    x = rng.standard_normal((256, 3)).astype(np.float32)
+    v = (x[:, :1] * np.ones((1, 5)) + 0.1 * rng.standard_normal((256, 5))).astype(np.float32)
+    cfg = OmegaConf.create({'seed': 0, 'train_steps': 60, 'train_batch': 64, 'hidden': 16, 'n_layers': 1,
+                            'early_stop': True, 'val_checks': 6, 'weight_decay': 1e-4})
+    import jax
+    _, curve, stop = train_student(x, v, x[:32], v[:32], cfg, jax.random.PRNGKey(0))
+    best = min(curve, key=lambda r: r['val_nll'])
+    assert stop['best_step'] == best['step'] and abs(stop['best_val_nll'] - best['val_nll']) < 1e-6
