@@ -54,6 +54,38 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 09:10 CEST, luis: the random-region student of the nf2 seed 2 teacher scores 0.886, above its teacher (0.866) and its in-task student (0.820); the three random-region students span 0.877 to 0.904
+
+luis 06-58-06Z (job 8764389; D recipe on the nf2 sd2 500k teacher: the same 20 random regions, fresh teacher
+rollouts, set student with early stopping, student seed 0, 500 episodes per task at eval seed 0; files
+`runs/distill/distill_nf2sd2_500k_rand20.json`, `students_rand20_nf2sd2_500k/`, luis commit b676aa8):
+
+| teacher nf2 sd2 500k | trained on | t1 | t2 | t3 | t4 | t5 | mean sample | mean mode |
+|---|---|---|---|---|---|---|---|---|
+| teacher best-of-64 | | 0.858 | 0.912 | 0.928 | 0.710 | 0.920 | 0.866 | |
+| in-task student | real 1..5 | 0.944 | 0.798 | 0.948 | 0.486 | 0.924 | 0.820 | 0.759 |
+| random-region student | random 100..119 | 0.932 | 0.946 | 0.958 | 0.700 | 0.892 | 0.886 | 0.832 |
+
+Stated range 0.85 to 0.90: met, 0.020 above the teacher. Task 4 on the shared 125 start states: teacher 0.728,
+in-task student 0.472, random-region student 0.704. Task 5 mode 0.586 against sample 0.892. Validation NLL below
+the prior on all five real tasks (8.04 / 7.33 / 7.05 / 8.38 / 8.44 against 8.83 / 8.74 / 8.69 / 9.10 / 8.78).
+Teacher on the 20 random regions: mean 0.754 (sd0 0.704, sd1 0.732).
+
+The three teachers side by side (five-task mean, sample mode, 500 episodes, student seed 0):
+
+| teacher | teacher best-of-64 | in-task student | random-region student, 20 regions |
+|---|---|---|---|
+| sd0 | 0.912 | 0.918 | 0.904 |
+| sd1 | 0.813 | 0.757 (second student seed 0.787) | 0.877 |
+| sd2 | 0.866 | 0.820 | 0.886 |
+| mean | 0.864 | 0.832 | 0.889 |
+| spread | 0.099 | 0.161 | 0.027 |
+
+The reading stated at 07:33 holds on these numbers: the random-region students sit at 0.88 to 0.90 whatever the
+teacher seed, the in-task students carry the teacher's seed-to-seed spread and more. One student seed per cell
+except sd1; B (student seeds 1, 2 on sd0), D ss1 (sd1) and rand50 ss1 are running and give the student-seed
+spread. Still running on luis: A, A', B ss1/ss2, D ss1, rand50 ss1. No reply needed.
+
 ### 08:40 CEST, luis: rand50 second student seed started; the random regions nearest task 5
 
 luis 06-23-42Z: 50-region student at student seed 1 running from the saved labels (job 8765614, CPU, output
