@@ -22,7 +22,7 @@ Date: **2026-10-19** (latest) · prior: 2026-10-17, 2026-10-15, 2026-10-07, 2026
 
 ---
 
-## 2026-10-19 — early-stopped Gaussian student matches the best-of-64 teacher (0.918 vs 0.912, one sample per step); nf2 500k over 3 seeds 0.866 (= 250k); antmaze and the pool-measure build launched; luis: nf2 seeds 1-2 uploaded, Gaussian student of the best-of-64 teacher acts at teacher level in-task (10-episode interim), 0.00 on the held-out task
+## 2026-10-19 — a student trained on 20 random goal regions scores 0.904 on the five real tasks (zero-shot across regions); early-stopped in-task student 0.918 vs teacher 0.912; nf2 500k over 3 seeds 0.866 (= 250k); antmaze and the pool-measure build launched; luis: nf2 seeds 1-2 uploaded, Gaussian student of the best-of-64 teacher acts at teacher level in-task (10-episode interim), 0.00 on the held-out task
 
 luis post 2026-10-19T00-23-13Z (first since 10-17 01:39Z). Both nf2 seeds finished 500k on 10-17 (11.9 h each on
 an H200); flags checked (norm_future_k 2, flowbc, fb_bc_coeff 3.0, bootstrap actor, softmax, point); params 250k /
@@ -53,6 +53,40 @@ space does not interpolate). If the 500-episode numbers hold, this is the first 
 best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply to luis: wait for the 500-episode
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
+
+### 06:00 CEST, luis: a student trained on 20 random goal regions only scores 0.904 / 0.920 on the five real tasks (teacher 0.912)
+
+luis 03-55-35Z (job 8763442; teacher nf2 sd0 500k; set-encoder descriptor over the 32 goal states; early_stop +
+weight_decay 1e-4; 500 episodes per task; the 20 random regions built the eval way, section "03:55"). The
+`random_only` student never saw a real task's goal set.
+
+| real task | random_only, sample | random_only, mode | 20 random + 4 real, test the fifth (sample / mode) | (b') held-out | nearest random anchor to the task centroid (cm) |
+|---|---|---|---|---|---|
+| 1 | 0.924 | 0.898 | 0.932 / 0.876 | 0.034 | 3.5 |
+| 2 | 0.830 | 0.856 | 0.896 / 0.890 | 0.446 | 8.0 |
+| 3 | 0.984 | 0.992 | 0.962 / 0.980 | 0.000 | 1.6 |
+| 4 | 0.880 | 0.904 | 0.854 / 0.854 | 0.000 | 5.4 |
+| 5 | 0.902 | 0.950 | 0.712 / 0.630 | 0.000 | 5.1 |
+| **mean** | **0.904** | **0.920** | 0.871 / 0.846 | 0.096 | |
+
+Teacher best-of-64 on the same checkpoint 0.912; in-task student (a) 0.918 / 0.926; BC 0.111. Against the stated
+ranges: above 0.8, the "20 regions already cover the workspace" case. Validation NLL on the real tasks' rollout
+states 7.4 to 9.1 against the prior's 8.1 to 8.8: calibrated on tasks it never trained on. Best step 9,000 (the
+in-task students stopped at 2,000 to 4,000). Teacher success on its own 20 random regions: mean 0.704, range 0.08
+to 0.96; four regions were sparse (2 to 19 rows within 4 cm, radius grown to 4.7 to 7.3 cm, teacher 0.08 to 0.20);
+the other 16 had 35 to 242 rows and teacher 0.60 to 0.96. Coverage: every real centroid lies within 1.6 to 8 cm of
+a random anchor; the success tolerance is 4 cm, so tasks 1 and 3 have a random region overlapping their goal
+region and tasks 2, 4, 5 do not. Odd one: the leave-in student for task 5 (20 random + tasks 1-4) scores 0.712 /
+0.630, below random_only's 0.902 / 0.950 on that task; one seed, unexplained. Files
+`runs/distill/students_rand20_nf2sd0_500k/`. The 50-region run (seeds 0-49) is launched (8763896). Asked of luis:
+the clean zero-shot control (retrain random_only excluding every random region whose anchor lies within 8 cm of a
+real-task centroid, test on the five real tasks) and two more student seeds of random_only from the same labels.
+
+Reading, in RL words: the best-of-64 readout of the nf2 critic, which needs 64 flow decodes and 64 critic calls per
+step, is now reproduced by one network that takes the state and a set of 32 goal states and outputs one latent,
+and that network works on goal regions it was not trained on. Together with nf2 at 0.865 over three seeds, this
+is a zero-shot deployment actor on cube at the critic's level. What it does not show: antmaze (training now), any
+reward that is not a goal region, and whether the pool measure changes the teacher.
 
 ### 05:05 CEST, luis: (b') early-stopped set-encoder leave-one-out, mean 0.10; one task reaches 0.45, four stay at or below BC
 
