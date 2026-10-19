@@ -2,7 +2,8 @@
 
 The measure M(s,u,x;g) = phi(s,u,x)^T h(g) + b(s,u,x) is read as a distribution over a fixed
 reference set X of n_ref dataset next states: p(x|s,u;g) = softmax_x(M(s,u,x;g)/measure_temp)
-(measure_loss=softmax; under measure_loss=squared M is clipped at 0 and normalized to sum 1).
+(measure_loss=softmax and pool, both softmax losses over candidate states; under measure_loss=squared
+M is clipped at 0 and normalized to sum 1).
 A full successor measure puts p where the goal policy for g goes later; a next-state detector
 puts p on the one x nearest the actual next state s' and nothing beyond it.
 
@@ -37,12 +38,32 @@ Aggregates are mean +- SE over probes per goal setting and per (task, goal setti
 determinism check of diag_rollout_value_check replays one rollout's actions from its snapshot
 and must reproduce the observations exactly.
 
+Reference set (2026-10-19): +ref_set=random (default) draws X as n_ref uniform dataset next
+states by the tool's seed; +ref_set=pool takes X = the run's own training pool
+(agent.pool_states, the P = pool_size rows `build_eval_pool` rebuilds and hash-checks), so p is
+read over the states the pool loss trained on; it needs measure_loss=pool and replaces n_ref by
+P. Everything downstream (nearest-neighbour mapping, uniform and split-half controls) is
+unchanged. The report records `ref_set` and the effective `n_ref`; `x_indices` are dataset rows
+in both cases.
+
+policy_index=bank (2026-10-19, measure_loss=pool arms): the run has no goal head, one policy
+(BC) and one learned coefficient w = agent.bank_w(). The tool then forces coef_source=pool_reward
+acting=gpi (the bank's deployed readout: best-of-64 under the importance-weighted reward
+integral over the eval bank at that w) instead of hgoal_each; every measure read uses that
+single w (critic B, if given, must be a bank run too and reads its own bank_w); the probe
+episode is walked by that readout (probe_policy=same with rollout_policy=bon64, or
+probe_policy=bon64) or by the chosen rollout_policy; rollout_policy keeps bc (the bank's own
+policy), bon64 and actor. The goal columns collapse to one setting named `bank`: the probe
+records keep their keys with goal_source_index / goal_share_* = null, and the aggregates are
+`all`, `bank`, `bank/task<k>`. The report records `policy_index` and, under bank, `bank_w`.
+
 Run (GPU):
   .venv/bin/python tools/diag_measure_fullness.py agent=psmgoal env_name=cube-single-play \\
     agent.flow_ckpt_path=$PSM_DATA/flow/cube-single-play agent.flow_ckpt_epoch=500000 \\
     agent.preimage_path=$PSM_DATA/preimages/cube-single-play.npz \\
     restore_path=<critic A run> restore_epoch=500000 [+restore_path_b=<critic B run>] \\
     +tasks="1 2 3 4 5" +episodes=2 '+probe_ts=[0,20,40,60,80]' +R=8 +T=100 +n_ref=1024 seed=0 \\
+    [+ref_set=random|pool] [+rollout_policy=bon64|actor|bc] [+probe_policy=same|bon64] \\
     report_out=$PSM_DATA/logs/measure_fullness/<tag>.json
 """
 import json
@@ -58,8 +79,13 @@ import utils.xla_guard  # noqa: F401  -- MUST precede jax (imported inside run()
 from tools.diag_rollout_value_check import SimState, spearman
 
 GOAL_SETTINGS = ('task', 'random')
+#: policy_index=bank: one setting, no goal (the single bank coefficient indexes every read)
+BANK_SETTINGS = ('bank',)
 PROBE_TS = (0, 20, 40, 60, 80)
 FORCED_AGENT_KEYS = {'coef_source': 'hgoal_each', 'acting': 'gpi'}
+#: policy_index=bank has no h(g); its deployed readout is pool_reward under gpi
+BANK_FORCED_AGENT_KEYS = {'coef_source': 'pool_reward', 'acting': 'gpi'}
+REF_SETS = ('random', 'pool')
 METRIC_KEYS = ('tv', 'tv_noise', 'tv_uniform', 'tv_b', 'tv_a_b', 'spearman', 'spearman_support', 'p_top1',
                'top1_is_next', 'p_next', 'rho_next', 'mass_beyond_next', 'H_p', 'H_rho', 'rho_support',
                'p_b_next', 'top1_b_is_next')
@@ -97,10 +123,11 @@ def occupancy(idx_seqs, n_ref, gamma):
 
 
 def measure_to_dist(m, loss, temp):
-    """The measure row read as a distribution over the columns. softmax: softmax(m / temp);
+    """The measure row read as a distribution over the columns. softmax and pool (the pool loss is the
+    softmax cross-entropy over the pool, agents/psmgoal.py `_softmax`): softmax(m / temp);
     squared: m clipped at 0 and normalized (uniform if every entry is <= 0)."""
     m = np.asarray(m, np.float64).reshape(-1)
-    if loss == 'softmax':
+    if loss in ('softmax', 'pool'):
         z = m / float(temp)
         z = np.exp(z - z.max())
         return z / z.sum()
@@ -208,6 +235,10 @@ def run(cfg):
     # bon64 = the deployed best-of-64 readout, so every rollout_policy is probed from the same states.
     probe_policy = str(cfg.get('probe_policy', 'same'))
     assert probe_policy in ('same', 'bon64')
+    # ref_set (2026-10-19): random = n_ref uniform dataset next states by the tool's seed (the original);
+    # pool = the run's own training pool (agent.pool_states), measure_loss=pool only; P replaces n_ref.
+    ref_set = str(cfg.get('ref_set', 'random'))
+    assert ref_set in REF_SETS, f'ref_set must be one of {REF_SETS}'
     assert task_goal_pick in ('top_share', 'first')
     assert R >= 1 and T >= 1 and n_ref >= 2
     prefix = str(cfg.env_name)
@@ -219,22 +250,37 @@ def run(cfg):
         runs['b'] = str(run_b)
 
     cli_agent = OmegaConf.to_container(cfg.agent, resolve=True)
-    configs, prov = {}, {}
+    merged, prov = {}, {}
     for side, rp in runs.items():
-        merged, prov[side] = merge_run_config(cli_agent, rp, _cli_agent_keys())
-        assert merged.get('agent_name') == 'psmgoal', 'diag_measure_fullness reads psmgoal checkpoints'
-        merged.update(FORCED_AGENT_KEYS)
-        configs[side] = ml_collections.ConfigDict(_lists_to_tuples(merged))
+        merged[side], prov[side] = merge_run_config(cli_agent, rp, _cli_agent_keys())
+        assert merged[side].get('agent_name') == 'psmgoal', 'diag_measure_fullness reads psmgoal checkpoints'
+    # policy_index=bank (2026-10-19): no goal head; the deployed readout is pool_reward under the single
+    # bank coefficient. Critic B must be of the same index: a goal-index B has no bank w and a bank B no h(g).
+    policy_index = str(merged['a'].get('policy_index', 'code'))
+    bank = policy_index == 'bank'
+    for side in runs:
+        side_index = str(merged[side].get('policy_index', 'code'))
+        assert (side_index == 'bank') == bank, \
+            f'critic {side} has policy_index={side_index}; critic a has {policy_index}: both must be bank or neither'
+    forced = dict(BANK_FORCED_AGENT_KEYS if bank else FORCED_AGENT_KEYS)
+    settings = BANK_SETTINGS if bank else GOAL_SETTINGS
+    configs = {}
+    for side in runs:
+        merged[side].update(forced)
+        configs[side] = ml_collections.ConfigDict(_lists_to_tuples(merged[side]))
     c = configs['a']
     gamma, temp = float(c['discount']), float(c['measure_temp'])
     loss = str(c.get('measure_loss', 'squared'))
+    if ref_set == 'pool':
+        assert loss == 'pool', f'ref_set=pool reads the run\'s training pool: critic a has measure_loss={loss}, not pool'
     K, u_clip = int(c['gpi_num_u']), float(c['u_clip'])
     n_ref_cols = max(int(c['batch_size']) - int(c['k_goals']), 1)
     print(f'=== diag_measure_fullness: tasks={tasks} episodes/task={n_ep} probe_ts={probe_ts} R={R} T={T} '
-          f'n_ref={n_ref} task_goal_pick={task_goal_pick} rollout_policy={rollout_policy} '
+          f'n_ref={n_ref} ref_set={ref_set} task_goal_pick={task_goal_pick} rollout_policy={rollout_policy} '
           f'probe_policy={probe_policy} seed={base_seed}')
-    print(f'    critics: {runs} epoch={cfg.restore_epoch}; forced {FORCED_AGENT_KEYS}; measure_loss={loss} '
-          f'temp={temp} gamma={gamma} gpi_num_u={K} k_goals={int(c["k_goals"])} ref_cols={n_ref_cols}', flush=True)
+    print(f'    critics: {runs} epoch={cfg.restore_epoch}; policy_index={policy_index}; forced {forced}; '
+          f'measure_loss={loss} temp={temp} gamma={gamma} gpi_num_u={K} k_goals={int(c["k_goals"])} '
+          f'ref_cols={n_ref_cols}', flush=True)
 
     # Dataset (first task), preimage splice once, the reference set X and the standardization.
     np.random.seed(base_seed)
@@ -244,17 +290,10 @@ def run(cfg):
     next_obs_all = np.asarray(train_dataset['next_observations'], np.float32)
     std = obs_std(train_dataset['observations'])
     rng = np.random.default_rng(base_seed + 7919)
-    x_idx = np.sort(rng.choice(next_obs_all.shape[0], size=n_ref, replace=False))
-    X = next_obs_all[x_idx]
-    X_std = X.astype(np.float64) / std
-    X_j = jnp.asarray(X)
-    nn_modes = {'full': slice(None), 'cube_xyz': CUBE_POS}
 
-    ex = ds.sample(1)
-    base = {}
-    for side, rp in runs.items():
-        # measure_loss=pool (2026-10-19): rebuild the run's reference pool and check its hash, as eval does
-        pool_kw = {}
+    # measure_loss=pool (2026-10-19): rebuild each run's reference pool and check its hash, as eval does
+    pools = {}
+    for side in runs:
         if str(configs[side].get('measure_loss', 'squared')) == 'pool':
             from tools.eval_checkpoint import build_eval_pool
             from utils.flow_inversion import PREIMAGE_VALID_KEY, load_augmented_dataset, repair_invalid_preimages
@@ -263,10 +302,30 @@ def run(cfg):
                 aug, _ = repair_invalid_preimages(load_augmented_dataset(configs[side]['preimage_path']))
                 if aug.get(PREIMAGE_VALID_KEY) is not None:
                     src[PREIMAGE_VALID_KEY] = aug[PREIMAGE_VALID_KEY]
-            pool_obs, pool_rows = build_eval_pool(src, configs[side])
-            pool_kw = {'pool_obs': pool_obs, 'pool_indices': pool_rows}
+            pools[side] = build_eval_pool(src, configs[side])
+    if ref_set == 'pool':
+        # X = critic a's own training pool: its rows are dataset rows, its states the rows' next states
+        pool_obs, pool_rows = pools['a']
+        x_idx = np.asarray(pool_rows, np.int64)
+        X = next_obs_all[x_idx]
+        assert np.array_equal(X, np.asarray(pool_obs, np.float32)), 'the rebuilt pool is not the dataset rows it names'
+        n_ref = int(x_idx.shape[0])
+    else:
+        x_idx = np.sort(rng.choice(next_obs_all.shape[0], size=n_ref, replace=False))
+        X = next_obs_all[x_idx]
+    X_std = X.astype(np.float64) / std
+    X_j = jnp.asarray(X)
+    nn_modes = {'full': slice(None), 'cube_xyz': CUBE_POS}
+
+    ex = ds.sample(1)
+    base = {}
+    for side, rp in runs.items():
+        pool_kw = {'pool_obs': pools[side][0], 'pool_indices': pools[side][1]} if side in pools else {}
         a = agents['psmgoal'].create(base_seed, ex['observations'], ex['actions'], configs[side], **pool_kw)
         base[side] = restore_agent(a, rp, cfg.restore_epoch)
+    if ref_set == 'pool':
+        assert np.array_equal(X, np.asarray(base['a'].pool_states, np.float32)), \
+            'X must equal the restored agent\'s pool_states exactly'
 
     @jax.jit
     def choose(agent, obs, key):
@@ -279,6 +338,11 @@ def run(cfg):
     @jax.jit
     def goal_coef(agent, g):
         return agent.w_star(g[None])[0]
+
+    @jax.jit
+    def bank_coef(agent):
+        """policy_index=bank: the single shared coefficient w, (z,)."""
+        return agent.bank_w()[0]
 
     @jax.jit
     def goal_shares(agent, obs, u):
@@ -371,23 +435,33 @@ def run(cfg):
                 if step in probe_ts and step < t_max - 1:
                     snap = snapshot()
                     obs_j = jnp.asarray(observation, jnp.float32)
-                    u_dep = choose(policy, obs_j, next_key())
-                    shares = np.asarray(goal_shares(policy, obs_j, u_dep), np.float64)
-                    j_task = int(np.argmax(shares)) if task_goal_pick == 'top_share' else 0
-                    for setting in GOAL_SETTINGS:
-                        if setting == 'task':
-                            g_src, g = j_task, task_goals[j_task]
+                    if bank:
+                        shares, j_task = None, None
+                    else:
+                        u_dep = choose(policy, obs_j, next_key())
+                        shares = np.asarray(goal_shares(policy, obs_j, u_dep), np.float64)
+                        j_task = int(np.argmax(shares)) if task_goal_pick == 'top_share' else 0
+                    for setting in settings:
+                        if setting == 'bank':
+                            # no goal: the agent as eval built it (eval bank + bank w), w = bank_w() on every read
+                            g_src = None
+                            agent_g = {side: ag[side] for side in runs}
+                            hw = {side: bank_coef(ag[side]) for side in runs}
                         else:
-                            g_src = int(rng.integers(next_obs_all.shape[0]))
-                            g = next_obs_all[g_src]
-                        g_j = jnp.asarray(g, jnp.float32)
-                        refs = jnp.asarray(next_obs_all[rng.choice(next_obs_all.shape[0], size=n_ref_cols,
-                                                                    replace=False)])
-                        agent_g = {side: with_goal(ag[side], g_j, goal_coef(ag[side], g_j), refs) for side in runs}
+                            if setting == 'task':
+                                g_src, g = j_task, task_goals[j_task]
+                            else:
+                                g_src = int(rng.integers(next_obs_all.shape[0]))
+                                g = next_obs_all[g_src]
+                            g_j = jnp.asarray(g, jnp.float32)
+                            refs = jnp.asarray(next_obs_all[rng.choice(next_obs_all.shape[0], size=n_ref_cols,
+                                                                        replace=False)])
+                            agent_g = {side: with_goal(ag[side], g_j, goal_coef(ag[side], g_j), refs) for side in runs}
+                            hw = {side: agent_g[side].eval_goal_w[0] for side in runs}
                         u = choose(agent_g['a'], obs_j, next_key())
                         a0 = np.clip(np.asarray(decode1(agent_g['a'], obs_j, u)), -1, 1)
-                        m = {side: np.asarray(measure_row(agent_g[side], obs_j, u, agent_g[side].eval_goal_w[0]),
-                                              np.float32) for side in runs}
+                        m = {side: np.asarray(measure_row(agent_g[side], obs_j, u, hw[side]), np.float32)
+                             for side in runs}
                         p = {side: measure_to_dist(m[side], loss, temp) for side in runs}
                         seqs, succ, lens, terms = [], [], [], []
                         for r in range(R):
@@ -408,8 +482,9 @@ def run(cfg):
                         s_next = seqs[0][0]
                         next_dev = max(float(np.max(np.abs(s[0] - s_next))) for s in seqs)
                         rec = {'task': int(task), 'episode': ep, 't': step, 'goal': setting,
-                               'goal_source_index': g_src, 'goal_share_top': float(shares[j_task]),
-                               'goal_share_mean': float(shares.mean()),
+                               'goal_source_index': g_src,
+                               'goal_share_top': None if bank else float(shares[j_task]),
+                               'goal_share_mean': None if bank else float(shares.mean()),
                                'u_norm': float(np.linalg.norm(np.asarray(u))),
                                'rollout_success': [int(s) for s in succ], 'rollout_length': lens,
                                'rollout_terminated': [int(t) for t in terms],
@@ -446,7 +521,7 @@ def run(cfg):
     aggregates = {}
     for nn_name in nn_modes:
         agg = {'all': summarise(flat(probes, nn_name))}
-        for setting in GOAL_SETTINGS:
+        for setting in settings:
             sel = [r for r in probes if r['goal'] == setting]
             agg[setting] = summarise(flat(sel, nn_name))
             for task in tasks:
@@ -457,13 +532,13 @@ def run(cfg):
     report = {
         'tool': 'diag_measure_fullness',
         'env_prefix': prefix, 'tasks': tasks, 'episodes_per_task': n_ep, 'probe_ts': list(probe_ts),
-        'R': R, 'T': T, 'n_ref': n_ref, 'n_ref_cols': n_ref_cols, 'seed': base_seed,
+        'R': R, 'T': T, 'n_ref': n_ref, 'n_ref_cols': n_ref_cols, 'seed': base_seed, 'ref_set': ref_set,
         'task_goal_pick': task_goal_pick, 'rollout_policy': rollout_policy, 'probe_policy': probe_policy,
-        'goal_settings': list(GOAL_SETTINGS), 'nn_modes': list(nn_modes),
+        'goal_settings': list(settings), 'nn_modes': list(nn_modes), 'policy_index': policy_index,
         'gamma': gamma, 'measure_temp': temp, 'measure_loss': loss, 'gpi_num_u': K, 'u_clip': u_clip,
         'runs': runs, 'restore_epoch': int(cfg.restore_epoch),
         'train_seed': {s: prov[s].get('train_seed') for s in runs},
-        'forced_agent_keys': FORCED_AGENT_KEYS, 't_max': t_max,
+        'forced_agent_keys': forced, 't_max': t_max,
         'determinism_max_dev': det_dev,
         'main_episode_success': ep_success,
         'x_indices': x_idx.tolist(), 'obs_std': std.tolist(),
@@ -472,11 +547,13 @@ def run(cfg):
         'config_provenance': prov,
         'wall_seconds': round(time.time() - t_start, 1),
     }
+    if bank:
+        report['bank_w'] = {side: np.asarray(bank_coef(base[side]), np.float64).tolist() for side in runs}
     cols = ('tv', 'tv_noise', 'tv_uniform', 'tv_b', 'spearman', 'top1_is_next', 'p_next', 'rho_next',
             'mass_beyond_next', 'H_p', 'H_rho')
     print(f'\n{"group":22s}' + ''.join(f'{k:>17s}' for k in cols))
     for nn_name in nn_modes:
-        for grp in ('task', 'random'):
+        for grp in settings:
             s = aggregates[nn_name][grp]
             row = ''.join(f'{s[k]["mean"]:9.3f}±{s[k]["se"]:6.3f} ' if k in s else f'{"-":>17s}' for k in cols)
             print(f'{nn_name + "/" + grp:22s}{row}  (n={s["n"]})')
