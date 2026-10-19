@@ -938,7 +938,7 @@ success 59 (A) against 68 (B). The best-of-8 above best-of-64 and the 0.696 belo
 | random-drop data mask | ja_randdrop_pt | 3 | 0.786 | 0.787 |
 | actor step x 0.5 / x 2 / x 4 in the target, 100k only | bds05 / bds2 / bds4 | 1 | 0.532 / 0.637 / 0.628 at 100k | |
 | actor step x -1 in the target | ja_fbc3_pt_bdsneg | 3 | running | |
-| A plus own-future normalisation | ja_fbc3_pt_nf2 | 3 / 1 | 0.865 | 0.912 |
+| A plus own-future normalisation | ja_fbc3_pt_nf2 | 3 | 0.865 | 0.866 |
 | A, candidates from the actor at test time only | flowbc_gpi readout | 5 | 0.785 | 0.801 |
 
 The actor acting alone is 0.098 to 0.132 in every actor arm except bc 0.3 with the point value
@@ -1161,7 +1161,13 @@ Five-task success, best of 64 prior draws under the per-goal share:
 | 150k | 0 | 0.841 | | 0.888 0.812 0.978 0.842 0.686 |
 | 200k | 0 | 0.888 | | 0.886 0.940 0.978 0.866 0.768 |
 | 250k | 0, 1, 2 | 0.865 | 0.914 / 0.829 / 0.852 | 0.904 0.916 0.970 0.884 0.894 |
-| 500k | 0 | 0.912 | | 0.914 0.938 0.950 0.850 0.910 |
+| 500k | 0, 1, 2 | **0.866** | 0.912 / 0.825 / 0.861 | 0.914 0.938 0.950 0.850 0.910 |
+
+Seeds 1 and 2 at 500k were trained on luis (jobs 8674932 / 8674933, 11.9 h each on an H200) and
+evaluated on kisski (0.825 / 0.861; per task sd1 0.938 0.774 0.704 0.838 0.870, sd2 0.868 0.908
+0.918 0.666 0.946) and on aws (0.815 / 0.870): machines within 0.01. The three-seed 500k mean
+equals the 250k mean (0.866 against 0.865); the pre-stated 0.88 to 0.92 was not met, and seed
+0's 0.912 is the high seed, not a 500k gain.
 
 Against A: 0.789 at 250k over 5 seeds and 0.805 at 500k. The same checkpoint at 50k evaluated
 on aws gave 0.834 (parity). Seeds 1 and 2 hit the 12-hour limit at step 375,000 and have only
@@ -1334,7 +1340,10 @@ each live reading. Numbers are what to compare against.
    jobs 8674932 / 8674933, smoke flags norm_future_k 2). The same two checkpoints are evaluated
    on all three machines (`scripts/campaign_2026-10/nf2_threeway_watcher.sh` on kisski; luis and
    aws upload to HF `runs/nf2_threeway/<machine>/`); expected agreement within 0.01 on the
-   five-task mean.
+   five-task mean. Result 2026-10-19: 500k over 3 seeds **0.866** (0.912 / 0.825 / 0.861), equal
+   to the 250k mean; kisski and aws within 0.01 per seed (luis's own evals pending). The 0.88 to
+   0.92 prediction was not met; seed 0 is the high seed. Settled: nf2 is 0.865 at both
+   checkpoints, 0.06 to 0.08 above A.
 
 4. Why nf2 raised success without action dependence.
    Measurement: the per-goal share at test time along a trajectory toward the goal, for A and
@@ -1402,9 +1411,8 @@ is a successor measure in the occupancy sense; the paper should say what it meas
 ### 8.3 Results section
 
 Table 1, the main result: five-task cube, 500 episodes per task, mean and 95 percent interval
-over seeds, 250k and 500k: BC 0.111; A 0.789 / 0.805 (5 seeds); nf2 0.865 (3 seeds) / 0.912
-(1 seed, to be completed); critic B 0.626 / 0.657; one BC draw 0.712 / 0.696 (5 seeds). State
-that nf2's 500k needs the two missing seeds.
+over seeds, 250k and 500k: BC 0.111; A 0.789 / 0.805 (5 seeds); nf2 0.865 / 0.866 (3 seeds);
+critic B 0.626 / 0.657; one BC draw 0.712 / 0.696 (5 seeds).
 
 Table 2, what the bootstrap does (section 4.3 condensed): the data's next latent 0.646; one BC
 draw 0.696; mean of 8 draws 0.735 / 0.683; best of 2 / 4 / 8 draws 0.399 / 0.213 / 0.096; the

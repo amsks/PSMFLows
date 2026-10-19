@@ -17,7 +17,7 @@
 PSM_DATA=${PSM_DATA:-/mnt/home/amohan/psm-data}; REPO=${PSM_REPO:-/mnt/home/amohan/git/Austin/PSMFLows}
 : "${ARMS:?ARMS=<space-separated run groups> required}"
 STEPS=${STEPS:-"250000 500000"}; READOUTS=${READOUTS:-hgoal_each}; SEEDS_N=${SEEDS_N:-3}
-MARK=$PSM_DATA/gc_scripts/submitted_arm_cube; mkdir -p "$MARK" "$PSM_DATA/logs/slurm"
+MARK=$PSM_DATA/gc_scripts/submitted_arm_${ENVKEY:-cube}; mkdir -p "$MARK" "$PSM_DATA/logs/slurm"
 declare -A OV=(
   [hgoal_each]="agent.coef_source=hgoal_each agent.acting=gpi"
   [actor_rel]="agent.acting=distill agent.eval_redistill=false agent.eval_goal_source=relabel"
@@ -38,9 +38,9 @@ while true; do
           [ $done_json = 5 ] && { n=$((n+1)); continue; }
           ck=$run/params_${ep}.pkl
           { [ -f "$ck" ] && [ $(( $(date +%s) - $(stat -c %Y "$ck") )) -gt 120 ]; } || continue
-          id=$(sbatch --parsable --nice=600 --partition=kisski-inference --account=general --time=03:00:00 \
+          id=$(sbatch --parsable --nice=600 --partition=kisski-inference --account=general --time=${EVAL_TIME:-03:00:00} \
             --job-name=e500p_$out --output="$PSM_DATA"/logs/slurm/%x-%j.out --error="$PSM_DATA"/logs/slurm/%x-%j.err \
-            --export="ALL,PSM_REPO=$REPO,PSM_DATA=$PSM_DATA,MODE=psmgoal,ENVKEY=cube,RUN_DIR=$run,OUT=$out,RESTORE_EPOCH=$ep,EVAL_WORKERS=4,EXTRA=${OV[$tag]}" \
+            --export="ALL,PSM_REPO=$REPO,PSM_DATA=$PSM_DATA,MODE=psmgoal,ENVKEY=${ENVKEY:-cube},RUN_DIR=$run,OUT=$out,RESTORE_EPOCH=$ep,EVAL_WORKERS=4,EXTRA=${OV[$tag]}" \
             "$REPO"/scripts/slurm/eval500_packed.sbatch) && { echo "$(date +%F_%T) submitted $out job $id"; echo "$id" > "$MARK/$out"; n=$((n+1)); }
         done
       done

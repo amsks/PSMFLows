@@ -22,7 +22,7 @@ Date: **2026-10-19** (latest) · prior: 2026-10-17, 2026-10-15, 2026-10-07, 2026
 
 ---
 
-## 2026-10-19 — luis: nf2 seeds 1-2 at 500k uploaded; Gaussian student of the best-of-64 teacher acts at teacher level in-task (10-episode interim), 0.00 on the held-out task
+## 2026-10-19 — nf2 500k over 3 seeds 0.866 (= 250k); antmaze and the pool-measure build launched; luis: nf2 seeds 1-2 uploaded, Gaussian student of the best-of-64 teacher acts at teacher level in-task (10-episode interim), 0.00 on the held-out task
 
 luis post 2026-10-19T00-23-13Z (first since 10-17 01:39Z). Both nf2 seeds finished 500k on 10-17 (11.9 h each on
 an H200); flags checked (norm_future_k 2, flowbc, fb_bc_coeff 3.0, bootstrap actor, softmax, point); params 250k /
@@ -53,6 +53,43 @@ space does not interpolate). If the 500-episode numbers hold, this is the first 
 best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply to luis: wait for the 500-episode
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
+
+### 03:10 CEST, three-way check done: nf2 500k over 3 seeds 0.866, equal to its 250k 0.865; machines within 0.01
+
+| machine | sd001 per task | sd001 | sd002 per task | sd002 |
+|---|---|---|---|---|
+| kisski (jobs 2525707 / 2525708) | 0.938 0.774 0.704 0.838 0.870 | 0.825 | 0.868 0.908 0.918 0.666 0.946 | 0.861 |
+| aws | 0.908 0.742 0.724 0.852 0.850 | 0.815 | 0.876 0.922 0.926 0.700 0.924 | 0.870 |
+| luis | eval500 running (8762985/6) | | | |
+
+nf2 500k, three seeds: **0.866** (0.912 / 0.825 / 0.861) against 0.865 at 250k, A 0.805, B 0.657. The pre-stated
+0.88 to 0.92 was not met; seed 0's 0.912 is the high seed, not a 500k gain. The headline for nf2 is 0.865 at both
+checkpoints. Compendium 4.3, 6.1, 7.3 and 8.3 updated.
+
+### 03:00 CEST, user decision "go ahead on all": antmaze launched, the pool measure build started, luis on (a)+(b)
+
+- luis 00-49-01Z: tool pushed (854a6ab, bd57302: early_stop, weight_decay, descriptor=set, loo, labels_in), labels on
+  HF `runs/distill/`; its mailbox watcher had been broken 10-17 01:39Z to 10-19 00:23Z (explains the silence); nf2
+  sd1/sd2 eval500 running (8762985/6); distillation 500-episode rerun (8762987), (a) early stop + weight decay 1e-4
+  (8763113), (b) set encoder leave-one-out over five tasks (8763114) queued. No idle GPUs for extra seeds.
+- **Antmaze, first training of the actor recipe there** (it was only smoked on 10-14; every antmaze arm so far at
+  BC 0.03-0.12, bon1 peak 0.165 at 175k then collapse). Smokes 2525712 (fbc3_pt) / 2525713 (nf2), 200 steps,
+  exit 0, flags env antmaze, discount 0.99, goal_discount 0.99, fb_bc_coeff 3.0, norm_future_k 0 / 2. Launched
+  `psmgoal_ja_fbc3_pt_antmaze` sd0-2 (2525719-2525721, 10 h) and `psmgoal_ja_nf2_antmaze` sd0-2 (2525722-2525724,
+  24 h): arm A's overrides + `agent.goal_discount=0.99 agent.fb_hit_spec=0:2:0.5`, ENVKEY=antmaze, antmaze
+  preimages; nf2 + `agent.norm_future_k=2`; 500k, eval 50k/50, save 250k. Expected: fbc3_pt at BC (0.07-0.12);
+  nf2 own-next share off 0.08, success unknown (0.1-0.3 if the cube mechanism transfers). Eval watcher
+  `watcher_antmaze.log` (ENVKEY=antmaze, EVAL_TIME=06:00:00; `arm_eval_watcher_cube.sh` now takes both), upload
+  watcher `watcher_antmaze_upload.log` for aws's parity evals (asked 01-04-31Z).
+- **The pool measure** (design `docs/design/2026-10-19-pool-measure.md`, plan `docs/plans/2026-10-19-pool-measure.md`,
+  3556032): the full-successor-measure build from the 10-17 brainstorm, gated on the corrected fullness test (done
+  10-17/18, tv 0.87-0.92 against the measure's own policy). Candidate set = a fixed reference set of 1024 dataset
+  states shared by every transition, step and the readout; anchor = the reference state nearest the next state;
+  target (1-gamma) onehot(anchor) + gamma softmax(target at (s', u')) over the set; policy index goal or a one-member
+  BC bank; readout `pool_reward` (importance-weighted reward integration over a 512-state bank) beside hgoal_each;
+  training signals measure_p_anchor, pool_entropy, pool_u_tv. Expectations in the design doc (fullness tv 0.5-0.7,
+  pool_u_tv > 0.05, cube 0.6-0.72 bank / 0.70-0.80 goal; fail = tv > 0.85 and pool_u_tv < 0.02). Implementation
+  (tasks 1-4) delegated; smoke, launch of `psmgoal_pool_{bank,fdplus,ja}_cube` x 3 seeds and the fullness gate follow.
 
 ---
 

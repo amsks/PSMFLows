@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Upload finished frozen-step checkpoints to the HF dataset repo for aws's eval500 (2026-10-17).
+# Upload finished checkpoints to the HF dataset repo for aws's eval500 (2026-10-17; GROUP_GLOB / N_RUNS added 10-19 for antmaze).
 #
 # Every 20 min: for each $PSM_DATA/exp/PSMFLows/psmgoal_ja_fbc3_pt_fd{plus,minus,rand,zero}_cube/sd00*/ that
 # holds params_500000.pkl and has not been uploaded, push flags.json, params_250000.pkl, params_500000.pkl and
@@ -13,7 +13,7 @@ MARK=$PSM_DATA/gc_scripts/uploaded_fd; mkdir -p "$MARK"
 echo "$(date +%F_%T) watching for finished frozen-step runs"
 while true; do
   n_up=0
-  for run in "$PSM_DATA"/exp/PSMFLows/psmgoal_ja_fbc3_pt_fd{plus,minus,rand,zero}_cube/sd00*; do
+  for run in $(eval echo "$PSM_DATA"/exp/PSMFLows/${GROUP_GLOB:-psmgoal_ja_fbc3_pt_fd{plus,minus,rand,zero}_cube}/sd00*); do
     [ -f "$run/params_500000.pkl" ] || continue
     g=$(basename "$(dirname "$run")"); rd=$(basename "$run")
     if [ -f "$MARK/${g}_${rd}" ]; then n_up=$((n_up+1)); continue; fi
@@ -31,6 +31,6 @@ PY
     then echo "$(date +%F_%T) uploaded runs/$g/$rd/"; touch "$MARK/${g}_${rd}"; n_up=$((n_up+1))
     else echo "$(date +%F_%T) upload FAILED for $g/$rd, will retry"; fi
   done
-  [ "$n_up" -ge 12 ] && { echo "$(date +%F_%T) all 12 uploaded; ALLDONE"; exit 0; }
+  [ "$n_up" -ge "${N_RUNS:-12}" ] && { echo "$(date +%F_%T) all ${N_RUNS:-12} uploaded; ALLDONE"; exit 0; }
   sleep 1200
 done
