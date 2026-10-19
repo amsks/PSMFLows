@@ -28,7 +28,14 @@ the repo config sets 10, which overrides this tool's 500 (the 10-17 run evaluate
 Options added 2026-10-19 (kisski 2026-10-19T00-42-34Z): +weight_decay (AdamW) and +early_stop (keep the
 parameters at the lowest validation NLL); +descriptor=set replaces the mean descriptor by a
 permutation-invariant encoder over the 32 goal states [g, h(g)] (per-goal MLP, then the mean);
-+labels_in reuses a previous run's labels npz instead of re-running the teacher. +student_out=<dir>
++labels_in reuses a previous run's labels npz (for the tasks it holds) instead of re-running the teacher.
++n_random_tasks=N (with +descriptor=set) adds N random goal-region training tasks (kisski 2026-10-19T01-54-05Z):
+anchor = the cube position of a random dataset next state (seed +random_seed0 + i); the relabel batch's
+rewarding rows are the next states with the cube within the env's 0.04 m tolerance of it (the radius grows to
+the k_goals-th nearest row if fewer qualify, and is recorded); goals and refs then come from
+`infer_eval_goals` as for a real task. Teacher rollouts on a random task end when the cube reaches the region
+(its success). Students: `random_only` trains on the random tasks and is evaluated on the real ones; with
++loo the leave-one-out students also train on the random tasks. +student_out=<dir>
 saves each student under <dir>/<student name>/ (params, standardisation, config, NLL curve, eval JSONs).
 
 Run (GPU):
@@ -50,6 +57,15 @@ import numpy as np
 import utils.xla_guard  # noqa: F401  -- MUST precede jax (imported inside the functions)
 
 FORCED_KEYS = {'acting': 'gpi', 'coef_source': 'hgoal_each'}
+# Random goal-region tasks (+n_random_tasks): ids RANDOM_ID0 + i. Cube observation layout and success
+# tolerance from ogbench manipspace/envs/cube_env.py: the cube position is (block_pos - [0.425, 0, 0]) * 10
+# at observation dims 19:22, and a cube counts as at its target within 0.04 m, i.e. 0.4 in observation units.
+# `check_cube_layout` asserts the layout on the live env before any random task is built.
+RANDOM_ID0 = 100
+CUBE_POS = slice(19, 22)
+CUBE_XYZ_CENTER = np.array([0.425, 0.0, 0.0])
+CUBE_XYZ_SCALE = 10.0
+CUBE_TOL_M = 0.04
 LOG_2PI = float(np.log(2.0 * np.pi))
 
 
@@ -83,6 +99,24 @@ def gaussian_nll(v, mu, L):
     z = jax.scipy.linalg.solve_triangular(L, (v - mu)[..., None], lower=True)[..., 0]
     logdet = jnp.sum(jnp.log(jnp.diagonal(L, axis1=-2, axis2=-1)), axis=-1)
     return 0.5 * jnp.sum(z ** 2, axis=-1) + logdet + 0.5 * d * LOG_2PI
+
+
+def region_rewards(next_obs, anchor, k, tol=CUBE_TOL_M * CUBE_XYZ_SCALE):
+    """Rewards {0, 1} for a random goal-region task: next states whose cube position is within tol of
+    anchor (observation units). If fewer than k rows qualify, the radius grows to the k-th nearest row's
+    distance. Returns (rewards (N,), radius used, rows within tol)."""
+    dist = np.linalg.norm(np.asarray(next_obs)[:, CUBE_POS] - np.asarray(anchor)[None], axis=1)
+    n_in = int((dist <= tol).sum())
+    radius = float(tol) if n_in >= k else float(np.sort(dist)[k - 1])
+    return (dist <= radius).astype(np.float32), radius, n_in
+
+
+def check_cube_layout(env):
+    """Assert that observation dims CUBE_POS are the scaled cube position (ogbench cube_env)."""
+    ob, _ = env.reset(seed=0)
+    pos = np.asarray(env.unwrapped.compute_ob_info()['privileged/block_0_pos'], np.float64)
+    want = (pos - CUBE_XYZ_CENTER) * CUBE_XYZ_SCALE
+    assert np.allclose(np.asarray(ob, np.float64)[CUBE_POS], want, atol=1e-4), (ob[CUBE_POS], want)
 
 
 def split_episodes(ep_ids, val_frac, seed):
@@ -310,15 +344,43 @@ def run(cfg):
     assert descriptor in ('mean', 'set'), 'descriptor must be mean | set'
     in_task, loo = bool(cfg.get('in_task', True)), bool(cfg.get('loo', False))
     student_out = cfg.get('student_out', None)
-    all_tasks = sorted(set(tasks) | ({holdout} if holdout else set()))
+    n_random = int(cfg.get('n_random_tasks', 0))
+    random_seed0 = int(cfg.get('random_seed0', 0))
+    random_tasks = [RANDOM_ID0 + i for i in range(n_random)]
+    assert descriptor == 'set' or not n_random, 'random goal-region tasks need +descriptor=set'
+    all_tasks = sorted(set(tasks) | ({holdout} if holdout else set())) + random_tasks
 
     config, merged, agents = load_teacher(cfg)
     print(f'=== distill_bon_student teacher={cfg.restore_path}@{cfg.restore_epoch} tasks={tasks} holdout={holdout} '
           f'n_data={n_data} n_rollout_eps={n_roll} n_extra={n_extra} K={config["gpi_num_u"]} '
           f'norm_future_k={merged.get("norm_future_k")} forced={FORCED_KEYS}', flush=True)
 
-    base, per_task = None, {}
+    base, per_task, random_info, rand_env = None, {}, {}, None
     for t in all_tasks:
+        if t >= RANDOM_ID0:
+            # a goal region around the cube position of a random dataset next state, built the eval way:
+            # rewarding rows of a relabel batch = next states inside the region, refs = rows outside it
+            seed_c = random_seed0 + t - RANDOM_ID0
+            if rand_env is None:
+                _, rand_env, _, _ = make_env_and_datasets(task_env_name(str(cfg.env_name), tasks[0]),
+                                                          frame_stack=cfg.frame_stack)
+                check_cube_layout(rand_env)
+                rand_env.unwrapped._terminate_at_goal = False    # the env's own task must not end the episode
+            row = int(np.random.default_rng(seed_c).integers(0, train_dataset['next_observations'].shape[0]))
+            anchor = np.asarray(train_dataset['next_observations'][row], np.float32)[CUBE_POS]
+            np.random.seed(seed_c)
+            zb = ds.sample(min(ds.size, relabel_size))
+            r_c, radius, n_in = region_rewards(zb['next_observations'], anchor, int(config['k_goals']))
+            ag = base.infer_eval_goals(zb, r_c)
+            goal_set = np.concatenate([np.asarray(ag.eval_goals), np.asarray(ag.eval_goal_w)], 1).astype(np.float32)
+            per_task[t] = {'agent': ag, 'env': rand_env, 'desc': np.asarray([all_tasks.index(t)], np.float32),
+                           'goal_set': goal_set, 'anchor': anchor,
+                           'obs_pool': np.asarray(train_dataset['observations'], np.float32)}
+            random_info[t] = {'seed': seed_c, 'anchor_row': row, 'anchor_cube_obs': anchor.tolist(),
+                              'radius_obs_units': radius, 'rows_within_tol': n_in, 'n_rewarding': int(r_c.sum())}
+            print(f'random task {t}: seed {seed_c} anchor {np.round(anchor, 3)} radius {radius:.3f} '
+                  f'({n_in} of {r_c.shape[0]} relabel rows within tol)', flush=True)
+            continue
         env_name = task_env_name(str(cfg.env_name), t)
         np.random.seed(seed)                      # eval_checkpoint: the base seed before the dataset
         _, eval_env, train_dataset, _ = make_env_and_datasets(env_name, frame_stack=cfg.frame_stack)
@@ -346,15 +408,19 @@ def run(cfg):
     rng = np.random.default_rng(seed)
     data = {t: {} for t in all_tasks}
     teacher_success = {}
+    have = set()
     if labels_in:                                 # reuse a previous run's labels (same teacher)
         z = np.load(labels_in)
         for t in all_tasks:
+            if f't{t}_data_obs' not in z.files:
+                continue
             data[t] = {k: z[f't{t}_{k}']
                        for k in ('data_obs', 'data_v', 'roll_obs', 'roll_v', 'roll_ep', 'roll_extra_v')}
             teacher_success[t] = None
-        n_extra = int(data[all_tasks[0]]['roll_extra_v'].shape[0])
-        print(f'labels <- {labels_in} (n_extra_labels {n_extra})', flush=True)
-    for t in ([] if labels_in else all_tasks):
+            have.add(t)
+        n_extra = int(data[min(have)]['roll_extra_v'].shape[0])
+        print(f'labels <- {labels_in} for tasks {sorted(have)} (n_extra_labels {n_extra})', flush=True)
+    for t in [t for t in all_tasks if t not in have]:
         pt = per_task[t]
         ag, env = pt['agent'], pt['env']
         # dataset states
@@ -382,6 +448,13 @@ def run(cfg):
                 a = np.clip(np.asarray(decode(jnp.asarray(ob, jnp.float32), u)), -1, 1)
                 ob, _, term, trunc, info = env.step(a)
                 done = term or trunc
+                if t >= RANDOM_ID0:
+                    # random task: success = cube within the env's tolerance of the anchor; ends the episode
+                    # as terminate_at_goal does for a real task
+                    reached = bool(np.linalg.norm(np.asarray(ob)[CUBE_POS] - pt['anchor'])
+                                   <= CUBE_TOL_M * CUBE_XYZ_SCALE)
+                    info = {'success': float(reached)}
+                    done = done or reached
             succ.append(float(info.get('success', 0.0)))
         r_obs, r_v, r_ep = np.stack(r_obs), np.stack(r_v), np.asarray(r_ep)
         extra = []
@@ -396,10 +469,11 @@ def run(cfg):
         teacher_success[t] = float(np.mean(succ))
         print(f'task {t}: {n_data} dataset labels, {r_obs.shape[0]} rollout states over {n_roll} episodes, '
               f'teacher rollout success {teacher_success[t]:.3f} ({time.time() - t_start:.0f} s)', flush=True)
-    if labels_out and not labels_in:
+    if labels_out and set(all_tasks) - have:
         os.makedirs(os.path.dirname(os.path.abspath(labels_out)), exist_ok=True)
-        np.savez_compressed(labels_out, **{f't{t}_{k}': v for t in all_tasks for k, v in data[t].items()},
-                            **{f't{t}_desc': per_task[t]['desc'] for t in all_tasks})
+        np.savez_compressed(labels_out, **{f't{t}_{k}': v for t in all_tasks for k, v in data[t].items()
+                                           if t not in have},
+                            **{f't{t}_desc': per_task[t]['desc'] for t in all_tasks if t not in have})
         print('labels ->', labels_out, flush=True)
 
     # ---------------- train + eval
@@ -460,12 +534,14 @@ def run(cfg):
                            'n_layers': int(cfg.get('n_layers', 2)), 'eval_episodes': n_eval, 'eval_seed': eval_seed,
                            'descriptor': descriptor, 'weight_decay': float(cfg.get('weight_decay', 0.0)),
                            'early_stop': bool(cfg.get('early_stop', False)), 'labels_in': labels_in},
-              'teacher_rollout_success': teacher_success, 'students': {}}
+              'teacher_rollout_success': teacher_success, 'random_tasks': random_info, 'students': {}}
     plans = [('in_task', tasks, tasks)] if in_task else []
+    if random_tasks:                              # train on the random regions, test on the real tasks
+        plans.append(('random_only', random_tasks, tasks))
     if holdout is not None and not (loo and holdout in tasks):
         plans.append(('holdout', [t for t in tasks if t != holdout], [holdout]))
-    if loo:                                       # leave-one-out over the training tasks
-        plans += [(f'loo_{t}', [u for u in tasks if u != t], [t]) for t in tasks]
+    if loo:                                       # leave-one-out over the training tasks (+ the random ones)
+        plans += [(f'loo_{t}', random_tasks + [u for u in tasks if u != t], [t]) for t in tasks]
     ob_dim = per_task[all_tasks[0]]['obs_pool'].shape[1]
     table = np.stack([per_task[t]['goal_set'] for t in all_tasks]) if descriptor == 'set' else None
     for name, tr_tasks, ev_tasks in plans:

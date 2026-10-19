@@ -93,3 +93,13 @@ def test_early_stop_keeps_the_best_validation_step():
     _, curve, stop, _ = train_student(x, v, x[:32], v[:32], cfg, jax.random.PRNGKey(0))
     best = min(curve, key=lambda r: r['val_nll'])
     assert stop['best_step'] == best['step'] and abs(stop['best_val_nll'] - best['val_nll']) < 1e-6
+
+
+def test_region_rewards_tolerance_and_radius_growth():
+    from tools.distill_bon_student import CUBE_POS, region_rewards
+    nxt = np.zeros((100, 28), np.float32)
+    nxt[:, CUBE_POS.start] = np.linspace(0, 5, 100)          # cube x from 0 to 5 obs units
+    r, radius, n_in = region_rewards(nxt, np.zeros(3), k=4)
+    assert radius == 0.4 and n_in == int((np.linspace(0, 5, 100) <= 0.4).sum()) and r.sum() == n_in
+    r, radius, n_in = region_rewards(nxt, np.array([10.0, 0, 0]), k=4)   # nothing within 0.4: grow
+    assert n_in == 0 and r.sum() == 4 and np.isclose(radius, 10 - np.linspace(0, 5, 100)[-4])
