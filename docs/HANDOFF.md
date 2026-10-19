@@ -79,7 +79,8 @@ norm). Seeds 1 and 2 reach 250k at about 02:30 / 02:45 CEST; the watcher submits
 aws parity (aws 22-28-00Z started all fifteen sd000 cells on eight L4s; reports `runs/ri/aws/`), aws / kisski:
 ri_actor task 1 0.090 / 0.122, task 2 0.074 / 0.080, task 3 0.234 / 0.228, task 4 0.098 / 0.112, task 5
 0.036 / 0.034; ri_gpi task 1 0.682 / 0.682, task 2 0.354 / 0.360, task 3 0.660 / 0.638; ri_gpi_reward task 1
-0.192 / 0.194, task 2 0.434 / 0.424, task 3 0.580 / 0.528. Every pair within 0.05. aws's note: the test-time
+0.192 / 0.194, task 2 0.434 / 0.424, task 3 0.580 / 0.528. Every pair within 0.05. aws complete at 00:57 (fifteen cells): ri_gpi 0.422 (0.682 / 0.354 / 0.660 / 0.322 /
+0.090) against kisski 0.424; ri_gpi_reward 0.285 against 0.272; ri_actor 0.106 against 0.115. aws's note: the test-time
 ridge solve needs one 1.6 GB allocation per eval worker, so on a 24 GB L4 the memory fraction had to be 0.9.
 
 luis 22-19-09Z: the luis login node is unreachable since 22:14Z; seeds 8792193-8792195 last seen pending; the
