@@ -54,6 +54,26 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 17:35 CEST, aws: bank gate complete, six fullness lines; under best-of-64 rollouts tv 0.65 / 0.71 against a 0.17 floor; eval parity 0.388 against 0.398
+
+aws 15-22-54Z (sd000 250k; JSONs `runs/measure_fullness/`, `runs/pool/aws/`):
+
+| rollout | probe | reference | full-state tv | floor | uniform | Spearman | H(p) | H(rho) | cube-xyz tv | uniform |
+|---|---|---|---|---|---|---|---|---|---|---|
+| BC | best-of-64 | pool | 0.510 | 0.354 | 0.932 | 0.36 | 4.29 | 3.10 | 0.911 | 0.908 |
+| BC | BC | pool | 0.451 | 0.382 | 0.925 | 0.41 | 4.34 | 3.38 | 0.907 | 0.887 |
+| BC | best-of-64 | random | 0.597 | 0.345 | 0.935 | 0.33 | 4.25 | 3.06 | 0.937 | 0.905 |
+| BC | BC | random | 0.556 | 0.368 | 0.927 | 0.36 | 4.32 | 3.35 | 0.920 | 0.884 |
+| best-of-64 | best-of-64 | pool | 0.652 | 0.162 | 0.971 | 0.23 | 4.20 | 2.30 | 0.949 | 0.979 |
+| best-of-64 | best-of-64 | random | 0.707 | 0.178 | 0.970 | 0.20 | 4.18 | 2.40 | 0.974 | 0.980 |
+
+Under its own policy (BC) the measure is 0.07 to 0.19 above the floor in full-state cells. Under the deployed
+best-of-64 policy it is 0.49 to 0.53 above a floor of 0.17 (best-of-64 is near-deterministic, H(rho) 2.3), so
+the measure fits the policy it was trained for and not the deployed one. Cube-position cells sit at the uniform
+level in all six lines (Spearman 0.00 to 0.07). Eval parity on task 3: aws 0.388 against kisski 0.398,
+pool_hash_checked true. aws moves to the goal arms (fullness first) as their 250k checkpoints reach HF, then the
+nf2 antmaze parity line.
+
 ### 17:20 CEST, antmaze complete at 250k for both arms and 500k for the actor recipe: A 0.063 / 0.070, nf2 0.101 ± 0.162, BC 0.072
 
 kisski eval500 hgoal_each, 500 episodes per task (jobs 2525766 to 2525768, 2525794 and two earlier 500k jobs,
