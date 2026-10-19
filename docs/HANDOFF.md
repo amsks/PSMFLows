@@ -18,7 +18,7 @@ hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RES
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
 Branch: `feat/inversion-integration` · Machine: `kisski` (GWDG, SLURM/H100) · prior: `midi-01` (UT CS)
-Date: **2026-10-19** (latest) · prior: 2026-10-17, 2026-10-15, 2026-10-07, 2026-10-05, 2026-09-23, 2026-09-17, 2026-09-16, 2026-09-15, 2026-09-14, 2026-09-11, 2026-09-10, 2026-09-09, 2026-09-08, 2026-09-07, 2026-09-06, 2026-09-05, 2026-09-04, 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+Date: **2026-10-20** (latest) · prior: 2026-10-19, 2026-10-17, 2026-10-15, 2026-10-07, 2026-10-05, 2026-09-23, 2026-09-17, 2026-09-16, 2026-09-15, 2026-09-14, 2026-09-11, 2026-09-10, 2026-09-09, 2026-09-08, 2026-09-07, 2026-09-06, 2026-09-05, 2026-09-04, 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
 
 ---
 
@@ -53,6 +53,46 @@ space does not interpolate). If the 500-episode numbers hold, this is the first 
 best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply to luis: wait for the 500-episode
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
+
+### 00:15 CEST 10-20, reward-index arm: kisski sd000 at 250k, index gate passed (proxy correlation 0.63), evals queued; nf2 antmaze 500k 0.034 ± 0.069
+
+Reward-index arm `psmgoal_ri_fbc3_cube` (design `docs/design/2026-10-19-reward-index.md`; six-hour request of
+18:15 CEST). kisski sd000 (2525834) completed 250k at 23:50 CEST, 4 h 14 min, exit 0; sd001 (2525835) started
+22:16 and sd002 (2525836) 22:29, both on gpu007, at 100k+ and 50k+ at 00:10. luis's seeds 8792193-8792195
+have had no post since 16:49Z (pending at that time). Training signals (train.csv, every 25k):
+
+| step | index_proxy_corr sd0 / sd1 / sd2 | measure_p_own_next sd0 / sd1 / sd2 | index_cov_trace sd0 | index_hindsight_frac sd0 |
+|---|---|---|---|---|
+| 25k | 0.660 / 0.667 / 0.644 | 0.367 / 0.377 / 0.356 | 0.079 | 0.52 |
+| 50k | 0.654 / 0.646 / 0.629 | 0.376 / 0.377 / 0.395 | 0.027 | 0.51 |
+| 100k | 0.632 / 0.639 / - | 0.329 / 0.408 / - | 0.010 | 0.49 |
+| 150k | 0.651 / - / - | 0.285 / - / - | 0.0046 | 0.55 |
+| 200k | 0.630 / - / - | 0.290 / - / - | 0.0024 | 0.52 |
+| 250k | 0.632 / - / - | 0.275 / - / - | 0.0015 | 0.48 |
+
+Against the gates stated at 18:40: the correlation between the index's reward view and the kernel reward is
+above 0.3 at 100k and above 0.5 at 250k (passed, 0.63 at both); the own-next-state mass was expected 0.3 to 0.5
+and sd0 drifts to 0.27 by 250k; index_w_norm 11.31 throughout. Not in the gates: index_cov_trace (the spread of
+the projected feature over the anchors) falls from 0.08 to 0.0015 over the run, a 50x shrink, so the ridge
+solve is increasingly set by its lambda term; the correlation is scale-free and does not show this. In-loop
+50-episode task-2 eval under the actor at the ridge w: sd0 0.12 / 0.02 / 0.06 / 0.08 / 0.12 at 50k to 250k (BC
+0.11); the in-loop line of critic A at the same steps was 0.16 / 0.04 / 0.08 / 0.08 / 0.10, so the in-loop line
+says nothing about the best-of-64 readout.
+
+Evals: `scripts/campaign_2026-10/ri_eval_watcher_cube.sh` (no --nice) submitted the three packed five-task
+readouts of sd000 250k at 00:11 CEST, jobs 2525848 (ri_actor: `agent.acting=distill agent.eval_redistill=false`),
+2525849 (ri_gpi: `agent.acting=gpi`), 2525850 (ri_gpi_reward: `agent.acting=gpi agent.ridge_score=reward`),
+coef_source ridge and ridge_score goal from flags.json; pending on priority behind about 75 jobs. sd1/sd2 follow
+at their 250k (about 02:30 / 02:45 CEST). sd000 250k checkpoint and flags on HF
+`runs/psmgoal_ri_fbc3_cube/sd000_s_2525834.0.20261019_193530/`; kisski post 22-12-38Z asks luis for the H200
+queue state and offers luis the three readouts on the uploaded checkpoint, and gives aws the override strings for
+its sd000 task-2 parity cells. Expectation unchanged: best-of-64 at the ridge w 0.70 to 0.80, actor within 0.10,
+reward readout within 0.05, failure line 0.30.
+
+nf2 antmaze 500k (`psmgoal_ja_nf2_antmaze`, hgoal_each, five tasks, 500 episodes): sd0 0.061 (0.006 / 0.294 /
+0.000 / 0.000 / 0.006), sd1 0.036 (0.056 / 0.094 / 0.026 / 0.000 / 0.002), sd2 0.006 (0.022 / 0.008 / 0 / 0 /
+0); mean 0.034 ± 0.069. BC control 0.072; nf2 250k 0.101 ± 0.162; actor recipe 500k 0.070 ± 0.103. Training
+to 500k moves nf2 antmaze down by 0.07, within the seed spread. Antmaze is closed at BC level for both arms.
 
 ### 19:15 CEST, aws parity on the pool goal arms and nf2 antmaze; aws pool evals stopped
 
