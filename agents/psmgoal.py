@@ -415,6 +415,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         if measure_loss == "pool":
             # the pool REPLACES the candidate set; mixing it with the rows' future states is not defined
             assert norm_future_k == 0, "measure_loss=pool replaces the candidate set by the pool: needs norm_future_k=0"
+            assert config.get("bootstrap_source", "actor") != "argmax", \
+                "measure_loss=pool: the argmax bootstrap scores draws over the batch's next states, not the pool"
             assert pool_obs is not None and pool_indices is not None, \
                 "measure_loss=pool needs the reference pool (create(..., pool_obs=, pool_indices=))"
             pool_obs = np.asarray(pool_obs, np.float32)

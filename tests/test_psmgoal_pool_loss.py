@@ -75,7 +75,7 @@ def test_pool_loss_matches_softmax_loss_when_pool_is_the_batch_next_states():
     l_soft, _ = soft.measure_loss(soft.basis.params, soft.w_star.params, batch, z, u_soft)
     l_pool, info = pool.measure_loss(pool.basis.params, pool.w_star.params, batch, z, u_pool)
     np.testing.assert_allclose(float(l_pool), float(l_soft), rtol=1e-5, atol=1e-6)
-    assert np.isclose(float(info["measure_p_anchor"]), float(info["measure_p_anchor"]))
+    assert 0.0 < float(info["measure_p_anchor"]) < 1.0 and np.isfinite(float(info["pool_u_tv"]))
 
 
 def test_pool_td_loss_target_rows_sum_to_one_and_anchor_gets_one_minus_gamma_when_target_is_flat():

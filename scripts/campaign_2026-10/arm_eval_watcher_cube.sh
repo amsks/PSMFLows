@@ -21,6 +21,7 @@ MARK=$PSM_DATA/gc_scripts/submitted_arm_${ENVKEY:-cube}; mkdir -p "$MARK" "$PSM_
 declare -A OV=(
   [hgoal_each]="agent.coef_source=hgoal_each agent.acting=gpi"
   [actor_rel]="agent.acting=distill agent.eval_redistill=false agent.eval_goal_source=relabel"
+  [pool_reward]="agent.coef_source=pool_reward agent.acting=gpi"
 )
 n_arms=$(wc -w <<<"$ARMS"); n_steps=$(wc -w <<<"$STEPS"); n_tags=$(wc -w <<<"$READOUTS")
 TOTAL=$((n_arms * SEEDS_N * n_steps * n_tags))
