@@ -28,7 +28,8 @@ the repo config sets 10, which overrides this tool's 500 (the 10-17 run evaluate
 Options added 2026-10-19 (kisski 2026-10-19T00-42-34Z): +weight_decay (AdamW) and +early_stop (keep the
 parameters at the lowest validation NLL); +descriptor=set replaces the mean descriptor by a
 permutation-invariant encoder over the 32 goal states [g, h(g)] (per-goal MLP, then the mean);
-+labels_in reuses a previous run's labels npz instead of re-running the teacher.
++labels_in reuses a previous run's labels npz instead of re-running the teacher. +student_out=<dir>
+saves each student under <dir>/<student name>/ (params, standardisation, config, NLL curve, eval JSONs).
 
 Run (GPU):
   .venv/bin/python tools/distill_bon_student.py agent=psmgoal env_name=cube-single-play-singletask-v0 \\
@@ -183,7 +184,9 @@ def train_student(x, v, x_val, v_val, cfg, key, ob_dim=None, set_table=None, set
         mu, raw = net.apply(params, norm(xb))
         return mu, tril_from_raw(raw, d)
 
-    return jax.jit(apply), curve, stop
+    saved = {'params': params, 'x_mean': x_mean, 'x_std': x_std,
+             'set_table': None if set_table is None else np.asarray(set_table)}
+    return jax.jit(apply), curve, stop, saved
 
 
 class StudentActor:
@@ -205,6 +208,42 @@ class StudentActor:
 
     def sample_actions(self, observations, seed=None, temperature=0):
         return self._act(observations, seed)
+
+
+def save_student(out_dir, saved, report, name, curve, episodes, descs, cfg):
+    """Persist one student so its numbers reproduce from files: params (flax msgpack), the input
+    standardisation and descriptors (npz), the config and command line (json), the NLL curve (csv) and
+    one eval JSON per (task, acting mode) with per-episode success."""
+    import csv
+
+    from flax import serialization
+    from omegaconf import OmegaConf
+
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, 'params.msgpack'), 'wb') as f:
+        f.write(serialization.to_bytes(saved['params']))
+    arrays = {'x_mean': saved['x_mean'], 'x_std': saved['x_std']}
+    arrays.update({f'desc_task{t}': d for t, d in descs.items()})
+    if saved['set_table'] is not None:
+        arrays['set_table'] = saved['set_table']
+    np.savez(os.path.join(out_dir, 'standardisation.npz'), **arrays)
+    st = report['students'][name]
+    with open(os.path.join(out_dir, 'config.json'), 'w') as f:
+        json.dump({'student': name, 'argv': sys.argv, 'cfg': OmegaConf.to_container(cfg, resolve=True),
+                   'teacher': report['teacher'], 'restore_epoch': report['restore_epoch'],
+                   'settings': report['settings'], 'train_tasks': st['train_tasks'], 'eval_tasks': st['eval_tasks'],
+                   'stop': st['stop'], 'success': st['success'], 'success_mean': st['success_mean']}, f, indent=2)
+    keys = sorted({k for r in curve for k in r})
+    with open(os.path.join(out_dir, 'nll_curve.csv'), 'w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=keys)
+        w.writeheader()
+        w.writerows(curve)
+    for (t, mode), per_ep in episodes.items():
+        with open(os.path.join(out_dir, f'eval_task{t}_{mode}.json'), 'w') as f:
+            json.dump({'student': name, 'task': t, 'acting': mode, 'num_episodes': len(per_ep),
+                       'success': float(np.mean(per_ep)), 'eval_seed': report['settings']['eval_seed'],
+                       'per_episode_success': per_ep}, f)
+    print(f'student {name} -> {out_dir}', flush=True)
 
 
 # ------------------------------------------------------------------ teacher
@@ -270,6 +309,7 @@ def run(cfg):
     descriptor = str(cfg.get('descriptor', 'mean'))
     assert descriptor in ('mean', 'set'), 'descriptor must be mean | set'
     in_task, loo = bool(cfg.get('in_task', True)), bool(cfg.get('loo', False))
+    student_out = cfg.get('student_out', None)
     all_tasks = sorted(set(tasks) | ({holdout} if holdout else set()))
 
     config, merged, agents = load_teacher(cfg)
@@ -395,7 +435,7 @@ def run(cfg):
                       'n': int(obs.shape[0])}
         return out
 
-    def eval_student(apply_fn, task_list):
+    def eval_student(apply_fn, task_list, episodes):
         res = {}
         for t in task_list:
             res[t] = {}
@@ -405,6 +445,7 @@ def run(cfg):
                                           num_eval_episodes=n_eval, num_video_episodes=0, seed=eval_seed)
                 per_ep = [float(np.max(np.asarray(tr['info'][-1].get('success', 0.0)))) for tr in trajs]
                 res[t][mode] = float(np.mean(per_ep))
+                episodes[(t, mode)] = per_ep
                 print(f'  eval task {t} {mode}: {res[t][mode]:.3f} over {len(per_ep)} episodes '
                       f'({time.time() - t_start:.0f} s)', flush=True)
         return res
@@ -430,17 +471,21 @@ def run(cfg):
     for name, tr_tasks, ev_tasks in plans:
         x, v, xv, vv = build_xy(tr_tasks)
         print(f'=== student {name}: train tasks {tr_tasks} ({x.shape[0]} rows), eval tasks {ev_tasks}', flush=True)
-        apply_fn, curve, stop = train_student(x, v, xv, vv, cfg, jax.random.PRNGKey(seed + 7), ob_dim=ob_dim,
+        apply_fn, curve, stop, saved = train_student(x, v, xv, vv, cfg, jax.random.PRNGKey(seed + 7), ob_dim=ob_dim,
                                               set_table=table,
                                               set_train_rows=[all_tasks.index(t) for t in tr_tasks])
         nll = held_nll(apply_fn, ev_tasks)
-        succ = eval_student(apply_fn, ev_tasks)
+        episodes = {}
+        succ = eval_student(apply_fn, ev_tasks, episodes)
         report['students'][name] = {
             'train_tasks': tr_tasks, 'eval_tasks': ev_tasks, 'n_train_rows': int(x.shape[0]), 'curve': curve,
             'stop': stop, 'val_nll': nll, 'success': succ,
             'success_mean': {m: float(np.mean([succ[t][m] for t in ev_tasks])) for m in ('sample', 'mode')},
         }
         print(f'student {name}: success {report["students"][name]["success_mean"]}', flush=True)
+        if student_out:
+            save_student(os.path.join(str(student_out), name), saved, report, name, curve, episodes,
+                         {t: per_task[t]['desc'] for t in all_tasks}, cfg)
         with open(cfg.report_out, 'w') as f:          # persist after each student
             json.dump(report, f, indent=2)
     report['wall_seconds'] = round(time.time() - t_start, 1)

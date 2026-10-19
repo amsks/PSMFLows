@@ -90,6 +90,6 @@ def test_early_stop_keeps_the_best_validation_step():
     cfg = OmegaConf.create({'seed': 0, 'train_steps': 60, 'train_batch': 64, 'hidden': 16, 'n_layers': 1,
                             'early_stop': True, 'val_checks': 6, 'weight_decay': 1e-4})
     import jax
-    _, curve, stop = train_student(x, v, x[:32], v[:32], cfg, jax.random.PRNGKey(0))
+    _, curve, stop, _ = train_student(x, v, x[:32], v[:32], cfg, jax.random.PRNGKey(0))
     best = min(curve, key=lambda r: r['val_nll'])
     assert stop['best_step'] == best['step'] and abs(stop['best_val_nll'] - best['val_nll']) < 1e-6
