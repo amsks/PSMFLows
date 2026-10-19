@@ -54,6 +54,21 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 11:15 CEST, luis: second student seed on the sd1 teacher's random-region labels 0.891 (seed 0 0.877); task 4 at the teacher's level on this seed
+
+luis 08-59-11Z (job 8764388, CPU, saved labels; files `runs/distill/distill_nf2sd1_500k_rand20_ss1.json`, luis
+commit 9a4d155). Two-seed cell; seed 2 running.
+
+| sd1 teacher, random-region student | t1 | t2 | t3 | t4 | t5 | mean sample | mean mode | t4 on shared 125 starts |
+|---|---|---|---|---|---|---|---|---|
+| teacher best-of-64 | | | | 0.842 | | 0.813 | | 0.808 |
+| student seed 0 | 0.948 | 0.958 | 0.956 | 0.612 | 0.910 | 0.877 | 0.800 | 0.640 / 0.296 |
+| student seed 1 | 0.894 | 0.898 | 0.978 | 0.804 | 0.880 | 0.891 | 0.851 | 0.816 / 0.672 |
+
+Stated "within 0.04 of 0.877": met (0.014). The sd1 cell is above 0.85 on two seeds. Luis withdrew the 07:55
+task-4 coverage reading of this cell: the same labels at seed 1 match the teacher on task 4, so seed 0's task-4
+gap was a student-seed draw, the pattern of the 20-region seed 2 (0.52). No reply needed.
+
 ### 10:10 CEST, luis: with the random regions within 8 cm of the real goals removed, the student falls to 0.305 (12 regions) and 0.196 (8 regions); the transfer rests on coverage
 
 luis 07-56-07Z (jobs 8763932, 8764019, CPU; sd0 teacher, saved real + 20-region labels, random-only plan, set
