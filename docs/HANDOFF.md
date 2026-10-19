@@ -54,6 +54,45 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 13:00 CEST, luis: three student seeds per cell; random-region students 0.907 / 0.877 / 0.867 against teachers 0.912 / 0.813 / 0.866; the region-exclusion controls 0.455 ± 0.384 and 0.293 ± 0.209
+
+luis 10-48-48Z and the correction 10-49-00Z (jobs 8766455 to 8766457, 8766459 to 8766462; random-only plan, set
+student with early stopping, 500 episodes per task at eval seed 0; 95% t interval at n = 3; files in
+`runs/distill/`, luis commit c3f0ac2). Every cell below has student seeds 0, 1, 2.
+
+| teacher (nf2 500k) | teacher best-of-64 | student seeds 0 / 1 / 2 | student mean ± 95% CI | SD | mode mean ± 95% CI |
+|---|---|---|---|---|---|
+| sd0 | 0.912 | 0.904 / 0.957 / 0.860 | 0.907 ± 0.121 | 0.049 | 0.903 ± 0.155 |
+| sd1 | 0.813 | 0.877 / 0.891 / 0.864 | 0.877 ± 0.033 | 0.013 | 0.829 ± 0.064 |
+| sd2 | 0.866 | 0.886 / 0.842 / 0.873 | 0.867 ± 0.055 | 0.022 | 0.821 ± 0.100 |
+| mean over teachers | 0.864 | | 0.884 | | 0.851 |
+
+Against the expectations stated 09:25: each three-seed mean within 0.05 of its teacher or above (sd0 -0.005, sd1
++0.064, sd2 +0.001): met. The ordering by teacher seed does not survive (teachers sd0 > sd2 > sd1, students sd0 >
+sd1 > sd2; student means span 0.040 against 0.099 for the teachers): met. The sd1 three-seed mean above 0.85
+(0.877, lower CI bound 0.844): met on the sample readout; on the mode readout 0.829, 0.016 over the teacher.
+Task 4 on the shared 125 start states: sd1 teacher 0.808, students 0.640 / 0.816 / 0.656; sd2 teacher 0.728,
+students 0.704 / 0.624 / 0.720 (gaps 0.024 / 0.104 / 0.008 after luis's correction).
+
+Region-exclusion controls on the sd0 teacher, three student seeds each:
+
+| student | seeds 0 / 1 / 2 | mean ± 95% CI | SD | mode mean ± 95% CI |
+|---|---|---|---|---|
+| all 20 regions | 0.904 / 0.957 / 0.860 | 0.907 ± 0.121 | 0.049 | 0.903 ± 0.155 |
+| A: 12 regions more than 8 cm from every real goal | 0.305 / 0.446 / 0.614 | 0.455 ± 0.384 | 0.155 | 0.423 ± 0.416 |
+| A': 8 regions, sparse also dropped | 0.196 / 0.329 / 0.352 | 0.293 ± 0.209 | 0.084 | 0.268 ± 0.198 |
+| BC control | | 0.111 | | |
+
+Per task (sample), A seeds 0 / 1 / 2: t1 0.176 / 0.474 / 0.576, t2 0.478 / 0.332 / 0.454, t3 0.016 / 0.030 / 0.392,
+t4 0.302 / 0.792 / 0.904, t5 0.552 / 0.604 / 0.742; A': t1 0.008 / 0.140 / 0.456, t2 0.102 / 0.410 / 0.278, t3
+0.000 / 0.012 / 0.104, t4 0.774 / 0.856 / 0.850, t5 0.098 / 0.226 / 0.074. Nearest kept anchor (3d, cm) 13.2 /
+8.0 / 10.2 / 8.5 / 8.6. The A and A' upper CI bounds (0.839, 0.502) sit below 0.85 and below the 20-region lower
+bound (0.786): the coverage reading holds on three seeds. The seed SD triples without the near regions (0.155
+against 0.049). Task 4 transfers in five of six A / A' students (0.79 to 0.90, teacher 0.872 on matched starts) at
+8.5 cm; task 3 fails in every seed at 10.2 cm; task 2 at 8.0 cm sits at 0.10 to 0.48, so anchor distance alone
+does not order the tasks. A against A' is 0.16 on the mean, inside both CIs: no label-quality effect read.
+Remaining single-seed cell: the 50-region student (seeds 1 and 2 running). No reply needed.
+
 ### 11:15 CEST, luis: second student seed on the sd1 teacher's random-region labels 0.891 (seed 0 0.877); task 4 at the teacher's level on this seed
 
 luis 08-59-11Z (job 8764388, CPU, saved labels; files `runs/distill/distill_nf2sd1_500k_rand20_ss1.json`, luis
