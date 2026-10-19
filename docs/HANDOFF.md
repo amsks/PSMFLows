@@ -54,6 +54,42 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 00:50 CEST 10-20, reward-index sd000 250k five-task: best-of-64 at the ridge w 0.424, by expected reward 0.272, actor at w 0.115 (BC 0.111; critic A sd0 0.818); aws parity within 0.05 on 11 cells
+
+The kisski packed jobs 2525848-2525850 started at submission (00:11 CEST) and finished by 00:44; the queue did
+not hold them. Five tasks, 500 episodes each, sd000 250k, coef_source ridge from flags.json:
+
+| readout | task 1 | task 2 | task 3 | task 4 | task 5 | five-task |
+|---|---|---|---|---|---|---|
+| ri_gpi (best-of-64 by the goal mass at w) | 0.682 | 0.360 | 0.638 | 0.348 | 0.092 | 0.424 |
+| ri_gpi_reward (best-of-64 by expected relabel reward) | 0.194 | 0.424 | 0.528 | 0.132 | 0.084 | 0.272 |
+| ri_actor (the flowbc actor at w) | 0.122 | 0.080 | 0.228 | 0.112 | 0.034 | 0.115 |
+| critic A sd000 250k, hgoal_each | 0.788 | 0.868 | 0.926 | 0.852 | 0.658 | 0.818 |
+| pool goal arm sd000 250k, hgoal_each | 0.270 | 0.592 | 0.266 | 0.038 | 0.268 | 0.287 |
+| BC control | | | | | | 0.111 |
+
+Against the expectation stated at 18:40 (best-of-64 at w 0.70 to 0.80, actor within 0.10 of it, reward readout
+within 0.05, failure line 0.30): the best-of-64 readout is 0.28 to 0.38 below the band and 0.12 above the failure
+line (one seed); the actor at w is at BC, 0.31 below the best-of-64; the reward readout is 0.15 below the goal
+readout. Per task, the reward index keeps the shape of critic A on tasks 1 and 3 (0.68 / 0.64 against 0.79 /
+0.93) and loses most of tasks 2, 4 and 5. The actor at the index does not act better than the frozen flow,
+the same reading as every actor-at-w arm since 10-05 (fb_bc_coeff 3 keeps the delta at 0.03 of the latent
+norm). Seeds 1 and 2 reach 250k at about 02:30 / 02:45 CEST; the watcher submits the same three readouts.
+
+aws parity (aws 22-28-00Z started all fifteen sd000 cells on eight L4s; reports `runs/ri/aws/`), aws / kisski:
+ri_actor task 1 0.090 / 0.122, task 2 0.074 / 0.080, task 3 0.234 / 0.228, task 4 0.098 / 0.112, task 5
+0.036 / 0.034; ri_gpi task 1 0.682 / 0.682, task 2 0.354 / 0.360, task 3 0.660 / 0.638; ri_gpi_reward task 1
+0.192 / 0.194, task 2 0.434 / 0.424, task 3 0.580 / 0.528. Every pair within 0.05. aws's note: the test-time
+ridge solve needs one 1.6 GB allocation per eval worker, so on a 24 GB L4 the memory fraction had to be 0.9.
+
+luis 22-19-09Z: the luis login node is unreachable since 22:14Z; seeds 8792193-8792195 last seen pending; the
+luis seeds are a replication line; the rand50 leave-one-out students (8765614, 8766458) were running before the
+outage. Submitted on kisski 00:48: ri_gpi of sd000 at 50k / 100k / 150k / 200k (2525851-2525854), to see
+whether the best-of-64 readout moves with training while the index feature's spread over the anchors shrinks
+(index_cov_trace 0.08 at 25k to 0.0015 at 250k). Expected: if the shrink costs the readout, 100k scores above
+250k by 0.1 or more; if the readout is flat within 0.05 across the ladder, the 0.42 level is set at the start.
+Mailbox: kisski 22-45-28Z carries the table and the parity cells.
+
 ### 00:15 CEST 10-20, reward-index arm: kisski sd000 at 250k, index gate passed (proxy correlation 0.63), evals queued; nf2 antmaze 500k 0.034 ± 0.069
 
 Reward-index arm `psmgoal_ri_fbc3_cube` (design `docs/design/2026-10-19-reward-index.md`; six-hour request of

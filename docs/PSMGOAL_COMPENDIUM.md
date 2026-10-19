@@ -1316,7 +1316,7 @@ reads, is not resolved. The pool measure is a diagnostic result in this form. Th
 not built: weight the cube position in the distance that defines the anchor and the cells. The 500k pool
 checkpoints are evaluated for the record only.
 
-### 6.5 The reward index (2026-10-19, `docs/design/2026-10-19-reward-index.md`, launched)
+### 6.5 The reward index (2026-10-19, `docs/design/2026-10-19-reward-index.md`; sd000 250k best-of-64 0.424, below the 0.70 to 0.80 band)
 
 Density FB's second arm, `measure_density_z`: the critic's task index is a vector solved from reward samples
 (centred ridge fit of the reward on the state tower, at training on hindsight kernel rewards, at test on the
@@ -1330,6 +1330,15 @@ the batch's next states (half random), A's softmax loss, the flowbc actor at w w
 readouts (actor at w; best-of-64 by the goal mass at w; best-of-64 by the expected relabel reward). Arm
 `psmgoal_ri_fbc3_cube`, 3 seeds, 250k, luis (H200) and kisski. Stated before results: best-of-64 at w 0.70 to
 0.80, actor within 0.10, failure line 0.30; gate `index_proxy_corr` above 0.3 by 100k.
+Result 2026-10-20 00:50, sd000 250k, five tasks, 500 episodes: best-of-64 by the goal mass at the ridge w
+0.424 (0.682 / 0.360 / 0.638 / 0.348 / 0.092), best-of-64 by the expected relabel reward 0.272, the actor at w
+0.115 (BC 0.111); critic A sd000 250k 0.818. The index gate passed (proxy correlation 0.63 at every 25k point)
+while the spread of the index feature over the anchors fell 50x (index_cov_trace 0.08 to 0.0015). The
+best-of-64 readout missed the 0.70 to 0.80 band by 0.28 and sits 0.12 above the failure line; tasks 1 and 3
+keep A's shape, tasks 2, 4, 5 lose most of it; the actor at the index acts at BC, as every actor-at-w arm
+since 10-05. aws reproduces the kisski cells within 0.05. Pending: seeds 1-2 at 250k (about 03:00 CEST), the
+sd000 ladder 50k to 200k under the best-of-64 readout (does the readout fall as the feature spread shrinks),
+luis's H200 seeds as replication once the luis login node returns.
 
 ## 7. Open questions and the next arms, with predictions
 
