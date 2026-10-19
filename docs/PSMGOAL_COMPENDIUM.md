@@ -1363,14 +1363,27 @@ each live reading. Numbers are what to compare against.
    encoder, early stopping) and NO real task in training: 0.904 sample / 0.920 mode on the five
    real tasks (0.924 / 0.830 / 0.984 / 0.880 / 0.902), calibrated (validation NLL at the prior),
    teacher 0.912, in-task student 0.918. Real centroids lie 1.6 to 8 cm from the nearest random
-   anchor (tasks 1 and 3 within tolerance of one, 2, 4, 5 not). The deployment actor generalises
-   across goal regions; the clean control that excludes random regions near the real goals and a
-   50-region run are in flight. Students of the nf2 seed 1 and 2 teachers (same recipe, in-task):
-   0.757 and 0.820 against teachers 0.813 and 0.866, 0.05 below, one seed each; the sd0 student
-   is the only one at its teacher. Four training tasks do not give a descriptor space to interpolate in; the
-   next arm trains on 20 random goal-set tasks and tests on the five real ones (expected 0.3 to
-   0.7). This closes the "actor fails at inference" item for in-task deployment: the failure was
+   anchor (tasks 1 and 3 within tolerance of one, 2, 4, 5 not). Student-seed spread is large: the
+   same labels at student seeds 0 / 1 / 2 give 0.904 / 0.957 / 0.860 (SD 0.049; task 4 moves 0.52 to
+   0.93 with the student seed alone, at identical validation NLL), so from 10-19 every cell is a
+   three-seed mean ± 95% CI. Three-seed random-region students (20 regions, 500 episodes) against
+   their teachers: sd0 0.907 ± 0.121 (teacher 0.912), sd1 0.877 ± 0.033 (teacher 0.813), sd2
+   0.867 ± 0.055 (teacher 0.866); mean over teachers 0.884 against 0.864; the student means span
+   0.040 where the teachers span 0.099, and the in-task students (0.918 / 0.757, 0.787 / 0.820)
+   carry the teacher's spread and more. Coverage control, sd0 teacher, three student seeds:
+   keeping only the 12 random regions more than 8 cm from every real goal gives 0.455 ± 0.384,
+   keeping the 8 of those that are not sparse gives 0.293 ± 0.209 (BC 0.111); nearest kept anchor
+   8.0 to 13.2 cm; both students reach the same held-out validation NLL on their own regions as
+   the 20-region student (6.92 to 6.99) and sit above the prior's NLL on the real tasks. So the
+   transfer rests on random regions within about 5 cm of each real goal, not on label quality (the
+   12-region and 8-region cells differ by 0.16, inside both CIs); task 4 transfers at 8.5 cm in five
+   of six of these students and task 3 fails at 10.2 cm in all six, task 2 at 8.0 cm sits at 0.10 to
+   0.48, so anchor distance alone does not order the tasks. A 50-region student scores 0.928 (one
+   seed; seeds 1 and 2 in flight); adding the four other real tasks to the random regions and
+   testing on the fifth lowers tasks 4 and 5 (50 regions: 0.924 to 0.782, 0.850 to 0.666), cause
+   open. This closes the "actor fails at inference" item for in-task deployment: the failure was
    the actor objective (critic climb with a BC penalty), not the representability of the target.
+   The zero-shot deployment actor exists at the resolution of the training regions' coverage.
 
 4. Why nf2 raised success without action dependence.
    Measurement: the per-goal share at test time along a trajectory toward the goal, for A and
