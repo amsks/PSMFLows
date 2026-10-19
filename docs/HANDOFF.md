@@ -54,6 +54,45 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 16:50 CEST, fullness of the pool bank measure (sd000 250k, BC rollouts): tv 0.45 against a 0.38 floor on the pool, in full-state terms; 0.91 against 0.49 in cube-position terms
+
+`tools/diag_measure_fullness.py` on kisski (jobs 2525816 / 2525817, 3.5 min each), bank path (`coef_source
+pool_reward`, `acting gpi`, bank_w), `+rollout_policy=bc +probe_policy=same`, 5 tasks x 2 episodes x 5 probe
+times = 50 probes, R 8 rollouts of T 100 per probe, n_ref 1024; reports
+`$PSM_DATA/logs/measure_fullness/fullness_pool_bank_sd000_250k_bc_{pool,random}.json`. tv = total variation
+between the measure's distribution over the 1024 reference states and the BC rollout occupancy at those states
+(nearest-neighbour cells); floor = split-half tv between two halves of the rollouts; uniform = tv of a uniform
+distribution to the occupancy.
+
+| critic, rollouts, reference set | nn cells | tv | floor | uniform | Spearman | p on next state | occupancy on next | H(p) | H(rho) |
+|---|---|---|---|---|---|---|---|---|---|
+| pool bank 250k, BC, the training pool | full state | **0.451** | 0.382 | 0.925 | 0.41 | 0.064 | 0.086 | 4.34 | 3.38 |
+| pool bank 250k, BC, 1024 random states | full state | **0.556** | 0.368 | 0.927 | 0.36 | 0.050 | 0.083 | 4.32 | 3.35 |
+| pool bank 250k, BC, the training pool | cube xyz | 0.907 | 0.493 | 0.887 | 0.07 | 0.009 | 0.308 | 4.34 | 3.20 |
+| pool bank 250k, BC, 1024 random states | cube xyz | 0.920 | 0.474 | 0.884 | 0.06 | 0.007 | 0.311 | 4.32 | 3.19 |
+| critic A sd000 500k (10-15, best-of-64 rollouts, random) | full state | 0.952 to 0.965 | 0.16 to 0.23 | | | 0.001 | | 6.79 | |
+| nf2 sd000 250k (10-17, best-of-64 rollouts, random) | full state | 0.894 to 0.920 | 0.20 to 0.25 | | | 0.003 to 0.004 | | 5.0 to 5.6 | |
+
+Per task (pool reference, full state) tv 0.42 / 0.47 / 0.42 / 0.47 / 0.48; the se of each mean is 0.01.
+
+Reading against `docs/design/2026-10-19-pool-measure.md`. Expected for the bank arm: tv 0.5 to 0.7 at 250k. Measured
+0.45 on the pool and 0.56 on random states, in full-state cells; the floor is 0.37 to 0.38, so the measure's
+distribution over the reference states is 0.07 to 0.19 of tv away from the BC occupancy, where critic A and nf2
+were 0.65 to 0.80 away. The pool measure is a successor measure of its own policy at pool resolution, in
+full-state terms. This is the design doc's second case: fullness succeeds (tv below 0.6) and five-task success is
+0.252, below 0.6.
+
+The cube-position rows say where the mass goes wrong for the readout. With cells defined by cube position only,
+the BC occupancy sits 0.31 on the cell of the next state (the cube seldom moves under BC) and the measure puts
+0.009 there; tv 0.91 against a 0.49 floor and a uniform tv of 0.89, Spearman 0.07. The measure's distribution
+matches the occupancy in the dimensions that dominate the full-state distance (arm pose, velocities) and does
+not match it in cube position, which is the only thing the reward reads. The pool_reward readout integrates the
+reward over the bank with these weights, so its value is near-constant in u; the 0.25 success is what best-of-64
+does with that. Next object: the state distance (and with it the anchor and the nearest-neighbour cells) should
+weight the cube position; the design doc's "readout is the next object" reading narrows to this. The same two
+lines on the goal arms (fdplus, ja) follow once their 250k evals are in. aws was asked (14-29-49Z) to run the ten
+lines; kisski's two are posted so aws can limit itself to the probe-policy and bon64 variants.
+
 ### 16:35 CEST, pool bank arm at 250k: 0.252 ± 0.063 under the pool_reward readout (expected 0.6 to 0.72; BC 0.111); aws antmaze parity 0.064 against 0.074
 
 Pool bank arm (`psmgoal_pool_bank_cube`, policy index bank, BC bootstrap, no actor; readout
