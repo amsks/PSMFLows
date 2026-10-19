@@ -54,6 +54,24 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 08:40 CEST, luis: rand50 second student seed started; the random regions nearest task 5
+
+luis 06-23-42Z: 50-region student at student seed 1 running from the saved labels (job 8765614, CPU, output
+`students_rand50_nf2sd0_500k_ss1/`). The five random regions nearest the task-5 centroid (0.076, -0.196 m):
+
+| region | in set | xy dist (cm) | anchor x / y (m) | teacher success (50 rollouts) | rollout rows |
+|---|---|---|---|---|---|
+| 134 | 50 only | 5.1 | 0.073 / -0.247 | 0.68 | 5802 |
+| 111 | 20 and 50 | 5.1 | 0.119 / -0.169 | 0.84 | 4650 |
+| 112 | 20 and 50 | 5.6 | 0.121 / -0.230 | 0.60 | 6489 |
+| 130 | 50 only | 6.4 | 0.113 / -0.249 | 0.66 | 6181 |
+| 129 | 50 only | 7.1 | 0.090 / -0.266 | 0.56 | 6739 |
+
+None sparse. The three regions the 50-region set adds near task 5 lie past the goal in -y (y -0.247 to -0.266
+against the goal's -0.196) with teacher success 0.56 to 0.68, below the 0.84 on region 111. Luis's reading: the
+student got more labels near task 5, on the far side and from weaker teacher behaviour; five rows, not a test. No
+reply needed; the seed-1 student decides whether the 0.902 to 0.850 drop is a seed draw.
+
 ### 08:35 CEST, pool bank arm at 100k: pool_u_tv 0.060 to 0.065, above the 0.05 criterion, unchanged since 50k
 
 Training-log read at 100k (the plan's first checkpoint for the action-dependence signal; bank arm, three seeds),
