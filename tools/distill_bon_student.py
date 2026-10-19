@@ -29,7 +29,8 @@ Options added 2026-10-19 (kisski 2026-10-19T00-42-34Z): +weight_decay (AdamW) an
 parameters at the lowest validation NLL); +descriptor=set replaces the mean descriptor by a
 permutation-invariant encoder over the 32 goal states [g, h(g)] (per-goal MLP, then the mean);
 +labels_in=a.npz:b.npz reuses previous runs' labels (for the tasks they hold; first file wins) instead of
-re-running the teacher.
+re-running the teacher. +student_seed (default seed) changes only the student's init and batch order.
++exclude_near_real=d drops the random regions whose anchor is within d metres of a real task's goal centroid.
 +n_random_tasks=N (with +descriptor=set) adds N random goal-region training tasks (kisski 2026-10-19T01-54-05Z):
 anchor = the cube position of a random dataset next state (seed +random_seed0 + i); the relabel batch's
 rewarding rows are the next states with the cube within the env's 0.04 m tolerance of it (the radius grows to
@@ -195,7 +196,7 @@ def train_student(x, v, x_val, v_val, cfg, key, ob_dim=None, set_table=None, set
     early = bool(cfg.get('early_stop', False))
     n_checks = int(cfg.get('val_checks', 50 if early else 20))
     has_val = x_val is not None and len(x_val) > 0
-    rng = np.random.default_rng(int(cfg.seed))
+    rng = np.random.default_rng(int(cfg.get('student_seed', cfg.seed)))
     xj, vj = jnp.asarray(x), jnp.asarray(v)
     curve, best = [], (float('inf'), params, 0)
     for i in range(steps):
@@ -327,6 +328,7 @@ def run(cfg):
 
     t_start = time.time()
     seed = int(cfg.seed)
+    student_seed = int(cfg.get('student_seed', seed))   # student init and batch order only; readout keeps seed
     tasks = parse_tasks(cfg.get('train_tasks', '1 2 3 4 5'))
     holdout = cfg.get('holdout_task', None)
     holdout = None if holdout in (None, '', 'none') else int(holdout)
@@ -534,8 +536,25 @@ def run(cfg):
                            'lr': float(cfg.get('lr', 3e-4)), 'hidden': int(cfg.get('hidden', 512)),
                            'n_layers': int(cfg.get('n_layers', 2)), 'eval_episodes': n_eval, 'eval_seed': eval_seed,
                            'descriptor': descriptor, 'weight_decay': float(cfg.get('weight_decay', 0.0)),
-                           'early_stop': bool(cfg.get('early_stop', False)), 'labels_in': labels_in},
+                           'early_stop': bool(cfg.get('early_stop', False)), 'labels_in': labels_in,
+                           'student_seed': student_seed},
               'teacher_rollout_success': teacher_success, 'random_tasks': random_info, 'students': {}}
+    # +exclude_near_real=d (metres): drop the random regions whose anchor lies within d of any real task's goal
+    # centroid (cube position), so the real goals are not covered by a nearby training region
+    exclude = cfg.get('exclude_near_real', None)
+    if random_tasks and exclude not in (None, '', 'none'):
+        cents = {t: per_task[t]['goal_set'][:, CUBE_POS].mean(0) / CUBE_XYZ_SCALE for t in tasks}
+        kept = []
+        for t in random_tasks:
+            d = {u: float(np.linalg.norm(per_task[t]['anchor'] / CUBE_XYZ_SCALE - c)) for u, c in cents.items()}
+            random_info[t]['dist_to_real_m'] = d
+            if min(d.values()) > float(exclude):
+                kept.append(t)
+        print(f'exclude_near_real={exclude} m: {len(kept)} of {len(random_tasks)} random regions kept: {kept}',
+              flush=True)
+        report['exclude_near_real_m'] = float(exclude)
+        report['random_tasks_kept'] = kept
+        random_tasks = kept
     plans = [('in_task', tasks, tasks)] if in_task else []
     if random_tasks:                              # train on the random regions, test on the real tasks
         plans.append(('random_only', random_tasks, tasks))
@@ -548,9 +567,9 @@ def run(cfg):
     for name, tr_tasks, ev_tasks in plans:
         x, v, xv, vv = build_xy(tr_tasks)
         print(f'=== student {name}: train tasks {tr_tasks} ({x.shape[0]} rows), eval tasks {ev_tasks}', flush=True)
-        apply_fn, curve, stop, saved = train_student(x, v, xv, vv, cfg, jax.random.PRNGKey(seed + 7), ob_dim=ob_dim,
-                                              set_table=table,
-                                              set_train_rows=[all_tasks.index(t) for t in tr_tasks])
+        apply_fn, curve, stop, saved = train_student(x, v, xv, vv, cfg, jax.random.PRNGKey(student_seed + 7),
+                                                     ob_dim=ob_dim, set_table=table,
+                                                     set_train_rows=[all_tasks.index(t) for t in tr_tasks])
         nll = held_nll(apply_fn, ev_tasks)
         episodes = {}
         succ = eval_student(apply_fn, ev_tasks, episodes)
