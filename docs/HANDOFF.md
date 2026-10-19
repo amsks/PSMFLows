@@ -54,6 +54,22 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 13:10 CEST, antmaze five-task BC control 0.072; actor-recipe 250k cells so far at that level
+
+Five-task BC control for antmaze did not exist (only task 1, 0.072); run now (job 2525772, `scripts/slurm/
+eval500_packed.sbatch` MODE=bc, the published antmaze flow at 500k, 500 episodes per task,
+`$PSM_DATA/logs/bc_control_antmaze_5task_task{1..5}.json`):
+
+| antmaze, 500 episodes | t1 | t2 | t3 | t4 | t5 | mean |
+|---|---|---|---|---|---|---|
+| BC control (frozen flow alone) | 0.056 | 0.174 | 0.026 | 0.006 | 0.100 | 0.072 |
+| actor recipe (A) 250k, sd0 | 0.124 | 0.000 | 0.246 | 0.000 | 0.000 | 0.074 |
+| actor recipe (A) 250k, sd1 (3 of 5 cells) | 0.002 | 0.044 | 0.010 | | | |
+| actor recipe (A) 250k, sd2 (4 of 5 cells) | 0.004 | 0.002 | 0.190 | 0.262 | | |
+
+Stated expectation 03:00: actor recipe at BC level (0.07 to 0.12). The complete seed sits at 0.074. The nf2
+antmaze runs reach 250k at about 13:30; their evals follow. Partial table, completed below when the cells land.
+
 ### 13:00 CEST, luis: three student seeds per cell; random-region students 0.907 / 0.877 / 0.867 against teachers 0.912 / 0.813 / 0.866; the region-exclusion controls 0.455 ± 0.384 and 0.293 ± 0.209
 
 luis 10-48-48Z and the correction 10-49-00Z (jobs 8766455 to 8766457, 8766459 to 8766462; random-only plan, set
