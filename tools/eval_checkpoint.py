@@ -233,7 +233,41 @@ LEGACY_AGENT_DEFAULTS = {
         "train_actor": True,
         "use_point_preimage": False,
     },
+    # psmgoal pool measure (2026-10-19): a run written before these keys existed trained the squared
+    # or softmax loss it recorded (measure_loss has been recorded since 2026-10-01; before that the
+    # only loss was squared) and drew no pool, so pool_size 0 marks "no pool" and the readout keys
+    # keep their one implemented value.
+    "psmgoal": {
+        "measure_loss": "squared",
+        "pool_size": 0,
+        "pool_seed": 0,
+        "n_bank": 1,
+    },
 }
+
+
+def build_eval_pool(train_dataset, config):
+    """psmgoal measure_loss=pool: rebuild the run's reference pool from the eval dataset exactly as
+    main.py drew it -- pool_size rows without replacement from the valid-preimage rows
+    (`preimage_valid` > 0.5; every row when the array is absent) by pool_seed
+    (utils.psm_common.draw_pool_indices) -- and assert its sha1 equals the `pool_hash` the run's
+    flags.json recorded (None or '' = nothing recorded, accepted). Returns (pool_obs (P, ob) float32:
+    the rows' next states, pool_rows (P,) int64). Pure numpy; tests/test_psmgoal_pool_reward_readout.py."""
+    from utils.flow_inversion import PREIMAGE_VALID_KEY
+    from utils.psm_common import draw_pool_indices, pool_hash
+    n = int(np.asarray(train_dataset["next_observations"]).shape[0])
+    if PREIMAGE_VALID_KEY in train_dataset:
+        valid_rows = np.nonzero(np.asarray(train_dataset[PREIMAGE_VALID_KEY])[:n] > 0.5)[0]
+    else:
+        valid_rows = np.arange(n)
+    rows = draw_pool_indices(valid_rows, int(config["pool_size"]), int(config["pool_seed"]))
+    h = pool_hash(rows)
+    recorded = config.get("pool_hash", None)
+    assert recorded in (None, "") or str(recorded) == h, (
+        f"pool_hash mismatch: the run recorded {recorded!r}, the pool rebuilt here from {len(valid_rows)} "
+        f"valid rows of {n} at pool_size={config['pool_size']} pool_seed={config['pool_seed']} hashes to {h!r} "
+        "(different dataset, preimage npz, pool_seed or pool_size than the run was trained with)")
+    return np.asarray(train_dataset["next_observations"])[rows].astype(np.float32), rows
 
 
 def merge_run_config(cli_agent, restore_path, cli_keys):
@@ -370,6 +404,11 @@ def _evaluate_shard(payload):
         for _k in aug:
             if _k.startswith("noise_preimage"):
                 train_dataset[_k] = aug[_k]
+        # The validity array is kept ASIDE for the pool rebuild below, not spliced into the eval
+        # dataset: with it present Dataset.sample would skip the invalid rows and every existing
+        # psmgoal eval's relabel batch (drawn from the global stream) would change.
+        from utils.flow_inversion import PREIMAGE_VALID_KEY
+        _preimage_valid = aug.get(PREIMAGE_VALID_KEY)
     ds = Dataset.create(**train_dataset)
     if _psmgoal_preimages:
         ds.return_preimage_noise = True
@@ -390,7 +429,23 @@ def _evaluate_shard(payload):
         config["basis_goal_states"] = np.asarray(
             train_dataset["observations"][_gidx], np.float32).tolist()
 
-    agent = agents[name].create(base_seed, ex["observations"], ex["actions"], config)
+    # psmgoal measure_loss=pool (2026-10-19): the reference pool is rebuilt from the dataset and the
+    # run's pool_seed, and its hash checked against the run's flags.json (`build_eval_pool`).
+    agent_kw = {}
+    pool_hash_checked = None
+    if name == "psmgoal" and str(config.get("measure_loss", "squared")) == "pool":
+        _pool_src = {"next_observations": train_dataset["next_observations"]}
+        if _psmgoal_preimages and _preimage_valid is not None:
+            _pool_src[PREIMAGE_VALID_KEY] = _preimage_valid
+        _pool_obs, _pool_rows = build_eval_pool(_pool_src, config)
+        agent_kw = {"pool_obs": _pool_obs, "pool_indices": _pool_rows}
+        pool_hash_checked = config.get("pool_hash") not in (None, "")
+        if idx == 0:
+            print(f"psmgoal pool measure: rebuilt {len(_pool_rows)} pool rows at pool_seed={config['pool_seed']}; "
+                  f"pool_hash {'matches the run' if pool_hash_checked else 'NOT recorded by the run (unchecked)'}",
+                  flush=True)
+
+    agent = agents[name].create(base_seed, ex["observations"], ex["actions"], config, **agent_kw)
     # psmgoal actor_kind=flowbc (2026-10-05) deploys `delta`, not the tanh-Gaussian actor.
     fresh_actor = None
     if name == "psmgoal":
@@ -471,6 +526,7 @@ def _evaluate_shard(payload):
         "infer_seconds": infer_seconds,
         "env_steps": int(sum(len(t["reward"]) for t in trajs)),
         "goal_pool_rows": goal_pool_rows,
+        "pool_hash_checked": pool_hash_checked,
     }
 
 
@@ -642,6 +698,15 @@ def main(cfg):
         "coef_source": config.get("coef_source"),
         "measure_loss": config.get("measure_loss"),
         "measure_temp": config.get("measure_temp"),
+        # psmgoal pool measure (2026-10-19): the reference pool's size, seed and recorded hash (asserted
+        # against the rebuilt pool when recorded; `pool_hash_checked` says whether it was), the bank size
+        # of the pool_reward readout and the policy bank size.
+        "pool_size": config.get("pool_size"),
+        "pool_seed": config.get("pool_seed"),
+        "pool_hash": config.get("pool_hash"),
+        "pool_hash_checked": results[0].get("pool_hash_checked"),
+        "pool_eval_size": config.get("pool_eval_size"),
+        "n_bank": config.get("n_bank"),
         "actor_input": config.get("actor_input"),
         # psmgoal joint actor heads (2026-10-05): which actor the checkpoint trained and acts
         # with, the value it climbed, its BC weight and what supplied the bootstrap move.
