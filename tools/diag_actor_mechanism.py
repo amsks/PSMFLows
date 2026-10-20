@@ -262,6 +262,10 @@ def make_fns(agent):
         K = eps.shape[0]
         obs = jnp.broadcast_to(obs1, (K, obs1.shape[-1]))
         goals = jnp.broadcast_to(goal1, (K, goal1.shape[-1]))
+        if agent._ag():
+            # advantage-guided arm: the bootstrap latent is clip(eps + ag_w_boot (mu(+1) - mu(-1))) and the
+            # shift takes delta's place; dp is the copy the caller wants read (delta_target for the TD path)
+            return agent.ag_latent(obs, goals, eps, float(agent.config['ag_w_boot']), params=dp)
         u, d = agent.flowbc_latent(obs, goals, eps, params=dp)
         return u, d
 

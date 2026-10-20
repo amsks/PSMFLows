@@ -203,3 +203,31 @@ def test_ag_pool_subset_runs_and_scores_the_same_draws():
     sub = np.asarray(jnp.stack([new.actor_value(obs, eps[k], pool[:3], goals, w_rows, new.basis.params) for k in range(4)]))
     assert np.all((sub > 0) & (sub < 1)) and np.all(np.isfinite(sub))
     assert np.corrcoef(full.ravel(), sub.ravel())[0, 1] > 0.5
+
+
+def test_diag_actor_fn_reads_the_guided_shift_from_the_given_params():
+    """tools/diag_actor_mechanism.make_fns (used by diag_bootstrap_ladder): under ag_actor the actor
+    function returns clip(eps + ag_w_boot (mu(+1) - mu(-1))) from the params it is handed, so the ladder
+    measures the TD bootstrap when handed delta_target; without ag_actor it is the flowbc latent."""
+    from tools.diag_actor_mechanism import make_fns
+
+    ag, _ = _agent(0).update(_batch())
+    obs1 = jnp.asarray(_batch(seed=5)["observations"][0])
+    goal1 = jnp.asarray(_batch(seed=5)["next_observations"][0])
+    eps = jnp.asarray(np.random.default_rng(7).standard_normal((5, DA)).astype(np.float32))
+    _, _, actor_fn, _ = make_fns(ag)
+    u, d = actor_fn(ag.delta_target, obs1, goal1, eps)
+    obs = jnp.broadcast_to(obs1, (5, OB))
+    goals = jnp.broadcast_to(goal1, (5, OB))
+    u_ref, d_ref = ag.ag_latent(obs, goals, eps, float(ag.config["ag_w_boot"]), params=ag.delta_target)
+    assert np.allclose(np.asarray(u), np.asarray(u_ref)) and np.allclose(np.asarray(d), np.asarray(d_ref))
+    assert not _leaves_equal(ag.delta.params, ag.delta_target)      # the two copies differ after an update
+    u_on, _ = actor_fn(ag.delta.params, obs1, goal1, eps)
+    u_on_ref, _ = ag.ag_latent(obs, goals, eps, float(ag.config["ag_w_boot"]), params=ag.delta.params)
+    assert np.allclose(np.asarray(u_on), np.asarray(u_on_ref))     # it reads the params it is handed
+    plain = PSMGoalAgent.create(0, np.zeros((2, OB), np.float32), np.zeros((2, DA), np.float32),
+                                _cfg(**{**AG, "ag_actor": False}))
+    _, _, actor_fn_p, _ = make_fns(plain)
+    u_p, d_p = actor_fn_p(plain.delta.params, obs1, goal1, eps)
+    u_pr, d_pr = plain.flowbc_latent(obs, goals, eps)
+    assert np.allclose(np.asarray(u_p), np.asarray(u_pr)) and np.allclose(np.asarray(d_p), np.asarray(d_pr))

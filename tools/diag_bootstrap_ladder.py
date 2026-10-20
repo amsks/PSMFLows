@@ -247,6 +247,8 @@ def run(cfg):
     agent = restore_agent(agents['psmgoal'].create(seed, ex['observations'], ex['actions'], cfg_a),
                           str(cfg.restore_path), cfg.restore_epoch)
     q_fn, grad_fn, actor_fn, clip_fn = make_fns(agent)
+    # the parameters the TD bootstrap reads: the Polyak copy under the advantage-guided arm, else delta
+    delta_params = agent.delta_target if agent._ag() else agent.delta.params
     online = (agent.basis.params, agent.w_star.params)
     target = (agent.target_basis, agent.target_w_star)
 
@@ -291,7 +293,7 @@ def run(cfg):
         top_idx = np.argsort(-q_all, kind='stable')[:n_top]
         c_top = u_bc_np[top_idx].mean(0)
         grad = np.asarray(grad_fn(bp, wp, obs1, goal1, u_bc[:n_grad], pool))
-        u_act, delta = actor_fn(agent.delta.params, obs1, goal1, eps)
+        u_act, delta = actor_fn(delta_params, obs1, goal1, eps)
         row = shift_direction_stats(np.asarray(delta), np.asarray(eps), u_bc_np, c_top, u_data_np[i], grad)
         row['q_top_mean'] = float(q_all[top_idx].mean())
         row['q_mean'] = float(q_all.mean())

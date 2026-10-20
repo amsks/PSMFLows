@@ -54,6 +54,49 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 05:55 CEST 10-20, guided arm at 25k on aws (five runs): bootstrap shift 0.57 to 0.59 at w_boot 0.5 (6x A's nudge 0.09), 0.30 at 0.25, 0.13 at 0.1; own-next mass 0.35 to 0.41 and rising at every w_boot; kisski's queued copies of the 0.5 line replaced by seeds 1-2 of the 0.25 and 0.1 controls (2525916-2525919); the ladder diagnostic made to read the guided bootstrap
+
+aws post 2026-10-20T03-49-39Z, train.csv at 25k (5k in brackets); 0.26 to 0.29 s per update, 23.5 min per 5k
+steps including logging; 50k checkpoints due about 07:25 CEST, the 50k evals (hgoal_each and the actor alone at
+w 1 on sd0 of the three groups, plus w 2 on ag sd0) start then on aws GPUs 5 to 7.
+
+| run | shift norm at w_boot | own-next mass | cos(shift, best draw) | actor_q | ag_q_gain | best-of-k gain | actor_loss | psm_loss | phi_eff_rank |
+|---|---|---|---|---|---|---|---|---|---|
+| ag sd0, w_boot 0.5 | 0.568 (0.635) | 0.391 (0.227) | 0.300 | 0.540 | 0.0033 | 0.0141 | 0.925 | 2.64 | 1.033 |
+| ag sd1, w_boot 0.5 | 0.578 (0.645) | 0.352 (0.193) | 0.313 | 0.466 | 0.0035 | 0.0138 | 0.930 | 2.86 | 1.031 |
+| ag sd2, w_boot 0.5 | 0.588 (0.679) | 0.373 (0.202) | 0.316 | 0.627 | 0.0032 | 0.0138 | 0.942 | 2.55 | 1.038 |
+| wb025 sd0, w_boot 0.25 | 0.304 (0.334) | 0.392 (0.232) | 0.302 | 0.420 | 0.0021 | 0.0150 | 0.916 | 2.81 | 1.029 |
+| wb01 sd0, w_boot 0.1 | 0.129 (0.139) | 0.408 (0.233) | 0.317 | 0.324 | 0.0009 | 0.0147 | 0.902 | 2.85 | 1.028 |
+
+Against the 03:35 gate (shift above 0.5 at 25k reads "the tilt is too large for the target", promote the
+controls): the shift's size is set by w_boot alone (1.15 x w_boot in every run, at full size by 5k, drifting
+down slightly to 25k); its direction does not depend on its size (cos to the best draw 0.30 to 0.32 in all
+five, A's nudge 0.32 to 0.35 at 250k); the actor's own gain in point value scales with w_boot (0.0009 / 0.0021
+/ 0.0033) and at 0.5 is at the level of A's nudge (+0.003) by 25k; the best-of-k gain is 0.014 to 0.015
+everywhere; the measure's own-next mass is rising at every w_boot (A: 0.42 at 50k), so no collapse by 25k.
+Decision: aws keeps its five runs. Kisski's five queued jobs (2525901-2525905, duplicates of aws's five, not
+started) cancelled and replaced by seeds 1 and 2 of the two controls (`psmgoal_ag_wb025_cube` sd1/sd2
+2525916/2525917, `psmgoal_ag_wb01_cube` sd1/sd2 2525918/2525919), so each w_boot in {0.5, 0.25, 0.1} ends with
+three seeds (0.5 on aws and luis; 0.25 and 0.1 sd0 on aws, sd1-2 on kisski). The three ag watchers glob over
+seeds per group and pick the new seeds up at 250k.
+
+Ladder on the guided arm: `tools/diag_actor_mechanism.make_fns.actor_fn` returned `flowbc_latent` (delta on
+[s, g, eps]), which does not fit the guided delta's [g, c] slot; under ag_actor it now returns `ag_latent` at
+ag_w_boot from the params it is handed, and `tools/diag_bootstrap_ladder.py` hands it `delta_target` (the copy the
+TD bootstrap reads), so the ladder's "nudge" is the guided arm's bootstrap shift. Test added to
+`tests/test_psmgoal_ag_actor.py` (17 pass); `tests/test_diag_bootstrap_ladder.py` 7 pass. aws asked to run the
+ladder at 50k on ag sd0 / wb025 sd0 / wb01 sd0 so the shift's distance to the data and its percentile among BC
+draws are measured on the same probe as A and B (A at 250k: nearest-data 0.2122 vs BC draw 0.2127, 52nd
+percentile, TD target with vs without the nudge equal to the 4th decimal).
+
+Expected before the 50k numbers: at w_boot 0.5 the bootstrap latent's nearest-data distance is above the BC
+draw's 0.21 (the shift is 6x A's), its percentile among BC draws by the critic above 55, and the TD target with
+vs without the shift differs in the 3rd decimal; at 0.1 all three within A's values. 50k best-of-64: the 0.1 arm
+within 0.05 of A's 50k ladder point; the 0.5 arm above it if the guided bootstrap helps the critic early, below
+0.3 if the shift leaves the data. The actor alone at w 1 above BC (0.11) at 50k at every w_boot; within 0.05 of
+BC reads "the actor ignores the score".
+
+
 ### 04:10 CEST 10-20, reward-index arm complete at 250k, three seeds: best-of-64 at the ridge w 0.389 ± 0.052, by expected reward 0.214 ± 0.073, the actor at w 0.107 ± 0.009 (BC 0.111; critic A 0.789 at 250k)
 
 `psmgoal_ri_fbc3_cube` sd0-2, 250k, five tasks, 500 episodes, kisski (sd1 / sd2 started 22:16 / 22:29, 250k at
