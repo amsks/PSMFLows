@@ -14,7 +14,9 @@ if [ "${SMOKE:-0}" = 1 ]; then RUN="STEPS=200,EVAL_INT=100,EVAL_EPS=2,LOG_INT=50
 else RUN="STEPS=$STEPS,EVAL_INT=50000,EVAL_EPS=50,LOG_INT=5000,SAVE_INT=50000"; PFX=psmgoal_; T=${TIME:-10:00:00}; fi
 COMMON="PSM_REPO=$REPO,PSM_DATA=$PSM_DATA,OGBENCH_DATASET_DIR=/mnt/home/amohan/.ogbench/data,ENVKEY=cube,PREIMAGES=$PSM_DATA/preimages/cube-single-play.npz,$RUN"
 JA_BASE="agent.policy_index=goal agent.bootstrap_source=actor agent.train_actor=true agent.actor_input=goal agent.goal_random_frac=0.0 agent.goal_cur_frac=0.0 agent.goal_sampling=geometric agent.measure_loss=softmax agent.acting=distill agent.eval_redistill=false agent.eval_goal_source=relabel"
-AG="$JA_BASE agent.actor_kind=flowbc agent.actor_value_kind=point agent.ag_actor=true ${AG_EXTRA:-}"
+# ag_k 16 / ag_pool 32 is the arm as run on aws and luis (03:55 CEST 10-20 relaunch; the 64 / 0 defaults cost 9x
+# critic A's step). Set here so a control launched with only AG_EXTRA="agent.ag_w_boot=..." keeps them.
+AG="$JA_BASE agent.actor_kind=flowbc agent.actor_value_kind=point agent.ag_actor=true agent.ag_k=16 agent.ag_pool=32 ${AG_EXTRA:-}"
 for s in $SEEDS; do
   G=${PFX}ag${SUFFIX:-}_cube
   id=$(sbatch --parsable --partition=kisski-inference --account=general --time=$T --cpus-per-task=4 \

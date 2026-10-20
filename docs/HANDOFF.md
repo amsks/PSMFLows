@@ -54,6 +54,17 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 23:00 CEST 10-20, error caught and fixed: kisski's four control seeds of the guided arm (2525916-2525919, submitted 05:55) carried ag_k 64 / ag_pool 0, not the 16 / 32 of the arm; the one that had started (wb025 sd1, 16 min in) and the three pending were cancelled and resubmitted at 16 / 32 (2525986-2525989); the launcher now sets 16 / 32 itself
+
+The 05:55 resubmission passed only `AG_EXTRA="agent.ag_w_boot=0.25"` (or 0.1) to `ag_arms.sh`, which does not
+set ag_k / ag_pool, so the yaml defaults (64 / 0, the 9x-cost first version of 03:35) applied. Caught by the
+start-watcher's flags re-read when 2525916 began at 22:50. No numbers came from the wrong runs; the started
+run's directory is set aside as `psmgoal_ag_wb025_cube/WRONGCFG_k64_sd001_s_2525916` (the ag watcher globs
+`sd00*`, so it is skipped). `ag_arms.sh` now puts `agent.ag_k=16 agent.ag_pool=32` in the arm string, with
+AG_EXTRA still able to override; the resubmitted jobs' strings were checked for both keys. aws's and luis's runs
+were launched with 16 / 32 (flags re-read in their posts) and are unaffected.
+
+
 ### 21:30 CEST 10-20, first 250k reading of the guided arm (luis sd0, w_boot 0.5, H200): best-of-64 by the critic 0.732, the actor alone at w 1 0.657; the actor's gap to best-of-64 is 0.075 at 250k against 0.26 at 100k on aws; BC 0.111
 
 luis post 2026-10-20T19-22-07Z, one seed, five tasks, 500 episodes per task, files under
