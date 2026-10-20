@@ -229,6 +229,7 @@ ACTOR_GOAL_SOURCES = ("future", "measure")
 BOOTSTRAP_SWITCHES = ("none", "prior_then_actor", "actor_then_prior")
 #: fold_in constant of the fresh prior draw eps the flowbc bootstrap uses at (s', g).
 FLOWBC_BOOT_KEY = 103
+AG_DRAW_KEY = 109  # advantage-guided actor: the K prior draws scored per update
 #: fold_in constant of the bootstrap_n prior draws the argmax bootstrap scores at (s', g).
 ARGMAX_BOOT_KEY = 104
 #: name of the flowbc actor's output layer in its params (zero-initialised).
@@ -306,6 +307,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
     # Joint actor heads (2026-10-05; carried but unused unless actor_kind selects them).
     delta: Any = None            # actor_kind=flowbc: delta(s, g, eps) TrainState
     frozen_delta_params: Any = None   # bootstrap_source=frozen_delta: the loaded, never-updated delta params
+    delta_target: Any = None     # ag_actor: Polyak copy of delta that the TD bootstrap reads
     log_alpha: Any = None        # actor_kind=dsrl: SAC's log alpha TrainState
     # coef_source=reward_gpi (2026-10-15, eval only; carried but unused otherwise).
     eval_cand_w: Any = None      # (k_goals, z_dim) h(g_c) per candidate goal
@@ -542,6 +544,19 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                                         hidden_layers=config["actor"]["hidden_layers"])
         # policy_index=reward: delta's goal slot takes the index w (z_dim) instead of a goal state.
         ex_delta_cond = ex_w if policy_index == "reward" else ex_observations
+        ag_actor = bool(config.get("ag_actor", False))
+        if ag_actor:
+            # advantage-guided actor (2026-10-20, docs/design/2026-10-20-advantage-guided-actor.md): delta's goal
+            # slot takes [g, c], c the per-state standardised critic score of the draw being fit.
+            assert policy_index == "goal" and str(config.get("actor_kind", "tanh")) == "flowbc" \
+                and bool(config.get("train_actor", False)) and str(config.get("actor_input", "w")) == "goal" \
+                and str(config.get("bootstrap_source", "actor")) == "actor" \
+                and str(config.get("actor_value_kind", "shaped")) == "point", \
+                "ag_actor: policy_index=goal actor_kind=flowbc train_actor actor_input=goal bootstrap_source=actor actor_value_kind=point"
+            assert str(config.get("bootstrap_switch", "none")) == "none" and float(config.get("bootstrap_delta_scale", 1.0)) == 1.0, \
+                "ag_actor: bootstrap_switch=none, bootstrap_delta_scale=1"
+            assert int(config.get("ag_k", 64)) >= 2 and float(config.get("ag_delta_tau", 0.005)) > 0.0, "ag_actor: ag_k >= 2, ag_delta_tau > 0"
+            ex_delta_cond = jnp.concatenate([ex_observations, jnp.zeros((ex_observations.shape[0], 1), jnp.float32)], axis=-1)
         delta = TrainState.create(
             delta_def, delta_def.init(jax.random.fold_in(r_a, 1), ex_observations, ex_delta_cond, ex_u)["params"],
             tx=optax.adam(config["lr_actor"]))
@@ -612,6 +627,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                    eval_actor_goal=jnp.zeros((ob_dim,), jnp.float32),
                    eval_goal_w=jnp.zeros((int(config["k_goals"]), z_dim), jnp.float32),
                    delta=delta, log_alpha=log_alpha, frozen_delta_params=frozen_delta_params,
+                   delta_target=copy.deepcopy(delta.params) if ag_actor else None,
                    eval_cand_w=jnp.zeros((int(config["k_goals"]), z_dim), jnp.float32),
                    eval_ref_reward=jnp.zeros((max(int(config["batch_size"]) - int(config["k_goals"]), 1),),
                                              jnp.float32),
@@ -690,6 +706,79 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
 
     def _actor_takes_goal(self):
         return str(self.config.get("actor_input", "w")) == "goal"
+
+    def _ag(self):
+        return bool(self.config.get("ag_actor", False))
+
+    # ------------------------------------------------- advantage-guided actor (2026-10-20)
+    def ag_mu(self, obs, goals, c, params=None):
+        """mu(s, g, c): the delta net read at cond = [g, c] and eps = 0; c (N,) the standardised score.
+        Under ag_actor the net is trained so that mu(s, g, c) regresses the prior draws whose critic score
+        at (s, g) standardises to c, so mu(., +1) - mu(., -1) is the latent direction from low- to
+        high-scoring draws at the state (Advantage Guidance, Zhou & Levine 2026, in the start-noise
+        parameterisation)."""
+        cond = jnp.concatenate([goals, jnp.asarray(c, jnp.float32)[:, None]], axis=-1)
+        return self.delta(obs, cond, jnp.zeros_like(obs[:, : int(self.config["action_dim"])]),
+                          params=self.delta.params if params is None else params)
+
+    def ag_shift(self, obs, goals, w, params=None):
+        """w * (mu(s, g, +1) - mu(s, g, -1)): the guided shift of a prior draw, (N, d)."""
+        ones = jnp.ones((obs.shape[0],), jnp.float32)
+        return float(w) * (self.ag_mu(obs, goals, ones, params) - self.ag_mu(obs, goals, -ones, params))
+
+    def ag_latent(self, obs, goals, eps, w, params=None):
+        """u = clip(eps + ag_shift(s, g, w)). Returns (u, shift)."""
+        u_clip = float(self.config["u_clip"])
+        d = self.ag_shift(obs, goals, w, params)
+        return jnp.clip(eps + d, -u_clip, u_clip), d
+
+    def ag_actor_loss(self, delta_params, obs, goals, c_rows, u_rows):
+        """Supervised: mean over the K draws, rows and dims of (mu(s_i, g_i, c_ik) - u_ik)^2."""
+        def one(c_k, u_k):
+            return jnp.mean((self.ag_mu(obs, goals, c_k, params=delta_params) - u_k) ** 2)
+        per_k = jax.vmap(one)(c_rows, u_rows)                                                   # (K,)
+        loss = jnp.mean(per_k)
+        return loss, {"actor_loss": loss}
+
+    def ag_actor_step(self, batch):
+        """One advantage-guided actor step at the actor goal (batch['fb_goals'], as goal_actor_step).
+        K = ag_k prior draws u_k = clip(eps_k) per row; q_k = the point value of (s_i, u_ik) at w = h(g_i)
+        under the stop-gradded online basis (the value actor_loss_flowbc climbs); c_ik = the per-row
+        standardisation of q over the K draws; delta regresses mu(s, g, c_ik) onto u_ik. delta_target then
+        moves toward delta by ag_delta_tau. Returns ({delta, delta_target}, info)."""
+        c = self.config
+        obs = jnp.asarray(batch["observations"])
+        pool = jnp.asarray(batch["next_observations"])
+        goals = jnp.asarray(batch["goals"] if str(c.get("actor_goal_source", "future")) == "measure"
+                            else batch["fb_goals"])
+        K, N, d = int(c["ag_k"]), obs.shape[0], int(c["action_dim"])
+        u_clip = float(c["u_clip"])
+        eps = jax.random.normal(jax.random.fold_in(self.rng, AG_DRAW_KEY), (K, N, d))
+        u_rows = jnp.clip(eps, -u_clip, u_clip)                                                 # (K, N, d)
+        bp = jax.lax.stop_gradient(self.basis.params)
+        w_rows = jax.lax.stop_gradient(self.w_star(goals))                                     # (N, z)
+        q = jax.lax.map(lambda u_k: self.actor_value(obs, u_k, pool, goals, w_rows, bp), u_rows)  # (K, N)
+        q = jax.lax.stop_gradient(q)
+        mu_q, var_q = jnp.mean(q, axis=0, keepdims=True), jnp.var(q, axis=0, keepdims=True)
+        c_rows = (q - mu_q) / jnp.sqrt(var_q + float(c.get("ag_score_eps", 1.0e-6)))           # (K, N)
+        (_, info), g_d = jax.value_and_grad(self.ag_actor_loss, has_aux=True)(
+            self.delta.params, obs, goals, c_rows, u_rows)
+        delta = self.delta.apply_gradients(grads=g_d)
+        delta_target = polyak_update(delta.params, self.delta_target, float(c["ag_delta_tau"]))
+        # diagnostics at the pre-step params: the bootstrap shift at ag_w_boot and the critic's own value of
+        # the guided first draw against the mean draw and the best of the K draws
+        u_g, shift = self.ag_latent(obs, goals, eps[0], float(c["ag_w_boot"]), params=self.delta_target)
+        q_g = self.actor_value(obs, u_g, pool, goals, w_rows, bp)
+        info = {**info,
+                "actor_delta_norm": jnp.mean(jnp.linalg.norm(shift, axis=-1)),
+                "actor_q": jnp.mean(q_g),
+                "ag_q_gain": jnp.mean(q_g - q[0]),
+                "ag_q_gain_bok": jnp.mean(jnp.max(q, axis=0) - mu_q[0]),
+                "ag_q_draw_std": jnp.mean(jnp.sqrt(var_q[0])),
+                "ag_c_absmean": jnp.mean(jnp.abs(c_rows)),
+                "ag_shift_cos_best": jnp.mean(jnp.sum(shift * (u_rows[jnp.argmax(q, axis=0), jnp.arange(N)] - eps[0]), axis=-1)
+                                              / (jnp.linalg.norm(shift, axis=-1) * jnp.linalg.norm(u_rows[jnp.argmax(q, axis=0), jnp.arange(N)] - eps[0], axis=-1) + 1e-8))}
+        return {"delta": delta, "delta_target": delta_target}, info
 
     def _data_bootstrap(self):
         return str(self.config.get("bootstrap_source", "actor")) == "data"
@@ -907,6 +996,10 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                     # the flowbc actor at (s', g) with a fresh prior draw eps
                     eps = jax.random.normal(jax.random.fold_in(self.rng, FLOWBC_BOOT_KEY),
                                             (next_obs.shape[0], int(c["action_dim"])))
+                    if self._ag():
+                        # advantage-guided: the slow copy of delta, guided at ag_w_boot
+                        return jax.lax.stop_gradient(
+                            self.ag_latent(next_obs, goals, eps, float(c["ag_w_boot"]), params=self.delta_target)[0])
                     u_actor, d_actor = self.flowbc_latent(next_obs, goals, eps)
                     # bootstrap_delta_scale (2026-10-15): scale the actor's step in the TD target
                     # ONLY (acting and the actor loss keep the unscaled step). 1.0 = unchanged.
@@ -1650,7 +1743,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             # goal-conditioned actor at the actor goal; replaces the two actor losses below.
             # bootstrap_source=data with train_actor=false trains no actor at all.
             # actor_kind=flowbc moves `delta`, dsrl moves `actor` and `log_alpha`.
-            upd, a_info = self.goal_actor_step(batch)
+            upd, a_info = self.ag_actor_step(batch) if self._ag() else self.goal_actor_step(batch)
             actor = upd.pop("actor", self.actor)
             fb_state = upd
             info = {**info, **a_info}
@@ -1983,7 +2076,10 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                 # one prior draw eps per step, corrected by delta(s, g, eps) (policy_index=goal) or
                 # delta(s, w, eps) at the ridge w (policy_index=reward)
                 eps = jax.random.normal(seed, (1, self.config["action_dim"]))
-                u_star = self.flowbc_latent(observations[None], actor_in[None], eps)[0][0]
+                if self._ag():
+                    u_star = self.ag_latent(observations[None], actor_in[None], eps, float(self.config["ag_w_eval"]))[0][0]
+                else:
+                    u_star = self.flowbc_latent(observations[None], actor_in[None], eps)[0][0]
             else:
                 mu, _ = self.actor(observations[None], actor_in[None])
                 u_star = self.config["u_clip"] * jnp.tanh(mu[0])
@@ -2339,6 +2435,13 @@ def get_config():
         "frozen_delta_path": None,     # bootstrap_source=frozen_delta: run dir whose delta params are loaded
         "frozen_delta_epoch": 500000,  # ... at this checkpoint
         "frozen_delta_mode": "plus",   # plus | minus | random | zero
+        # --- advantage-guided actor (2026-10-20; OFF by default) ---
+        "ag_actor": False,          # delta regresses prior draws conditioned on their standardised critic score
+        "ag_k": 64,                 # prior draws scored per row and update
+        "ag_w_boot": 0.5,           # guidance weight of the shift in the TD bootstrap (slow delta copy)
+        "ag_w_eval": 1.0,           # guidance weight when acting (acting=distill)
+        "ag_delta_tau": 0.005,      # Polyak rate of the delta copy the bootstrap reads
+        "ag_score_eps": 1.0e-6,     # added to the per-row score variance before standardising
         "fb_rand_frac": 0.5,        # fraction of rows whose task is a random sqrt(D) direction
         "fb_hit_spec": "19:22:0.4",  # kernel reward blocks a:b:eps (cube: cube xyz, eps 0.4)
         "fb_ridge_lambda_mult": 0.01,   # lam = mult * tr(C)/D

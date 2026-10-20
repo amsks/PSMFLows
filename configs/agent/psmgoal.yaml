@@ -89,6 +89,17 @@ bootstrap_delta_scale: 1.0 # factor on the flowbc actor's step in the TD target 
 frozen_delta_path: null
 frozen_delta_epoch: 500000
 frozen_delta_mode: plus
+# Advantage-guided actor (2026-10-20, docs/design/2026-10-20-advantage-guided-actor.md; OFF by default). With
+# ag_actor: true the flowbc delta net is trained by regression: ag_k prior draws per row, each scored by the point
+# value at the actor goal, scores standardised per row, delta(s, [g, c], 0) fit to the draw with score c. The TD
+# bootstrap is clip(eps + ag_w_boot * (mu(+1) - mu(-1))) read from a Polyak copy (ag_delta_tau); acting=distill uses
+# ag_w_eval. No critic gradient and no BC term reach delta.
+ag_actor: false
+ag_k: 64
+ag_w_boot: 0.5
+ag_w_eval: 1.0
+ag_delta_tau: 0.005
+ag_score_eps: 1.0e-6
 fb_rand_frac: 0.5          # random-direction task fraction (reference z_rand_frac)
 fb_hit_spec: "19:22:0.4"   # hindsight kernel reward blocks a:b:eps (cube xyz, eps 0.4)
 fb_ridge_lambda_mult: 0.01 # lam = mult * tr(C)/D
