@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Submit tools/diag_bootstrap_ladder.py for one run directory over a ladder of checkpoint
 # epochs: one SLURM job per epoch (scripts/slurm/diag_bootstrap_ladder.sbatch), skipping epochs
-# whose report already exists and epochs whose params_<epoch>.pkl is not on disk yet.
+# whose report already exists, epochs whose params_<epoch>.pkl is not on disk yet, and epochs whose
+# bl_<TAG>_<epoch> job is already queued or running (so a loop can call this every few minutes).
 # Reports land at $PSM_DATA/logs/actor_ladder/<TAG>_<epoch>.json; plot them with
 #   .venv/bin/python tools/fig_bootstrap_ladder.py --tags <TAG_A> <TAG_B>
 #
@@ -46,6 +47,7 @@ for e in "${EPOCHS[@]}"; do
   out="$OUTD/${TAG}_${e}.json"
   if [ -f "$out" ]; then echo "--- $e: $out exists, skip"; continue; fi
   if [ ! -f "$RUN_DIR/params_${e}.pkl" ]; then echo "--- $e: no params_${e}.pkl yet, skip"; continue; fi
+  if squeue -u "$USER" -h -n "bl_${TAG}_${e}" -o %i | grep -q .; then echo "--- $e: bl_${TAG}_${e} already queued or running, skip"; continue; fi
   cmd=(sbatch --partition="$PARTITION" --account="$ACCOUNT" --nice="$NICE" --time=01:00:00
        --job-name="bl_${TAG}_${e}" --output="$PSM_DATA/logs/slurm/%x-%j.out" --error="$PSM_DATA/logs/slurm/%x-%j.err"
        --export=ALL,PSM_REPO="$PSM_REPO",PSM_DATA="$PSM_DATA",RUN_DIR="$RUN_DIR",EPOCH="$e",TAG="$TAG"
