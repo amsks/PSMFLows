@@ -54,6 +54,16 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 15:05 CEST 10-20, luis's copy of the guided arm (w_boot 0.5, three seeds) running; 25k signals match aws within 0.03 on every column; sd1 on an A100 (0.20 s per update) will hit its 12 h limit at about 215k, to be read at its 200k checkpoint if cut, no resubmission
+
+luis post 2026-10-20T12-57-55Z (jobs 8795429 sd0 H200 0.040 s per update, 8795430 sd1 A100 0.200 s, 8795431
+sd2 A100 0.148 s); flags re-read on all three (ag_actor, ag_k 16, ag_pool 32, ag_w_boot 0.5, ag_w_eval 1.0,
+ag_delta_tau 0.005). At 25k: shift norm 0.564 / 0.587 (aws 0.568 / 0.578), own-next mass 0.398 / 0.359 (aws
+0.391 / 0.352), ag_q_gain 0.0033 / 0.0036 (aws 0.0033 / 0.0035), actor_loss 0.925 / 0.930 (aws the same).
+luis evaluates sd0 at 50k (both readouts) within the hour; parity line within 0.05 per readout against aws's
+sd0 (0.507 / 0.480).
+
+
 ### 14:15 CEST 10-20, finer tilt sweep at 100k (aws, sd0): w 1 is the peak on both runs; w_boot 0.1: 0.546 / 0.618 / 0.514 / 0.320 at w 0.5 / 1 / 1.5 / 2; w_boot 0.5: 0.386 / 0.537 / 0.510 / 0.411; no tilt brings the actor within 0.15 of best-of-64 on the 0.5 run
 
 aws post 2026-10-20T12-05-13Z, 500 episodes per cell, cells under `runs/ag/aws/*_100000_ag_w{05,15}_task*.json`.
