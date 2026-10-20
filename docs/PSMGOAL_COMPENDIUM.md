@@ -1402,8 +1402,10 @@ spread over draws shrinks 25% while its scores get more peaked. A larger tilt at
 the gap: w 2 is 0.13 / 0.30 below w 1 on the 0.5 / 0.1 runs, w 4 is below BC. The ladder at 100k equals 50k
 (bootstrap at the 64th percentile, 0.002 above a BC draw in distance to the data, TD loss equal). Reading:
 the actor learns a smooth shift along the average score; the critic's gain is in which few draws it ranks on
-top, and a smooth shift does not reproduce that choice. Pending: 250k three seeds (aws about 22:00 CEST), the
-controls' seeds 1-2 on kisski, luis's second copy of the 0.5 line.
+top, and a smooth shift does not reproduce that choice.
+First 250k reading (luis sd0, 21:30): best-of-64 0.732, the actor alone at w 1 0.657 (gap 0.075; at 100k on
+aws the gap was 0.26). Pending: aws's three seeds at 250k, kisski's readouts of the luis checkpoint, the
+controls' seeds 1-2 on kisski.
 
 ## 7. Open questions and the next arms, with predictions
 

@@ -54,6 +54,27 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 21:30 CEST 10-20, first 250k reading of the guided arm (luis sd0, w_boot 0.5, H200): best-of-64 by the critic 0.732, the actor alone at w 1 0.657; the actor's gap to best-of-64 is 0.075 at 250k against 0.26 at 100k on aws; BC 0.111
+
+luis post 2026-10-20T19-22-07Z, one seed, five tasks, 500 episodes per task, files under
+`runs/psmgoal_ag_cube/luis_sd000_s_8795429.0.20261020_132425/eval500/`.
+
+| luis sd0 | readout | t1 | t2 | t3 | t4 | t5 | five-task |
+|---|---|---|---|---|---|---|---|
+| 50k | best-of-64 by the critic | 0.322 | 0.674 | 0.342 | 0.486 | 0.374 | 0.440 |
+| 50k | the actor alone at w 1 | 0.644 | 0.344 | 0.554 | 0.684 | 0.206 | 0.486 |
+| 250k | best-of-64 by the critic | 0.768 | 0.676 | 0.846 | 0.664 | 0.708 | 0.732 |
+| 250k | the actor alone at w 1 | 0.644 | 0.884 | 0.820 | 0.576 | 0.362 | 0.657 |
+
+Parity at 50k against aws sd0 (0.507 / 0.480): the actor within 0.05 (+0.006), best-of-64 0.067 below; both
+inside aws's three-seed intervals at 50k. The two sd0 runs are separate trainings, so this is seed spread.
+From 50k to 250k both readouts rise (best-of-64 +0.29, the actor +0.17); task 5 is the actor's weakest task at
+both steps. Against the 03:35 design-doc expectation (best-of-64 at or above A's 0.79; the actor alone 0.5 to
+0.8): best-of-64 0.06 below A on this seed, the actor inside its band. Kisski evaluates the same checkpoint
+(hgoal_each, w 0.5 / 1 / 2 / 4; jobs 2525971-2525975, queued); aws's three seeds at 250k about 23:30 CEST;
+luis sd1 read at 200k, sd2 at 250k in about 3 h.
+
+
 ### 17:40 CEST 10-20, antmaze with the fixed posterior latents launched (user order 17:10): `psmgoal_ja_fbc3_mix_k70_antmaze` seeds 0-2 on kisski (2525966-2525968, queued), aws asked to run the same three after tonight's guided-arm training; critic A's antmaze recipe with the TD latent drawn per batch from each transition's stored posterior (use_point_preimage=false) read from the preimage file regenerated with the two EM fixes from uoft-isl/inversion-noisy-q
 
 The file `antmaze-medium-navigate-a20-ps1-ns10-N200-init-k70` (published 10-14 20:49Z; alpha 20, prior_scale
