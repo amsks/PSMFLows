@@ -54,6 +54,15 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 15:35 CEST 10-20, reward-index 500k line started on aws (user order, 15:20): `psmgoal_ri_fbc3_500k_cube` seeds 3-5 on L4 GPUs 5-7 since 15:25 CEST; kisski's copies (2525859-2525861) stay queued as the backup; the guided arm's 250k readouts move to GPUs 0-4 tonight
+
+aws post 2026-10-20T13-28-19Z: 200-step smoke exit 0; flags re-read (policy_index reward, coef_source ridge,
+actor_input w, reward_actor_reward latent_centered, offline_steps 500000, seeds 3 / 4 / 5); flags differ from
+the kisski 250k sd000 run only in paths, step counts, seed and keys added since (ag_* at defaults). About 0.33
+s per update while sharing the machine; 250k about 09:00 CEST 10-21, 500k about 03:00 CEST 10-22. Readouts
+(ri_actor, ri_gpi, ri_gpi_reward) at 250k and 500k. Meeting summary at `docs/notes/2026-10-20-meeting-summary.md`.
+
+
 ### 15:05 CEST 10-20, luis's copy of the guided arm (w_boot 0.5, three seeds) running; 25k signals match aws within 0.03 on every column; sd1 on an A100 (0.20 s per update) will hit its 12 h limit at about 215k, to be read at its 200k checkpoint if cut, no resubmission
 
 luis post 2026-10-20T12-57-55Z (jobs 8795429 sd0 H200 0.040 s per update, 8795430 sd1 A100 0.200 s, 8795431
