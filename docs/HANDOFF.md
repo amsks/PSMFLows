@@ -54,6 +54,23 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 01:20 CEST 10-21, antmaze posterior-latent arm (init-k70 preimages) seed 0 started 00:56 on kisski; flags re-read correct; at 20k the measure's mass on the dataset's own next state is 0.078 against the point arm's 0.094 / 0.098 / 0.113 at the same step; eval watcher armed
+
+Seed 0 (2525966) runs at 0.049 s per update, so 250k lands about 04:20 and 500k about 07:50 CEST; seeds 1 and
+2 (2525967 / 2525968) have estimated starts 02:37 and 03:39. Flags: use_point_preimage false, the init-k70
+npz, discount 0.99, goal_discount 0.99, fb_hit_spec 0:2:0.5, flowbc actor, fb_bc_coeff 3.0, point value,
+softmax.
+
+| step 20k | own-next mass | phi effective rank | actor step | TD loss |
+|---|---|---|---|---|
+| posterior latent (k70) sd0 | 0.078 | 1.019 | 0.0072 | 4.46 |
+| point latent sd0 / sd1 / sd2 | 0.094 / 0.098 / 0.113 | 1.020 / 1.023 / 1.023 | 0.0062 / 0.0074 / 0.0077 | 4.25 / 4.18 / 4.04 |
+
+The point arm's own-next mass stayed at 0.09 to 0.15 through 250k. The expectation stated at 17:40 (the
+posterior latent lifts own-next mass above the point arm's 0.08 to 0.10 by 100k) is not met at 20k; 100k is the
+stated checkpoint. `scripts/campaign_2026-10/k70_eval_watcher_antmaze.sh` submits best-of-64 by the critic
+(hgoal_each) and the actor alone (actor_rel) at 250k and 500k for each seed (60 cells).
+
 ### 00:50 CEST 10-21, kisski's readouts of luis's sd0 250k checkpoint match luis's: best-of-64 by the critic 0.717 (luis 0.732), the actor alone at w 1 0.666 (luis 0.657); w 2 0.671, w 0.5 0.457, w 4 0.247; aws 250k so far: sd0 0.614 / 0.742, sd1 0.578 / 0.524, sd2 pending
 
 Checkpoint `runs/psmgoal_ag_cube/luis_sd000_s_8795429.0.20261020_132425/params_250000.pkl` fetched to
