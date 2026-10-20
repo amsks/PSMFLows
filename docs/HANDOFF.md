@@ -54,6 +54,32 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 14:15 CEST 10-20, finer tilt sweep at 100k (aws, sd0): w 1 is the peak on both runs; w_boot 0.1: 0.546 / 0.618 / 0.514 / 0.320 at w 0.5 / 1 / 1.5 / 2; w_boot 0.5: 0.386 / 0.537 / 0.510 / 0.411; no tilt brings the actor within 0.15 of best-of-64 on the 0.5 run
+
+aws post 2026-10-20T12-05-13Z, 500 episodes per cell, cells under `runs/ag/aws/*_100000_ag_w{05,15}_task*.json`.
+
+| sd000 at 100k, the actor alone | t1 | t2 | t3 | t4 | t5 | five-task |
+|---|---|---|---|---|---|---|
+| w_boot 0.5, w 0.5 | 0.344 | 0.368 | 0.478 | 0.408 | 0.330 | 0.386 |
+| w_boot 0.5, w 1 | 0.434 | 0.362 | 0.654 | 0.740 | 0.494 | 0.537 |
+| w_boot 0.5, w 1.5 | 0.446 | 0.310 | 0.764 | 0.768 | 0.262 | 0.510 |
+| w_boot 0.5, w 2 | 0.408 | 0.328 | 0.728 | 0.468 | 0.124 | 0.411 |
+| w_boot 0.5, w 4 | 0.090 | 0.004 | 0.264 | 0.028 | 0.010 | 0.079 |
+| w_boot 0.1, w 0.5 | 0.498 | 0.490 | 0.700 | 0.732 | 0.308 | 0.546 |
+| w_boot 0.1, w 1 | 0.526 | 0.684 | 0.828 | 0.794 | 0.260 | 0.618 |
+| w_boot 0.1, w 1.5 | 0.486 | 0.504 | 0.864 | 0.554 | 0.164 | 0.514 |
+| w_boot 0.1, w 2 | 0.300 | 0.234 | 0.742 | 0.294 | 0.032 | 0.320 |
+| w_boot 0.1, w 4 | 0.034 | 0.000 | 0.184 | 0.066 | 0.000 | 0.057 |
+| best-of-64, w_boot 0.5 / 0.1 | | | | | | 0.696 / 0.581 |
+| BC | | | | | | 0.111 |
+
+Against the 13:50 expectation: on the 0.1 run w 1 is the peak with w 0.5 and w 1.5 each 0.07 to 0.10 below,
+as stated; on the 0.5 run w 1.5 is 0.03 below w 1 (within noise, stated below) and w 0.5 is 0.15 below (not
+within 0.05 as stated). The useful tilt is near 1 on both runs, which is not the tilt either run trains its
+bootstrap at (0.5 and 0.1). Task 5 falls with tilt above 1 on both runs, task 3 rises up to w 1.5. Nothing
+more at 100k; 250k checkpoints about 22:00 CEST, readouts about 23:30.
+
+
 ### 13:50 CEST 10-20, tilt sweep at 100k (aws, sd0): a larger tilt at test time hurts; w 2 is 0.13 (w_boot 0.5) and 0.30 (w_boot 0.1) below w 1, w 4 falls below BC on both; the gap to best-of-64 is not a too-short shift
 
 aws post 2026-10-20T11-43-26Z, 500 episodes per cell, cells under `runs/ag/aws/*_100000_ag_w{2,4}_task*.json`.
