@@ -54,6 +54,30 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 12:00 CEST 10-20, guided actor alone at 100k (aws): w_boot 0.5 three seeds 0.434 ± 0.240 (50k 0.431 ± 0.131), one seed down, two up; w_boot 0.25 sd0 0.522 (50k 0.435); w_boot 0.1 sd0 0.618 (50k 0.310); BC 0.111
+
+aws post 2026-10-20T09-55-27Z, 500 episodes per cell, ag_w_eval 1, cells under `runs/ag/aws/*_100000_ag_w1_task*.json`.
+
+| the actor alone at w 1 | t1 | t2 | t3 | t4 | t5 | 100k | 50k |
+|---|---|---|---|---|---|---|---|
+| w_boot 0.5 sd000 | 0.434 | 0.362 | 0.654 | 0.740 | 0.494 | 0.537 | 0.480 |
+| w_boot 0.5 sd001 | 0.316 | 0.436 | 0.400 | 0.422 | 0.154 | 0.346 | 0.438 |
+| w_boot 0.5 sd002 | 0.180 | 0.452 | 0.660 | 0.342 | 0.458 | 0.418 | 0.376 |
+| w_boot 0.5, mean ± 95% CI | | | | | | 0.434 ± 0.240 | 0.431 ± 0.131 |
+| w_boot 0.25 sd000 | 0.500 | 0.640 | 0.622 | 0.804 | 0.044 | 0.522 | 0.435 |
+| w_boot 0.1 sd000 | 0.526 | 0.684 | 0.828 | 0.794 | 0.260 | 0.618 | 0.310 |
+| BC | | | | | | 0.111 | |
+
+Against the 09:35 expectation (both readouts above their 50k values on every run; the actor within 0.10 of
+best-of-64): the 0.5 line's actor is flat at 0.43 (sd0 +0.06, sd2 +0.04, sd1 -0.09, mostly tasks 1, 3, 4);
+one seed below its 50k value, so the drift check (two of three) does not trigger. The two smaller bootstrap
+weights rose at seed 0, and the 0.1 run is the highest single run at 100k (0.618); one seed each. This fits
+the ladder (the TD loss is the same with the guided bootstrap or a BC draw at every weight): the bootstrap
+weight barely changes the critic, and the spread between runs at this point is seed and checkpoint noise in how
+the actor is trained. Best-of-64 at 100k on all five runs started 11:53 CEST; the 250k three-seed lines (both
+readouts, plus w 0.5 / 2 / 4 on sd0) about 22:00 CEST decide the arm against A's 0.789.
+
+
 ### 11:50 CEST 10-20, guided arm ladder at 100k (aws, sd0 of each w_boot): unchanged from 50k; the bootstrap stays a 64th / 58th / 54th percentile BC draw at 0.002 / 0.000 / 0.000 above the BC draw's distance to the data; TD loss with vs without equal to the 3rd decimal
 
 aws post 2026-10-20T09-40-10Z; JSONs fetched to `$PSM_DATA/logs/actor_ladder/{ag_s0,wb025_s0,wb01_s0}_100000.json`;
