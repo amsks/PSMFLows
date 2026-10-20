@@ -2,6 +2,19 @@
 
 All numbers: cube-single, five-task mean success, 500 episodes per task, mean ± 95% CI over seeds. BC 0.111.
 
+## 0. Headline: the zero-shot results on cube (five tasks, 500 episodes per task)
+
+| method | five-task success |
+|---|---|
+| critic with the future-state measure (nf2), best-of-64 by the critic, 3 seeds, 250k and 500k | 0.866 |
+| critic A (goal-indexed measure), best-of-64 by the critic, 5 seeds | 0.805 |
+| student distilled from the critic's best-of-64 picks on 20 random goal regions, acting alone on the five real tasks, 3 seeds | 0.925 ± 0.011 |
+| BC (the frozen behaviour flow alone) | 0.111 |
+
+Best-of-64 uses the critic at test time (64 BC draws, the critic picks one). The student acts with no critic at
+test time. Everything below is the investigation into why the actor matters and whether one co-trained network
+can replace best-of-64 plus the offline student; none of it is a new top number.
+
 ## 1. The co-trained actor (advantage-guided actor, arXiv 2610.19783 ported onto critic A)
 
 One network trained next to the critic supplies the TD bootstrap and acts at test time.
