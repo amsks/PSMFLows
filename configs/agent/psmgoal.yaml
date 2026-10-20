@@ -100,6 +100,7 @@ ag_w_boot: 0.5
 ag_w_eval: 1.0
 ag_delta_tau: 0.005
 ag_score_eps: 1.0e-6
+ag_pool: 0             # next states the score normaliser reads per row (0 = the whole batch); 32 cuts the update cost 8x
 fb_rand_frac: 0.5          # random-direction task fraction (reference z_rand_frac)
 fb_hit_spec: "19:22:0.4"   # hindsight kernel reward blocks a:b:eps (cube xyz, eps 0.4)
 fb_ridge_lambda_mult: 0.01 # lam = mult * tr(C)/D

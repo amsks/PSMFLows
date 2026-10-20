@@ -187,3 +187,19 @@ def test_acting_uses_the_guidance_weight():
     ag0 = ag.replace(config=ag.config.copy({"ag_w_eval": 0.0}))
     a0 = ag0.sample_actions(obs, seed=jax.random.PRNGKey(1))
     np.testing.assert_allclose(np.asarray(a0), np.asarray(ag.decode(obs[None], jnp.clip(eps, -ag.config["u_clip"], ag.config["u_clip"]))[0]), atol=1e-6)
+
+
+def test_ag_pool_subset_runs_and_scores_the_same_draws():
+    """ag_pool=3: the update runs and the subset score is a coarser estimate of the full-pool share:
+    finite, in (0, 1), and positively correlated with the full-pool score over draws and rows."""
+    ag = _agent(ag_pool=3)
+    new, info = ag.update(_batch())
+    assert np.isfinite(float(info["actor_loss"])) and np.isfinite(float(info["ag_c_absmean"]))
+    b = _batch()
+    obs, pool, goals = jnp.asarray(b["observations"]), jnp.asarray(b["next_observations"]), jnp.asarray(b["fb_goals"])
+    eps = jax.random.normal(jax.random.PRNGKey(0), (4, N, DA))
+    w_rows = new.w_star(goals)
+    full = np.asarray(jnp.stack([new.actor_value(obs, eps[k], pool, goals, w_rows, new.basis.params) for k in range(4)]))
+    sub = np.asarray(jnp.stack([new.actor_value(obs, eps[k], pool[:3], goals, w_rows, new.basis.params) for k in range(4)]))
+    assert np.all((sub > 0) & (sub < 1)) and np.all(np.isfinite(sub))
+    assert np.corrcoef(full.ravel(), sub.ravel())[0, 1] > 0.5

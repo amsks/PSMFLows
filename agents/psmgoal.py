@@ -753,6 +753,12 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                             else batch["fb_goals"])
         K, N, d = int(c["ag_k"]), obs.shape[0], int(c["action_dim"])
         u_clip = float(c["u_clip"])
+        # ag_pool (2026-10-20 03:50): the point value's normaliser reads the first ag_pool next states of the
+        # batch instead of all of them (0 = all), a coarser estimate of the same share. 64 x 256 x 256 critic
+        # calls per update measured 9x critic A's step on an L4 (aws 01-34-30Z); K 16 and pool 32 is 1/32 of that.
+        n_pool = int(c.get("ag_pool", 0))
+        if n_pool > 0:
+            pool = pool[:n_pool]
         eps = jax.random.normal(jax.random.fold_in(self.rng, AG_DRAW_KEY), (K, N, d))
         u_rows = jnp.clip(eps, -u_clip, u_clip)                                                 # (K, N, d)
         bp = jax.lax.stop_gradient(self.basis.params)
@@ -2442,6 +2448,7 @@ def get_config():
         "ag_w_eval": 1.0,           # guidance weight when acting (acting=distill)
         "ag_delta_tau": 0.005,      # Polyak rate of the delta copy the bootstrap reads
         "ag_score_eps": 1.0e-6,     # added to the per-row score variance before standardising
+        "ag_pool": 0,               # next states the score's normaliser reads (0 = the whole batch)
         "fb_rand_frac": 0.5,        # fraction of rows whose task is a random sqrt(D) direction
         "fb_hit_spec": "19:22:0.4",  # kernel reward blocks a:b:eps (cube: cube xyz, eps 0.4)
         "fb_ridge_lambda_mult": 0.01,   # lam = mult * tr(C)/D
