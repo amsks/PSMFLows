@@ -1393,8 +1393,17 @@ The actor that supplies the bootstrap acts at 0.31 to 0.48 at 50k; every actor-a
 nudge actor act at BC. Both readouts order with w_boot (0.5 above 0.25 above 0.1) at 50k. The reward-index
 best-of-64 at 50k was 0.26; no 500-episode A number exists at 50k (the 25k-save rerun is queued).
 Three seeds at 50k, w_boot 0.5 (09:35): best-of-64 by the critic 0.523 ± 0.103 (0.507 / 0.493 / 0.570), the
-actor alone at w 1 0.431 ± 0.131 (0.480 / 0.438 / 0.376), BC 0.111. Pending: 100k readouts and ladder on aws,
-250k three seeds (aws about 22:00 CEST), the controls' seeds 1-2 on kisski.
+actor alone at w 1 0.431 ± 0.131 (0.480 / 0.438 / 0.376), BC 0.111.
+100k (13:10 to 13:50): best-of-64 0.694 ± 0.182 (0.696 / 0.620 / 0.766), the actor alone 0.434 ± 0.240 (0.537 /
+0.346 / 0.418); w_boot 0.25 sd0 0.692 / 0.522, w_boot 0.1 sd0 0.581 / 0.618. The critic's pick rises 0.17 from
+50k and the actor stays flat, a 0.26 gap. The actor's regression loss is 0.92 on unit-variance draws from 5k
+on (the score explains 8% of a draw), its gain relative to the critic's spread rises slightly, and the critic's
+spread over draws shrinks 25% while its scores get more peaked. A larger tilt at test time does not recover
+the gap: w 2 is 0.13 / 0.30 below w 1 on the 0.5 / 0.1 runs, w 4 is below BC. The ladder at 100k equals 50k
+(bootstrap at the 64th percentile, 0.002 above a BC draw in distance to the data, TD loss equal). Reading:
+the actor learns a smooth shift along the average score; the critic's gain is in which few draws it ranks on
+top, and a smooth shift does not reproduce that choice. Pending: 250k three seeds (aws about 22:00 CEST), the
+controls' seeds 1-2 on kisski, luis's second copy of the 0.5 line.
 
 ## 7. Open questions and the next arms, with predictions
 

@@ -54,6 +54,31 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 13:50 CEST 10-20, tilt sweep at 100k (aws, sd0): a larger tilt at test time hurts; w 2 is 0.13 (w_boot 0.5) and 0.30 (w_boot 0.1) below w 1, w 4 falls below BC on both; the gap to best-of-64 is not a too-short shift
+
+aws post 2026-10-20T11-43-26Z, 500 episodes per cell, cells under `runs/ag/aws/*_100000_ag_w{2,4}_task*.json`.
+
+| sd000 at 100k | t1 | t2 | t3 | t4 | t5 | five-task |
+|---|---|---|---|---|---|---|
+| w_boot 0.5, the actor at w 1 | 0.434 | 0.362 | 0.654 | 0.740 | 0.494 | 0.537 |
+| w_boot 0.5, the actor at w 2 | 0.408 | 0.328 | 0.728 | 0.468 | 0.124 | 0.411 |
+| w_boot 0.5, the actor at w 4 | 0.090 | 0.004 | 0.264 | 0.028 | 0.010 | 0.079 |
+| w_boot 0.5, best-of-64 | 0.840 | 0.724 | 0.894 | 0.508 | 0.514 | 0.696 |
+| w_boot 0.1, the actor at w 1 | 0.526 | 0.684 | 0.828 | 0.794 | 0.260 | 0.618 |
+| w_boot 0.1, the actor at w 2 | 0.300 | 0.234 | 0.742 | 0.294 | 0.032 | 0.320 |
+| w_boot 0.1, the actor at w 4 | 0.034 | 0.000 | 0.184 | 0.066 | 0.000 | 0.057 |
+| w_boot 0.1, best-of-64 | 0.716 | 0.688 | 0.880 | 0.246 | 0.376 | 0.581 |
+| BC | | | | | | 0.111 |
+
+Against the 13:30 expectation (w 2 within 0.05 of w 1; w 4 below w 1 by 0.1 or more): w 4 collapses to 0.06
+to 0.08, under BC; w 2 is 0.13 and 0.30 below w 1, not within 0.05, and worse than at 50k (0.06 below on the
+0.5 run). Task 3 is the only task where w 2 holds; tasks 4 and 5 lose the most. The shift is not too short: w
+1 is at or past the useful length, and lengthening it loses success faster on the run whose actor was best.
+Together with the 13:40 entry: the actor's shift follows the average score toward better draws, and scaling
+that average up does not land on the draws the critic picks among. aws runs w 0.5 and w 1.5 at 100k on the
+same two runs next (does w 1 sit at the peak); 250k as planned.
+
+
 ### 13:40 CEST 10-20, why the guided actor stays at 0.43 while best-of-64 rises to 0.69: the regression loss is 0.92 on unit-variance draws from 5k on (the score explains about 8% of a draw's variance, unchanged over training); the actor's gain in units of the critic's spread rises 0.43 to 0.49; the critic's spread over draws shrinks 25% from 25k to 100k and its scores get more peaked
 
 aws post 2026-10-20T11-31-56Z, train.csv of the three w_boot 0.5 seeds, mean of three logged rows around each step.
