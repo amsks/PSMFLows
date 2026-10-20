@@ -54,6 +54,24 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 03:55 CEST 10-20, the guided actor's update was 9x critic A's step; `ag_pool` added, the arm relaunched at ag_k 16 / ag_pool 32 (about 1/32 of the scoring); kisski 2525901 psmgoal_ag_cube_sd0; 2525902 psmgoal_ag_cube_sd1; 2525903 psmgoal_ag_cube_sd2; 2525905 psmgoal_ag_wb01_cube_sd0; 2525904 psmgoal_ag_wb025_cube_sd0
+
+aws 01-34-30Z measured the first string at 2.47 s per update on an L4 against 0.265 s for critic A on the same
+GPU (9.3x): 250k would take 171 h on an L4 and about 38 h on an H100; by 09:30 the aws seeds would reach 9k.
+The cost is the per-update scoring, 64 draws x 256 rows x 257 critic calls. Fix (846808d): `ag_pool` makes the
+point value's normaliser read the first ag_pool next states of the batch (0 = all, the default; a coarser
+estimate of the same share), and the arm runs at ag_k 16 (the paper plateaus at K = 7) and ag_pool 32, i.e.
+16 x 256 x 33 calls, 1/32 of before. Test added (16 pass). CPU smoke of the new string
+(`$S/smoke_ag16_cpu.log`, exit 0): 0.81 s/step against 6.9 s/step for the 64/256 string on the same CPU
+(8.5x cheaper; the remaining cost is the measure loss and the actor's 16 forward passes); critic path
+identical (psm_loss 3.529 / 3.531, p_own_next 0.0119 / 0.0119, phi_eff_rank 1.193 / 1.193); the score side
+differs as expected (ag_c_absmean 0.67 against 0.37, since 16 draws give a less skewed standardisation;
+actor_delta_norm 0.051 at step 200 against 0.083; ag_q_gain_bok 0.030 against 0.006, the point value is
+larger with a 32-state normaliser). The four 64/256 kisski jobs (2525888-2525891) were cancelled before
+starting and resubmitted with the new string; a third control at ag_w_boot 0.1 added (`psmgoal_ag_wb01_cube`
+sd0). aws and luis asked (01-45-02Z) to restart on the new string with the two tilt controls. Expectations
+unchanged from the design doc.
+
 ### 03:35 CEST 10-20, advantage-guided actor built, tested, smoked on two machines, launched: `psmgoal_ag_cube` x 3 seeds on aws (running since 03:20) and kisski (2525888-2525890, queued), `psmgoal_ag_wb025_cube` sd0 (2525891); luis queued (late line); rand50 student three seeds 0.925 ± 0.011
 
 User decision 03:30 after the ladder reading and the Advantage Guidance paper (Zhou & Levine, arXiv 2610.19783):
