@@ -54,6 +54,31 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 17:40 CEST 10-20, antmaze with the fixed posterior latents launched (user order 17:10): `psmgoal_ja_fbc3_mix_k70_antmaze` seeds 0-2 on kisski (2525966-2525968, queued), aws asked to run the same three after tonight's guided-arm training; critic A's antmaze recipe with the TD latent drawn per batch from each transition's stored posterior (use_point_preimage=false) read from the preimage file regenerated with the two EM fixes from uoft-isl/inversion-noisy-q
+
+The file `antmaze-medium-navigate-a20-ps1-ns10-N200-init-k70` (published 10-14 20:49Z; alpha 20, prior_scale
+1, n_steps 10, N 200, init_at_preimage, cov_shrinkage 70) had never been trained on. Its median effective
+sample size per transition is 130 (p10 66, p90 158) against 5.6 in the original antmaze file; 881 of 1M
+preimages are reset to the prior (preimage_valid). The point preimage is the same in both files (the backward
+ODE is untouched by the EM fixes), so the existing point arm `psmgoal_ja_fbc3_pt_antmaze` (0.063 ± 0.106 at
+250k, 3 seeds; BC 0.072) is the control and no point arm on the new file is needed. The posterior arm on cube
+in September (09-14, `posterior-latent-settled-negative`) scored below the point arm with the old, collapsed
+posterior; that result does not carry over to a posterior with 20x the effective samples.
+
+Launcher `scripts/campaign_2026-10/antmaze_k70_arms.sh` (critic A's antmaze string: goal_discount 0.99,
+fb_hit_spec 0:2:0.5, discount 0.99 from the sbatch, plus `agent.use_point_preimage=false`; 500k steps, saves at
+250k and 500k). CPU smoke 200 steps exit 0 (psm_loss 2.23, own-next mass 0.007 at step 200, phi_eff_rank 1.16,
+actor step 0.088, 2-episode evals ran); flags re-read: use_point_preimage false, preimage_path the k70 file,
+discount 0.99, goal_discount 0.99, fb_hit_spec 0:2:0.5, actor flowbc / fb_bc_coeff 3 / point value. aws post
+15-26-26Z carries the same string with the expectations. Eval at 250k / 500k: hgoal_each and the actor at w 1,
+five tasks, 500 episodes, ENVKEY=antmaze (watcher to be armed when the first checkpoint approaches).
+
+Expected before results: own-next mass above the point arm's 0.08 to 0.10 by 100k if the posterior draws give
+the measure a wider in-support target; five-task at 250k 0.15 to 0.30 if the September posterior result was
+the collapsed posterior's fault; within 0.05 of BC (0.072) if antmaze fails for the horizon reason the 10-07
+entries gave, in which case the latent source is not the antmaze problem either.
+
+
 ### 15:35 CEST 10-20, reward-index 500k line started on aws (user order, 15:20): `psmgoal_ri_fbc3_500k_cube` seeds 3-5 on L4 GPUs 5-7 since 15:25 CEST; kisski's copies (2525859-2525861) stay queued as the backup; the guided arm's 250k readouts move to GPUs 0-4 tonight
 
 aws post 2026-10-20T13-28-19Z: 200-step smoke exit 0; flags re-read (policy_index reward, coef_source ridge,
