@@ -54,6 +54,27 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 13:40 CEST 10-20, why the guided actor stays at 0.43 while best-of-64 rises to 0.69: the regression loss is 0.92 on unit-variance draws from 5k on (the score explains about 8% of a draw's variance, unchanged over training); the actor's gain in units of the critic's spread rises 0.43 to 0.49; the critic's spread over draws shrinks 25% from 25k to 100k and its scores get more peaked
+
+aws post 2026-10-20T11-31-56Z, train.csv of the three w_boot 0.5 seeds, mean of three logged rows around each step.
+
+| seed, step | actor_loss | ag_q_gain | best-of-16 gain | draw std | gain / draw std | ag_c_absmean | cos(shift, best draw) | shift size |
+|---|---|---|---|---|---|---|---|---|
+| sd0 25k / 50k / 100k | 0.927 / 0.919 / 0.917 | 0.0030 / 0.0029 / 0.0026 | 0.0133 / 0.0119 / 0.0100 | 0.0071 / 0.0064 / 0.0055 | 0.42 / 0.45 / 0.47 | 0.776 / 0.744 / 0.735 | 0.29 / 0.32 / 0.34 | 0.572 / 0.601 / 0.611 |
+| sd1 25k / 50k / 100k | 0.934 / 0.934 / 0.920 | 0.0033 / 0.0028 / 0.0028 | 0.0139 / 0.0117 / 0.0104 | 0.0076 / 0.0063 / 0.0057 | 0.44 / 0.44 / 0.49 | 0.774 / 0.743 / 0.744 | 0.31 / 0.32 / 0.31 | 0.582 / 0.617 / 0.617 |
+| sd2 25k / 50k / 100k | 0.935 / 0.920 / 0.924 | 0.0033 / 0.0029 / 0.0032 | 0.0141 / 0.0121 / 0.0113 | 0.0076 / 0.0066 / 0.0061 | 0.44 / 0.44 / 0.52 | 0.772 / 0.746 / 0.735 | 0.32 / 0.32 / 0.34 | 0.586 / 0.611 / 0.623 |
+
+The actor's update does not stall: its loss sits at 0.92 from the first log on, its shift's alignment with the
+best of the 16 draws holds at 0.31 to 0.34, and its gain relative to the critic's spread rises on every seed.
+What changes is the critic: its value spread over the draws at the training goals falls 25% from 25k to 100k
+while best-of-64 at eval rises 0.52 to 0.69, and ag_c_absmean falls from 0.77 to 0.74 (0.80 for normal
+scores), so the within-state scores get more peaked, a few draws well above the rest. aws's reading, not yet
+tested: the actor learns a smooth shift whose size follows the average score and aims at better draws on
+average; the critic's improvement is in which few draws it puts on top, and a smooth shift cannot reproduce a
+choice among a few outlying draws. The w 2 / w 4 sweep at 100k (running on aws) tests the other reading,
+that the shift is right in direction but too short.
+
+
 ### 13:10 CEST 10-20, guided arm best-of-64 at 100k (aws): w_boot 0.5 three seeds 0.694 ± 0.181 (50k 0.523 ± 0.103), w_boot 0.25 sd0 0.692, w_boot 0.1 sd0 0.761 on three of five tasks; the full 25k ladder of A and B is in: A's nudge grows from 0.057 to 0.083 and its cosine to the critic gradient falls from 0.58 to 0.32 over 250k; B's step stays at 0.0002
 
 Cells read from `runs/ag/aws/*_100000_hgoal_each_task*.json`; aws's post 2026-10-20T11-19-02Z confirms them (0.694 ± 0.182 with aws's rounding). The w_boot 0.1 seed-0 actor alone (0.618) is above its best-of-64 (0.581), one seed.
