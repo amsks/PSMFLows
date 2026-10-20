@@ -54,6 +54,26 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 04:10 CEST 10-20, reward-index arm complete at 250k, three seeds: best-of-64 at the ridge w 0.389 ± 0.052, by expected reward 0.214 ± 0.073, the actor at w 0.107 ± 0.009 (BC 0.111; critic A 0.789 at 250k)
+
+`psmgoal_ri_fbc3_cube` sd0-2, 250k, five tasks, 500 episodes, kisski (sd1 / sd2 started 22:16 / 22:29, 250k at
+about 02:30 / 02:45; aws task-2 parity sd1 0.438 / kisski 0.424, sd2 0.306 / 0.302):
+
+| readout | sd0 | sd1 | sd2 | mean ± 95% CI |
+|---|---|---|---|---|
+| ri_gpi (best-of-64 by the goal mass at w) | 0.424 (0.682 / 0.360 / 0.638 / 0.348 / 0.092) | 0.336 (0.724 / 0.424 / 0.424 / 0.068 / 0.042) | 0.405 (0.668 / 0.302 / 0.816 / 0.140 / 0.100) | 0.389 ± 0.052 |
+| ri_gpi_reward (best-of-64 by expected relabel reward) | 0.272 | 0.144 | 0.225 | 0.214 ± 0.073 |
+| ri_actor (the flowbc actor at w) | 0.115 | 0.104 | 0.101 | 0.107 ± 0.009 |
+
+Against the expectation of 10-19 18:40 (best-of-64 at w 0.70 to 0.80, actor within 0.10 of it, reward readout
+within 0.05, failure line 0.30): best-of-64 0.31 to 0.41 below the band and 0.09 above the failure line; the
+actor at BC on every seed; the reward readout 0.18 below the goal readout. Per task the arm holds task 1 (0.67
+to 0.72) and task 3 (0.42 to 0.82), and loses tasks 4 and 5 (0.07 to 0.35, 0.04 to 0.10). The seed-0 ladder
+(0.26 at 50k to 0.42 at 250k) says 250k is not the end of the curve; the 500k line (seeds 3-5, 2525859-2525861)
+and the kernel actor-reward line (2525864-2525866, luis 8794830 held behind the ag arm) are queued. Settled at
+250k: Density FB's reward-fitted index in critic A's recipe scores half of the goal index on the same critic
+and readout, and its actor acts at BC like every actor-at-w arm.
+
 ### 03:55 CEST 10-20, the guided actor's update was 9x critic A's step; `ag_pool` added, the arm relaunched at ag_k 16 / ag_pool 32 (about 1/32 of the scoring); kisski 2525901 psmgoal_ag_cube_sd0; 2525902 psmgoal_ag_cube_sd1; 2525903 psmgoal_ag_cube_sd2; 2525905 psmgoal_ag_wb01_cube_sd0; 2525904 psmgoal_ag_wb025_cube_sd0
 
 aws 01-34-30Z measured the first string at 2.47 s per update on an L4 against 0.265 s for critic A on the same

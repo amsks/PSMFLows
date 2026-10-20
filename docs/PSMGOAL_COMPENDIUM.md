@@ -1316,7 +1316,7 @@ reads, is not resolved. The pool measure is a diagnostic result in this form. Th
 not built: weight the cube position in the distance that defines the anchor and the cells. The 500k pool
 checkpoints are evaluated for the record only.
 
-### 6.5 The reward index (2026-10-19, `docs/design/2026-10-19-reward-index.md`; sd000 250k best-of-64 0.424, below the 0.70 to 0.80 band)
+### 6.5 The reward index (2026-10-19, `docs/design/2026-10-19-reward-index.md`; 250k three seeds: best-of-64 at w 0.389 ± 0.052, actor at w 0.107 ± 0.009, against A 0.789)
 
 Density FB's second arm, `measure_density_z`: the critic's task index is a vector solved from reward samples
 (centred ridge fit of the reward on the state tower, at training on hindsight kernel rewards, at test on the
@@ -1343,6 +1343,9 @@ Ladder (01:20): sd000 best-of-64 at w 0.260 / 0.283 / 0.392 / 0.328 / 0.424 at 5
 rising 0.16 over the run while the feature spread shrinks 50x, so the shrink does not cost the readout and 250k
 is not the end of the curve. 500k line launched (seeds 3-5, `psmgoal_ri_fbc3_500k_cube`); expected 0.50 to 0.65
 at 500k if the slope continues at half rate.
+Three seeds at 250k (10-20 04:10): best-of-64 at the ridge w 0.389 ± 0.052 (0.424 / 0.336 / 0.405), by expected
+reward 0.214 ± 0.073, the actor at w 0.107 ± 0.009 (BC 0.111); tasks 1 and 3 held, tasks 4 and 5 lost. Half of
+the goal index on the same critic; the actor at BC as in every actor-at-w arm.
 Kernel actor reward (01:50): `reward_actor_reward=kernel` (8817b60), the actor climbs the exact kernel reward of
 its own hindsight goal on the rows that keep one (Density FB's kernel mode; the paper's Eq. pretraining-reward
 is the centered view the 250k arm ran). Arm `psmgoal_ri_fbc3_kern_cube` seeds 0-2, 250k. Expected: actor at w
