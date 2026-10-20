@@ -54,6 +54,24 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 11:50 CEST 10-20, guided arm ladder at 100k (aws, sd0 of each w_boot): unchanged from 50k; the bootstrap stays a 64th / 58th / 54th percentile BC draw at 0.002 / 0.000 / 0.000 above the BC draw's distance to the data; TD loss with vs without equal to the 3rd decimal
+
+aws post 2026-10-20T09-40-10Z; JSONs fetched to `$PSM_DATA/logs/actor_ladder/{ag_s0,wb025_s0,wb01_s0}_100000.json`;
+figure `docs/figures/2026-10-20-actor-ladder/ladder_A_s25_A_sd0_ag_s0_wb025_s0_wb01_s0.png`.
+
+| 100k (50k) | w_boot 0.5 | 0.25 | 0.1 |
+|---|---|---|---|
+| bootstrap's percentile among BC draws | 63.9 (63.6) | 58.2 (58.1) | 53.9 (54.0) |
+| cos(shift, critic gradient) | 0.72 (0.70) | 0.75 (0.75) | 0.76 (0.79) |
+| shift size (latent) | 0.681 (0.676) | 0.362 (0.350) | 0.153 (0.150) |
+| nearest-data distance, bootstrap (BC draw 0.2127) | 0.2149 (0.2146) | 0.2131 (0.2133) | 0.2129 (0.2129) |
+| score gain over a BC draw: bootstrap / best-of-64 | +0.0041 / +0.0150 | +0.0025 / +0.0162 | +0.0012 / +0.0178 |
+| TD loss: with shift / with BC draw | 2.469 / 2.468 | 2.766 / 2.765 | 3.040 / 3.040 |
+
+As stated at 09:35 (percentile and distance at 0.5 unchanged from 50k). The 100k evals (the actor alone at w 1
+on all five runs, then best-of-64) started on aws at 11:40 CEST.
+
+
 ### 11:30 CEST 10-20, kernel actor reward at 250k, three seeds: the actor at w 0.104 ± 0.005 (BC 0.111; centered 0.107), best-of-64 at w 0.408 ± 0.211 (centered 0.389 ± 0.052), by expected reward 0.265 ± 0.142; the 25k-save A rerun finished 250k, ladder at 25k / 50k / 75k: the nudge's cosine to the critic gradient 0.58 / 0.57 / 0.48 (0.32 at 250k), size 0.057 / 0.059 / 0.054 (0.09 at 250k), score gain +0.0009 / +0.0010 / +0.0015 (+0.003 at 250k)
 
 Kernel arm `psmgoal_ri_fbc3_kern_cube` (jobs 2525864-2525866, flags re-read: policy_index reward,
