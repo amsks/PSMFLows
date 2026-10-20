@@ -54,6 +54,26 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 00:50 CEST 10-21, kisski's readouts of luis's sd0 250k checkpoint match luis's: best-of-64 by the critic 0.717 (luis 0.732), the actor alone at w 1 0.666 (luis 0.657); w 2 0.671, w 0.5 0.457, w 4 0.247; aws 250k so far: sd0 0.614 / 0.742, sd1 0.578 / 0.524, sd2 pending
+
+Checkpoint `runs/psmgoal_ag_cube/luis_sd000_s_8795429.0.20261020_132425/params_250000.pkl` fetched to
+`$PSM_DATA/exp/PSMFLows/psmgoal_ag_cube_luis/sd000_luis_8795429/`, evaluated on kisski with kisski's flow and
+preimage paths (eval jobs 2525971-2525975, five tasks, 500 episodes per task each readout).
+
+| luis sd0 250k on kisski | t1 | t2 | t3 | t4 | t5 | five-task | luis's own |
+|---|---|---|---|---|---|---|---|
+| best-of-64 by the critic | 0.746 | 0.634 | 0.840 | 0.704 | 0.660 | 0.717 | 0.732 |
+| the actor alone at w 0.5 | 0.454 | 0.596 | 0.596 | 0.340 | 0.298 | 0.457 | |
+| the actor alone at w 1 | 0.662 | 0.886 | 0.818 | 0.588 | 0.374 | 0.666 | 0.657 |
+| the actor alone at w 2 | 0.736 | 0.830 | 0.892 | 0.696 | 0.202 | 0.671 | |
+| the actor alone at w 4 | 0.142 | 0.066 | 0.610 | 0.332 | 0.084 | 0.247 | |
+
+Machines agree within 0.015 on both readouts. The tilt sweep on this checkpoint: w 1 and w 2 tie, w 0.5 is
+0.21 below, w 4 is 0.42 below; at 100k on aws w 2 was 0.13 below w 1. aws's 250k readouts at 00:41 (poller,
+`runs/ag/aws/*.json`): w_boot 0.5 sd0 best-of-64 0.614 / the actor alone 0.742 (w 0.5 0.485, w 2 0.676,
+w 4 0.362), sd1 0.578 / 0.524, sd2 not yet landed; w_boot 0.25 sd0 0.469 / 0.728; w_boot 0.1 sd0 0.664 /
+0.540. Three-seed means follow when sd2 lands.
+
 ### 23:00 CEST 10-20, error caught and fixed: kisski's four control seeds of the guided arm (2525916-2525919, submitted 05:55) carried ag_k 64 / ag_pool 0, not the 16 / 32 of the arm; the one that had started (wb025 sd1, 16 min in) and the three pending were cancelled and resubmitted at 16 / 32 (2525986-2525989); the launcher now sets 16 / 32 itself
 
 The 05:55 resubmission passed only `AG_EXTRA="agent.ag_w_boot=0.25"` (or 0.1) to `ag_arms.sh`, which does not
