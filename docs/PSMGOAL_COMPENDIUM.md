@@ -1350,6 +1350,10 @@ Kernel actor reward (01:50): `reward_actor_reward=kernel` (8817b60), the actor c
 its own hindsight goal on the rows that keep one (Density FB's kernel mode; the paper's Eq. pretraining-reward
 is the centered view the 250k arm ran). Arm `psmgoal_ri_fbc3_kern_cube` seeds 0-2, 250k. Expected: actor at w
 0.30 or above if the reward rows were the limit; within 0.05 of BC if the BC term holds it.
+Result (10-20 11:30, three seeds, 250k): the actor at w 0.104 ± 0.005 (BC 0.111), best-of-64 at w 0.408 ±
+0.211, by expected reward 0.265 ± 0.142; the actor's latent step 0.007 (A's nudge 0.09) with a value term six
+times the centered arm's. The kernel actor reward changes nothing; the reward index is closed at 250k, the 500k
+line pending.
 
 ### 6.6 The advantage-guided actor (2026-10-20, `docs/design/2026-10-20-advantage-guided-actor.md`; 50k seed 0: the actor alone 0.480, best-of-64 0.507, BC 0.111)
 

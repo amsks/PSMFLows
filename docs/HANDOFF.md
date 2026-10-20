@@ -54,6 +54,49 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 11:30 CEST 10-20, kernel actor reward at 250k, three seeds: the actor at w 0.104 ± 0.005 (BC 0.111; centered 0.107), best-of-64 at w 0.408 ± 0.211 (centered 0.389 ± 0.052), by expected reward 0.265 ± 0.142; the 25k-save A rerun finished 250k, ladder at 25k / 50k / 75k: the nudge's cosine to the critic gradient 0.58 / 0.57 / 0.48 (0.32 at 250k), size 0.057 / 0.059 / 0.054 (0.09 at 250k), score gain +0.0009 / +0.0010 / +0.0015 (+0.003 at 250k)
+
+Kernel arm `psmgoal_ri_fbc3_kern_cube` (jobs 2525864-2525866, flags re-read: policy_index reward,
+reward_actor_reward kernel, coef_source ridge, flowbc actor at w, fb_bc_coeff 3.0), 250k, kisski, 500 episodes:
+
+| readout at 250k | sd0 | sd1 | sd2 | mean ± 95% CI | centered arm (04:10) |
+|---|---|---|---|---|---|
+| the actor at w | 0.104 | 0.106 | 0.102 | 0.104 ± 0.005 | 0.107 ± 0.009 |
+| best-of-64 by the goal mass at w | 0.384 | 0.503 | 0.338 | 0.408 ± 0.211 | 0.389 ± 0.052 |
+| best-of-64 by the expected reward | 0.238 | 0.331 | 0.228 | 0.265 ± 0.142 | 0.214 ± 0.073 |
+| BC | | | | 0.111 | |
+
+Against the 01:50 expectation (actor at w 0.30 or above if the reward rows were the limit; within 0.05 of BC if
+the BC term holds it): within 0.01 of BC on every seed. Train signals at 250k, sd0, kernel vs centered: the
+actor's step in latent norm 0.0069 vs 0.0096 (A's nudge 0.09), the actor's value term 0.0043 vs 0.0000, its
+spread 0.0048 vs 0.0007, actor_bc_err 0.0001 in both. The kernel reward gives the actor a value signal six
+times the centered one and the actor still does not move: the step is 1/13 of A's and the acting is BC. The
+critic readouts are unchanged within the seed spread. Density FB's kernel-mode actor reward is therefore not
+what separates A (0.79) from the reward index (0.39) on this critic; the reward index is closed at 250k with
+the 500k line (2525859-2525861, still queued) as the last open item.
+
+A with a checkpoint every 25k (`psmgoal_ja_fbc3_pt_s25_cube` sd0, 2525872) finished 250k at about 11:20;
+B's rerun (2525873) is at 150k. Ladder reports A_s25 at 25k / 50k / 75k exist (the loop restarted at 09:30
+without duplicates submits the rest as the queue allows); figure
+`docs/figures/2026-10-20-actor-ladder/ladder_A_s25_A_sd0.png`:
+
+| A, sd0 | 25k | 50k | 75k | 250k (10-20 03:00) | 500k |
+|---|---|---|---|---|---|
+| cos(nudge, critic gradient) | 0.576 | 0.573 | 0.477 | 0.324 | 0.348 |
+| nudge size (latent) | 0.057 | 0.059 | 0.054 | 0.083 | 0.080 |
+| nudge's score gain over a BC draw | +0.0009 | +0.0010 | +0.0015 | +0.0033 | +0.0029 |
+| best-of-2 / best-of-64 gain | +0.0049 / +0.019 | +0.0045 / +0.019 | +0.0050 / +0.020 | +0.0047 / +0.018 | +0.0041 / +0.015 |
+| nudge's percentile among BC draws | 51.8 | 51.8 | 51.7 | 52.5 | 52.3 |
+| nearest-data distance, nudge / BC draw | 0.2127 / 0.2127 | 0.2127 / 0.2127 | 0.2126 / 0.2127 | 0.2122 / 0.2127 | 0.2126 / 0.2127 |
+| TD loss with / without the nudge | 2.91 / 2.91 | 2.641 / 2.642 | 2.91 / 2.91 | 4.018 / 4.018 | 4.338 / 4.338 |
+| own-next mass | 0.407 | 0.475 | 0.449 | 0.321 | 0.282 |
+
+Early in training the nudge points along the critic's gradient at cosine 0.58 and is smaller (0.057); by 250k
+the cosine has fallen to 0.32 and the size and score gain have grown. Its distance to the data, its percentile
+and the TD loss with or without it do not change over the run. The guided arm at 50k (09:35 entry) has cosine
+0.70 and a 64th percentile at w_boot 0.5 on the same probe.
+
+
 ### 09:35 CEST 10-20, guided arm w_boot 0.5 at 50k, three seeds complete: best-of-64 by the critic 0.523 ± 0.103, the actor alone 0.431 ± 0.131, BC 0.111 (the 6-hour reading asked for at 03:30)
 
 aws post 2026-10-20T07-34-33Z, psmgoal_ag_cube at 50k, 500 episodes per cell, all 45 cells under `runs/ag/aws/`.
