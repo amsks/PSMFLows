@@ -54,6 +54,51 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 03:00 CEST 10-20, bootstrap ladder diagnostic (tools/diag_bootstrap_ladder.py, a5f1192): the actor's nudge changes the TD target by almost nothing, sits exactly where BC draws sit, and is a 52nd-percentile action by the critic's own score; A/B seed 0 relaunched with a checkpoint every 25k
+
+User's question (02:20): directed exploration is not refuted by the random-direction arm; track where the nudge
+points over training, whether the bootstrap actions sit closer to or farther from the data than BC draws and
+best-of-N picks, and the errors. Logged training curves of A against B (seed 0, every 5k;
+`docs/figures/2026-10-20-actor-ladder/train_curves_A_vs_B_sd0.png`): td_target_absmean identical (127.0 /
+127.6 at 500k), A's loss 0.2 below B's after 200k (4.33 / 4.53), A keeps more mass on the true next state (0.28 /
+0.25) with a wider logit spread (5.5 / 5.1), actor_u_data_gap identical (2.07 / 2.07), phi_eff_rank 1.012 /
+1.010. New tool (subagent build, 7 CPU tests, sbatch `scripts/slurm/diag_bootstrap_ladder.sbatch`, loop
+`scripts/campaign_2026-10/bootstrap_ladder.sh`, figure `tools/fig_bootstrap_ladder.py`) on a fixed probe set
+(512 transitions, 2000 draws, 8 x 256 TD batches, probe hash 5675b5eb0a48 in all four reports), A and B seed 0 at
+250k and 500k (`$PSM_DATA/logs/actor_ladder/{A,B}_sd0_{250000,500000}.json`,
+`docs/figures/2026-10-20-actor-ladder/ladder_A_sd0_B_sd0.png`):
+
+| | A 250k | A 500k | B 250k | B 500k |
+|---|---|---|---|---|
+| cos(nudge, critic gradient) | 0.32 | 0.35 | 0.11 | 0.28 |
+| cos(nudge, top-set centre) | 0.31 | 0.34 | 0.11 | 0.25 |
+| nudge length (mean per-(s,g) part / per draw) | 0.083 / 0.090 | 0.080 / 0.088 | 0.0002 / 0.0003 | 0.0003 / 0.0003 |
+| critic's own value: nudged minus BC draw | +0.0033 | +0.0029 | 0.0000 | 0.0000 |
+| best-of-2 minus BC draw | +0.0047 | +0.0041 | +0.0038 | +0.0030 |
+| best-of-64 minus BC draw | +0.0175 | +0.0154 | +0.0143 | +0.0121 |
+| percentile of the nudged latent among 64 BC draws | 0.525 | 0.523 | 0.501 | 0.501 |
+| nearest dataset action: nudged / BC draw | 0.2122 / 0.2127 | 0.2126 / 0.2127 | 0.2127 / 0.2127 | 0.2127 / 0.2127 |
+| distance to the recorded action: nudged / BC draw | 0.296 / 0.299 | 0.297 / 0.299 | 0.299 / 0.299 | 0.299 / 0.299 |
+| TD loss with the nudge / with the plain BC draw in the target | 4.0175 / 4.0179 | 4.338 / 4.338 | 4.114 / 4.114 | 4.546 / 4.546 |
+| target size, own-next mass | 125.9, 0.32 | 127.0, 0.28 | 126.7, 0.32 | 127.6, 0.25 |
+
+Reading. (1) The nudge in A points along the critic's gradient and toward the centre of the critic's top-scoring
+latents at a cosine of about a third, stable from 250k to 500k; B's direction is that of a step of length 0.0003
+and carries no information. (2) The nudged action sits exactly where a BC draw sits: nearest-dataset-action
+distance and distance to the recorded action equal to three digits. It is not out of support and not closer to
+the data. (3) By the critic's own score the nudged latent is a 52nd-percentile BC draw, +0.003 against +0.004 for
+the better of two draws and +0.016 for the best of 64. (4) Replacing the nudge by the plain BC draw in the TD
+target changes the loss in the fourth decimal and the target size and own-next mass not at all. So at any single
+step the nudge is a near-invisible change to the target, a consistent small shift (82% of it a fixed vector per
+state and goal) rather than a selection; the critic trained with it is 0.05 better than one without, and the
+critic trained with the better of two draws, a larger per-step improvement that varies with the draw, collapsed.
+What this does not show: the curves over training (checkpoints exist only at 250k and 500k). Relaunched A and B
+seed 0 to 250k with a checkpoint every 25k (`psmgoal_ja_fbc3_pt_s25_cube` 2525872, `psmgoal_ja_fbcBC_pt_s25_cube`
+2525873, pending); a loop submits the diagnostic per checkpoint and plots `ladder_A_s25_B_s25.png`.
+Expected, stated now: cos(nudge, gradient) in A rises from near 0 to about 0.3 by 100k and stays; the
+coverage distances stay equal to BC's at every checkpoint; the loss difference with and without the nudge stays
+below 0.01 throughout; own-next mass of A above B's from about 150k on by 0.02 to 0.03.
+
 ### 01:50 CEST 10-20, kernel actor reward built and launched: `psmgoal_ri_fbc3_kern_cube` seeds 0-2 (2525864-2525866), the actor climbs the exact kernel reward on its hindsight rows
 
 The user's call at 01:30: Density FB's actor on the exact kernel reward is the setting that worked, and the
