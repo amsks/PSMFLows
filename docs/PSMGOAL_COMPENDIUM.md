@@ -1387,9 +1387,10 @@ its size (cos to the best draw 0.30 to 0.37); own-next mass 0.39 to 0.45 at 50k 
 
 The actor that supplies the bootstrap acts at 0.31 to 0.48 at 50k; every actor-at-w arm since 10-05 and A's
 nudge actor act at BC. Both readouts order with w_boot (0.5 above 0.25 above 0.1) at 50k. The reward-index
-best-of-64 at 50k was 0.26; no 500-episode A number exists at 50k (the 25k-save rerun is queued). Pending:
-three seeds at 50k of the 0.5 line (aws, about 09:30 CEST), 250k three seeds (aws about 22:00 CEST), the
-controls' seeds 1-2 on kisski.
+best-of-64 at 50k was 0.26; no 500-episode A number exists at 50k (the 25k-save rerun is queued).
+Three seeds at 50k, w_boot 0.5 (09:35): best-of-64 by the critic 0.523 ± 0.103 (0.507 / 0.493 / 0.570), the
+actor alone at w 1 0.431 ± 0.131 (0.480 / 0.438 / 0.376), BC 0.111. Pending: 100k readouts and ladder on aws,
+250k three seeds (aws about 22:00 CEST), the controls' seeds 1-2 on kisski.
 
 ## 7. Open questions and the next arms, with predictions
 

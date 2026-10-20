@@ -54,6 +54,29 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 09:35 CEST 10-20, guided arm w_boot 0.5 at 50k, three seeds complete: best-of-64 by the critic 0.523 ± 0.103, the actor alone 0.431 ± 0.131, BC 0.111 (the 6-hour reading asked for at 03:30)
+
+aws post 2026-10-20T07-34-33Z, psmgoal_ag_cube at 50k, 500 episodes per cell, all 45 cells under `runs/ag/aws/`.
+
+| best-of-64 by the critic, 50k | t1 | t2 | t3 | t4 | t5 | five-task |
+|---|---|---|---|---|---|---|
+| sd000 | 0.452 | 0.740 | 0.462 | 0.404 | 0.478 | 0.507 |
+| sd001 | 0.666 | 0.552 | 0.666 | 0.306 | 0.274 | 0.493 |
+| sd002 | 0.674 | 0.664 | 0.784 | 0.330 | 0.400 | 0.570 |
+| mean ± 95% CI | | | | | | 0.523 ± 0.103 |
+
+| psmgoal_ag_cube at 50k, 3 seeds | five-task |
+|---|---|
+| best-of-64 by the critic | 0.523 ± 0.103 |
+| the actor alone at w 1 | 0.431 ± 0.131 |
+| BC | 0.111 |
+
+The actor alone is 0.09 below best-of-64 on the same checkpoints, within the seed spread; tasks 4 and 5 are
+the weak ones under best-of-64 on sd1/sd2. No 500-episode A number at 50k exists (the 25k-save rerun is at
+about 2 h of training on kisski); the reward-index best-of-64 at 50k was 0.26. aws asked to run the two
+readouts on all five runs at 100k plus the ladder on the three sd0s at 100k (GPUs free; 250k about 22:00 CEST).
+
+
 ### 09:00 CEST 10-20, guided arm w_boot 0.5 at 50k, three seeds: the actor alone 0.431 ± 0.131 (0.480 / 0.438 / 0.376; BC 0.111); the three-seed best-of-64 lands about 09:30
 
 aws post 2026-10-20T06-54-09Z, psmgoal_ag_cube at 50k, acting=distill at ag_w_eval 1, 500 episodes per cell.
