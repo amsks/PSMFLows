@@ -54,6 +54,29 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 08:55 CEST 10-20, guided arm at 50k, all 35 cells on aws (seed 0, 500 episodes): the actor alone 0.480 at w_boot 0.5 (0.435 at 0.25, 0.310 at 0.1), best-of-64 by the critic 0.507 / 0.481 / 0.418, the actor at w 2 0.417; BC 0.111; reward-index best-of-64 at 50k 0.26
+
+aws post 2026-10-20T06-47-45Z; cells under `runs/ag/aws/` on HF; compendium 6.6 written.
+
+| sd000 at 50k | t1 | t2 | t3 | t4 | t5 | five-task |
+|---|---|---|---|---|---|---|
+| ag (w_boot 0.5), best-of-64 by the critic | 0.452 | 0.740 | 0.462 | 0.404 | 0.478 | 0.507 |
+| ag (w_boot 0.5), the actor alone at w 1 | 0.498 | 0.324 | 0.606 | 0.502 | 0.472 | 0.480 |
+| ag (w_boot 0.5), the actor alone at w 2 | 0.266 | 0.386 | 0.540 | 0.518 | 0.374 | 0.417 |
+| wb025 (w_boot 0.25), best-of-64 | 0.328 | 0.696 | 0.644 | 0.402 | 0.336 | 0.481 |
+| wb025 (w_boot 0.25), the actor alone at w 1 | 0.306 | 0.460 | 0.560 | 0.808 | 0.042 | 0.435 |
+| wb01 (w_boot 0.1), best-of-64 | 0.414 | 0.538 | 0.636 | 0.246 | 0.256 | 0.418 |
+| wb01 (w_boot 0.1), the actor alone at w 1 | 0.302 | 0.178 | 0.370 | 0.622 | 0.076 | 0.310 |
+| BC | | | | | | 0.111 |
+
+Against the 05:55 expectation: the actor alone is above BC at every w_boot (0.31 to 0.48, predicted above
+0.11, the "ignores the score" line not met); the 0.5 arm is above the controls on both readouts (predicted
+either above A or below 0.3; no 500-episode A number at 50k exists yet, the reward-index best-of-64 at 50k was
+0.26). The larger bootstrap shift helps at 50k; a stronger tilt at test time does not (w 2 0.417 vs w 1 0.480,
+one seed). Task 5 is where the smaller-w_boot actors fail (0.042 / 0.076). aws queued the two readouts on sd1
+and sd2 of the 0.5 line at 50k (three-seed means about 09:30 CEST); training at about 70k, 250k about 22:00 CEST.
+
+
 ### 07:55 CEST 10-20, guided arm at 50k (aws, sd0, interim): the guided actor alone 0.32 to 0.61 on four tasks (BC 0.11; critic A's actor 0.11), best-of-64 0.45 / 0.74 on two tasks; ladder at 50k: the guided bootstrap is a 64th / 58th / 54th percentile BC draw at w_boot 0.5 / 0.25 / 0.1, nearest-data distance 0.2146 / 0.2133 / 0.2129 vs the BC draw's 0.2127, cos to the critic gradient 0.70 to 0.79 (A 0.32 to 0.35), TD loss equal to the 4th decimal
 
 aws post 2026-10-20T05-48-00Z. 500-episode cells landed so far (the other 24 of the 30 queued on aws GPUs 5 to 7,

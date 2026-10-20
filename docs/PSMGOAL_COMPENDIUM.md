@@ -1351,6 +1351,46 @@ its own hindsight goal on the rows that keep one (Density FB's kernel mode; the 
 is the centered view the 250k arm ran). Arm `psmgoal_ri_fbc3_kern_cube` seeds 0-2, 250k. Expected: actor at w
 0.30 or above if the reward rows were the limit; within 0.05 of BC if the BC term holds it.
 
+### 6.6 The advantage-guided actor (2026-10-20, `docs/design/2026-10-20-advantage-guided-actor.md`; 50k seed 0: the actor alone 0.480, best-of-64 0.507, BC 0.111)
+
+The user's ask of 10-20: one network that is trained with the critic, supplies the TD bootstrap and acts at
+test time, in place of A's nudge actor for the bootstrap plus an offline distilled student for acting. Port of
+Zhou and Levine's advantage guidance (arXiv 2610.19783) onto A's recipe (`ag_actor`, 9bfebd3, 846808d): the
+flowbc delta's goal slot takes [g, c]; per update ag_k = 16 prior draws are scored by the point value at the
+actor goal, the scores standardised per state (the normaliser reads ag_pool = 32 of the batch's next states),
+and delta regresses each draw conditioned on its standardised score (mean squared error, plain supervised
+learning, no critic gradient through the actor). The bootstrap is clip(eps + ag_w_boot (mu(+1) - mu(-1))) read
+from a Polyak copy of delta (tau 0.005), acting is the same at ag_w_eval. Cost at 16 / 32 equals A's step (0.26
+s per update on an L4). Arms: `psmgoal_ag_cube` (w_boot 0.5, 3 seeds), `psmgoal_ag_wb025_cube` (0.25),
+`psmgoal_ag_wb01_cube` (0.1); aws runs sd0 of each plus sd1-2 at 0.5, kisski sd1-2 of the two controls, luis
+sd0-2 at 0.5 as the second copy. Stated before results (design doc): best-of-64 at or above A's 0.79 at 250k,
+0.66 to 0.72 if the regression actor is too slow, below 0.5 if the tilt collapses the target; the actor alone
+0.5 to 0.8 at the best ag_w_eval, within 0.05 of BC at every w reads "the actor ignores the score".
+Signals at 25k and 50k (aws): the shift's size is 1.2 x w_boot in every run and its direction does not depend on
+its size (cos to the best draw 0.30 to 0.37); own-next mass 0.39 to 0.45 at 50k (A 0.42). Ladder at 50k
+(`tools/diag_bootstrap_ladder.py`, b5ce219 reads the guided bootstrap from the Polyak copy): the bootstrap is a
+64th / 58th / 54th percentile BC draw at w_boot 0.5 / 0.25 / 0.1 (A's nudge 52nd), nearest-data distance 0.2146
+/ 0.2133 / 0.2129 against the BC draw's 0.2127 and the best-of-64 pick's 0.224, cos to the critic's gradient
+0.70 to 0.79 (A 0.32 to 0.35), TD loss with vs without the shift equal to the 4th decimal.
+50k, seed 0, five tasks, 500 episodes (aws post 06-47-45Z):
+
+| sd0 at 50k | t1 | t2 | t3 | t4 | t5 | five-task |
+|---|---|---|---|---|---|---|
+| w_boot 0.5, best-of-64 by the critic | 0.452 | 0.740 | 0.462 | 0.404 | 0.478 | 0.507 |
+| w_boot 0.5, the actor alone at w 1 | 0.498 | 0.324 | 0.606 | 0.502 | 0.472 | 0.480 |
+| w_boot 0.5, the actor alone at w 2 | 0.266 | 0.386 | 0.540 | 0.518 | 0.374 | 0.417 |
+| w_boot 0.25, best-of-64 | 0.328 | 0.696 | 0.644 | 0.402 | 0.336 | 0.481 |
+| w_boot 0.25, the actor alone at w 1 | 0.306 | 0.460 | 0.560 | 0.808 | 0.042 | 0.435 |
+| w_boot 0.1, best-of-64 | 0.414 | 0.538 | 0.636 | 0.246 | 0.256 | 0.418 |
+| w_boot 0.1, the actor alone at w 1 | 0.302 | 0.178 | 0.370 | 0.622 | 0.076 | 0.310 |
+| BC | | | | | | 0.111 |
+
+The actor that supplies the bootstrap acts at 0.31 to 0.48 at 50k; every actor-at-w arm since 10-05 and A's
+nudge actor act at BC. Both readouts order with w_boot (0.5 above 0.25 above 0.1) at 50k. The reward-index
+best-of-64 at 50k was 0.26; no 500-episode A number exists at 50k (the 25k-save rerun is queued). Pending:
+three seeds at 50k of the 0.5 line (aws, about 09:30 CEST), 250k three seeds (aws about 22:00 CEST), the
+controls' seeds 1-2 on kisski.
+
 ## 7. Open questions and the next arms, with predictions
 
 Each item gives the question, the measurement that decides it, and the predicted outcome under
