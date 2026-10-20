@@ -54,6 +54,56 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 13:10 CEST 10-20, guided arm best-of-64 at 100k (aws): w_boot 0.5 three seeds 0.694 ± 0.181 (50k 0.523 ± 0.103), w_boot 0.25 sd0 0.692, w_boot 0.1 sd0 0.761 on three of five tasks; the full 25k ladder of A and B is in: A's nudge grows from 0.057 to 0.083 and its cosine to the critic gradient falls from 0.58 to 0.32 over 250k; B's step stays at 0.0002
+
+Cells read from `runs/ag/aws/*_100000_hgoal_each_task*.json` (aws's post pending):
+
+| best-of-64 by the critic, 100k | t1 | t2 | t3 | t4 | t5 | 100k | 50k |
+|---|---|---|---|---|---|---|---|
+| w_boot 0.5 sd000 | 0.840 | 0.724 | 0.894 | 0.508 | 0.514 | 0.696 | 0.507 |
+| w_boot 0.5 sd001 | 0.772 | 0.692 | 0.710 | 0.314 | 0.610 | 0.620 | 0.493 |
+| w_boot 0.5 sd002 | 0.840 | 0.788 | 0.876 | 0.522 | 0.806 | 0.766 | 0.570 |
+| w_boot 0.5, mean ± 95% CI | | | | | | 0.694 ± 0.181 | 0.523 ± 0.103 |
+| w_boot 0.25 sd000 | 0.790 | 0.796 | 0.850 | 0.414 | 0.608 | 0.692 | 0.481 |
+| w_boot 0.1 sd000 | 0.716 | 0.688 | 0.880 | running | running | (0.761 on 3 tasks) | 0.418 |
+| the actor alone at w 1, w_boot 0.5, 3 seeds (12:00 entry) | | | | | | 0.434 ± 0.240 | 0.431 ± 0.131 |
+| BC | | | | | | 0.111 | |
+
+Against the 09:35 expectation (0.5 line 0.60 to 0.70 at 100k): 0.694, inside the band; every run above its 50k
+value by 0.17 to 0.21. The actor alone is 0.26 below best-of-64 on the same checkpoints at 100k (0.09 at 50k),
+outside the 0.10 I expected: the critic's readout improves from 50k to 100k and the regression actor does not
+follow it. Tasks 4 and 5 remain the weak ones under best-of-64. 250k (about 22:00 CEST) decides against A's
+0.789; the actor alone at w 0.5 / 1 / 2 / 4 on sd0 at 250k says whether a stronger tilt at test time recovers
+part of the gap.
+
+Ladder, A and B with a checkpoint every 25k (`psmgoal_ja_fbc3_pt_s25_cube` sd0 / `psmgoal_ja_fbcBC_pt_s25_cube`
+sd0, both finished 250k; 20 reports in `$PSM_DATA/logs/actor_ladder/{A,B}_s25_<epoch>.json`; figure
+`docs/figures/2026-10-20-actor-ladder/ladder_A_s25_B_s25.png`; probe: task-1 env, 512 states, 2000 draws, seed 0):
+
+| A sd0 | 25k | 50k | 75k | 100k | 125k | 150k | 175k | 200k | 225k | 250k |
+|---|---|---|---|---|---|---|---|---|---|---|
+| cos(nudge, critic gradient) | 0.58 | 0.57 | 0.48 | 0.54 | 0.41 | 0.53 | 0.43 | 0.52 | 0.46 | 0.32 |
+| nudge size (latent) | 0.057 | 0.059 | 0.054 | 0.057 | 0.061 | 0.076 | 0.079 | 0.076 | 0.085 | 0.083 |
+| nudge's score gain over a BC draw (x1000) | 0.9 | 1.0 | 1.5 | 1.8 | 2.0 | 3.0 | 3.0 | 2.7 | 2.9 | 3.3 |
+| best-of-2 gain (x1000) | 4.9 | 4.5 | 5.0 | 4.8 | 4.9 | 5.1 | 4.8 | 4.6 | 4.6 | 4.7 |
+| nudge's percentile among BC draws | 51.8 | 51.8 | 51.7 | 51.9 | 51.9 | 52.4 | 52.4 | 52.5 | 52.5 | 52.5 |
+| nearest-data distance, nudge (BC draw 0.2127) | 0.2127 | 0.2127 | 0.2126 | 0.2124 | 0.2125 | 0.2122 | 0.2123 | 0.2123 | 0.2123 | 0.2122 |
+
+| B sd0 | 25k | 50k | 100k | 150k | 200k | 250k |
+|---|---|---|---|---|---|---|
+| cos(step, critic gradient) | 0.41 | 0.18 | 0.20 | 0.17 | 0.13 | 0.11 |
+| step size (latent) | 0.0002 | 0.0002 | 0.0002 | 0.0002 | 0.0003 | 0.0002 |
+| step's score gain (x1000) | 0.003 | 0.004 | 0.006 | 0.008 | 0.009 | 0.008 |
+| percentile among BC draws | 50.0 | 50.1 | 50.1 | 50.1 | 50.1 | 50.1 |
+
+What the ladder over training says: A's nudge starts small and well aligned with the critic's gradient (cosine
+0.58, size 0.057, gain 0.0009) and ends larger and less aligned (0.32, 0.083, 0.0033); its score gain never
+reaches a best-of-2 pick (0.0045 to 0.005 throughout); its percentile stays at 52 and its distance to the
+data stays at the BC draw's at every checkpoint. B's step is 0.0002 at every checkpoint (the BC term holds it
+at zero) with a score gain of 1e-5 and a percentile of 50. The nudge's growth over training tracks the
+critic's readout (A's own ladder rises over the run) and never leaves the data.
+
+
 ### 12:00 CEST 10-20, guided actor alone at 100k (aws): w_boot 0.5 three seeds 0.434 ± 0.240 (50k 0.431 ± 0.131), one seed down, two up; w_boot 0.25 sd0 0.522 (50k 0.435); w_boot 0.1 sd0 0.618 (50k 0.310); BC 0.111
 
 aws post 2026-10-20T09-55-27Z, 500 episodes per cell, ag_w_eval 1, cells under `runs/ag/aws/*_100000_ag_w1_task*.json`.
