@@ -54,6 +54,20 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 09:00 CEST 10-20, guided arm w_boot 0.5 at 50k, three seeds: the actor alone 0.431 ± 0.131 (0.480 / 0.438 / 0.376; BC 0.111); the three-seed best-of-64 lands about 09:30
+
+aws post 2026-10-20T06-54-09Z, psmgoal_ag_cube at 50k, acting=distill at ag_w_eval 1, 500 episodes per cell.
+
+| the actor alone at w 1, 50k | t1 | t2 | t3 | t4 | t5 | five-task |
+|---|---|---|---|---|---|---|
+| sd000 | 0.498 | 0.324 | 0.606 | 0.502 | 0.472 | 0.480 |
+| sd001 | 0.556 | 0.338 | 0.458 | 0.734 | 0.102 | 0.438 |
+| sd002 | 0.302 | 0.108 | 0.514 | 0.466 | 0.488 | 0.376 |
+| mean ± 95% CI | | | | | | 0.431 ± 0.131 |
+
+Every seed at least 0.26 above BC. sd1's task 5 (0.102) is the task-5 weakness of the smaller-w_boot actors.
+
+
 ### 08:55 CEST 10-20, guided arm at 50k, all 35 cells on aws (seed 0, 500 episodes): the actor alone 0.480 at w_boot 0.5 (0.435 at 0.25, 0.310 at 0.1), best-of-64 by the critic 0.507 / 0.481 / 0.418, the actor at w 2 0.417; BC 0.111; reward-index best-of-64 at 50k 0.26
 
 aws post 2026-10-20T06-47-45Z; cells under `runs/ag/aws/` on HF; compendium 6.6 written.
