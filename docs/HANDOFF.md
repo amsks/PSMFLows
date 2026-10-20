@@ -84,8 +84,10 @@ entries gave, in which case the latent source is not the antmaze problem either.
 aws post 2026-10-20T13-28-19Z: 200-step smoke exit 0; flags re-read (policy_index reward, coef_source ridge,
 actor_input w, reward_actor_reward latent_centered, offline_steps 500000, seeds 3 / 4 / 5); flags differ from
 the kisski 250k sd000 run only in paths, step counts, seed and keys added since (ag_* at defaults). About 0.33
-s per update while sharing the machine; 250k about 09:00 CEST 10-21, 500k about 03:00 CEST 10-22. Readouts
-(ri_actor, ri_gpi, ri_gpi_reward) at 250k and 500k. Meeting summary at `docs/notes/2026-10-20-meeting-summary.md`.
+s per update while sharing the machine. At 25k (aws post 15-57-16Z): 0.355 s per update, so 250k about 16:00
+CEST 10-21 and 500k about 15:00 CEST 10-22; signals match the kisski 250k arm's 25k row on all three seeds
+(proxy correlation 0.64 to 0.67 vs 0.64 to 0.67, own-next mass 0.35 to 0.38 vs 0.36 to 0.38, feature spread
+0.086 to 0.090 vs 0.079). Readouts (ri_actor, ri_gpi, ri_gpi_reward) at 250k and 500k. Meeting summary at `docs/notes/2026-10-20-meeting-summary.md`.
 
 
 ### 15:05 CEST 10-20, luis's copy of the guided arm (w_boot 0.5, three seeds) running; 25k signals match aws within 0.03 on every column; sd1 on an A100 (0.20 s per update) will hit its 12 h limit at about 215k, to be read at its 200k checkpoint if cut, no resubmission
