@@ -54,6 +54,46 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 03:35 CEST 10-20, advantage-guided actor built, tested, smoked on two machines, launched: `psmgoal_ag_cube` x 3 seeds on aws (running since 03:20) and kisski (2525888-2525890, queued), `psmgoal_ag_wb025_cube` sd0 (2525891); luis queued (late line); rand50 student three seeds 0.925 ± 0.011
+
+User decision 03:30 after the ladder reading and the Advantage Guidance paper (Zhou & Levine, arXiv 2610.19783):
+co-train the actor by regression on scored prior draws, conditioned on the standardised score, and use the
+same network guided for the bootstrap and for acting; results wanted by 09:30 CEST. Design
+`docs/design/2026-10-20-advantage-guided-actor.md`; code 9bfebd3 (`ag_actor` in `agents/psmgoal.py`, default
+off): per update 64 prior draws per row scored by the point value at the actor goal under the stop-gradded
+online basis, scores standardised per row, delta(s, [g, c], 0) regressed onto the draw with score c; the TD
+bootstrap clip(eps + 0.5 (mu(+1) - mu(-1))) from a Polyak copy `delta_target` (tau 0.005, new agent field);
+acting=distill at ag_w_eval. No critic gradient and no BC term reach delta. Tests
+`tests/test_psmgoal_ag_actor.py` 15 pass (asserts, defaults, cond slot, slow-copy bootstrap, Polyak, goal head
+untouched, standardisation, loss falls on fixed draws, acting at w and w=0 equals BC); reward-index and
+joint-actor files 52 pass; lint clean. Launcher `scripts/campaign_2026-10/ag_arms.sh`, watcher
+`scripts/campaign_2026-10/ag_eval_watcher_cube.sh` (hgoal_each + the actor at w 0.5 / 1 / 2 / 4).
+
+Smoke, 200 steps, kisski CPU (`$S/smoke_ag_cpu.log`, exit 0, 6.6 s/step on CPU) against aws (01-21-35Z, its
+own GPU smoke): actor_loss 0.976 / 0.976, actor_delta_norm (the bootstrap shift at w 0.5 from the slow copy)
+0.083 / 0.083, actor_q 0.0073 / 0.0072, ag_q_gain 0.000 / 0.00003, ag_q_gain_bok 0.0062 / 0.0062, ag_c_absmean
+0.372 / 0.372, ag_shift_cos_best 0.116 / 0.111, measure_p_own_next 0.012 / 0.012, psm_loss 3.53 / 3.53,
+phi_eff_rank 1.19 / 1.19. Flags on both: ag_actor true, ag_k 64, ag_w_boot 0.5, ag_w_eval 1.0, ag_delta_tau
+0.005, actor_kind flowbc, actor_value_kind point, bootstrap_source actor, policy_index goal. Two things to
+watch from the smoke: the shift norm grew 0.002 to 0.083 in 200 steps (A's final nudge was 0.09), so at 25k the
+shift may be several times A's and the w 0.25 control matters; ag_c_absmean 0.37 against 0.8 for a Gaussian
+score means the draw scores are skewed (few high draws), as expected for a softmax share.
+
+Machines: aws three seeds on three L4s since 01:20Z (run dirs sd00{0,1,2}_20261020_012011, flags re-read);
+kisski 2525888-2525890 and the w_boot 0.25 control 2525891 pending behind eight jobs; luis 8795225-8795227
+pending with all 32 GPUs allocated and 60 jobs ahead, kernel seed held (luis 01-12-46Z). The kisski smoke was
+still running when the seeds were submitted; aws's smoke on the same commit and string was the gate.
+Expected (design doc): hgoal_each at or above A's 0.79; the actor alone 0.5 to 0.8 at the best w; failure
+lines 0.66 to 0.72 (regression actor too slow) and below 0.5 (collapse); the actor within 0.05 of BC at every
+w reads "ignores the score". Step cost unknown on GPU; aws reports wall time per 5k.
+
+Also in: luis 00-59-07Z, rand50 students three seeds (nf2 sd0 500k teacher): random_only five-task 0.925 ±
+0.011 (sample) / 0.910 ± 0.061 (mode); leave-one-out cost per task (sample) 0.008 / -0.015 / 0.005 / 0.037 /
+0.094, CIs all including zero; five-task cost 0.03 ± 0.09. The single-seed "tasks 4 and 5 drop" reading is
+withdrawn; task 5 is the only cell with a consistent sign (below on all three seeds, 0.03 to 0.18). aws
+01-21-35Z, reward-index task-2 best-of-64 parity: sd001 0.438, sd002 0.306 (kisski sd1/sd2 five-task evals
+running). Mailbox: kisski 01-09-46Z (the arm), 00-09-41Z (luis holds latent seeds).
+
 ### 03:00 CEST 10-20, bootstrap ladder diagnostic (tools/diag_bootstrap_ladder.py, a5f1192): the actor's nudge changes the TD target by almost nothing, sits exactly where BC draws sit, and is a 52nd-percentile action by the critic's own score; A/B seed 0 relaunched with a checkpoint every 25k
 
 User's question (02:20): directed exploration is not refuted by the random-direction arm; track where the nudge
