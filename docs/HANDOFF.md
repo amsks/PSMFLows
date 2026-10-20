@@ -54,6 +54,45 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 07:55 CEST 10-20, guided arm at 50k (aws, sd0, interim): the guided actor alone 0.32 to 0.61 on four tasks (BC 0.11; critic A's actor 0.11), best-of-64 0.45 / 0.74 on two tasks; ladder at 50k: the guided bootstrap is a 64th / 58th / 54th percentile BC draw at w_boot 0.5 / 0.25 / 0.1, nearest-data distance 0.2146 / 0.2133 / 0.2129 vs the BC draw's 0.2127, cos to the critic gradient 0.70 to 0.79 (A 0.32 to 0.35), TD loss equal to the 4th decimal
+
+aws post 2026-10-20T05-48-00Z. 500-episode cells landed so far (the other 24 of the 30 queued on aws GPUs 5 to 7,
+all in by about 09:00 CEST):
+
+| readout at 50k, ag sd0 (w_boot 0.5) | t1 | t2 | t3 | t4 | t5 |
+|---|---|---|---|---|---|
+| guided actor alone (acting=distill, ag_w_eval 1) | 0.498 | 0.324 | 0.606 | 0.502 | running |
+| best-of-64 by the critic (hgoal_each) | 0.452 | 0.740 | running | running | |
+
+Train signals at 50k: shift norm 1.2 x w_boot (0.59 to 0.61 at 0.5, 0.32 at 0.25, 0.14 at 0.1); own-next mass
+0.39 to 0.45 (A 0.42 at 50k); ag_q_gain 0.0024 to 0.0030 at 0.5; in-loop 50-episode success 0.38 to 0.68 at 0.5,
+0.74 at 0.25, 0.66 at 0.1.
+
+Ladder at 50k (b5ce219 reads the guided bootstrap from the Polyak copy; task-1 env, 512 states, 2000 draws, seed
+0; reports fetched to `$PSM_DATA/logs/actor_ladder/{ag_s0,wb025_s0,wb01_s0}_50000.json`, figure
+`docs/figures/2026-10-20-actor-ladder/ladder_A_sd0_B_sd0_ag_s0_wb025_s0_wb01_s0.png`):
+
+| | w_boot 0.5 | 0.25 | 0.1 | A at 250k |
+|---|---|---|---|---|
+| bootstrap shift size (latent) | 0.660 | 0.347 | 0.148 | 0.09 |
+| nearest-data distance: BC draw / bootstrap / best-of-64 | 0.2127 / 0.2146 / 0.2242 | 0.2127 / 0.2133 / 0.2253 | 0.2127 / 0.2129 / 0.2286 | 0.2127 / 0.2122 / |
+| distance to the recorded action: BC / bootstrap / best-of-64 | 0.2987 / 0.3051 / 0.3294 | 0.2987 / 0.2997 / 0.3366 | 0.2987 / 0.2985 / 0.3280 | 0.299 / 0.296 / |
+| bootstrap's percentile among BC draws (critic) | 63.6 | 58.1 | 54.0 | 52 |
+| score gain over a BC draw: bootstrap / best-of-2 / best-of-64 | +0.0045 / +0.0045 / +0.0173 | +0.0026 / +0.0045 / +0.0176 | +0.0012 / +0.0045 / +0.0179 | +0.003 / +0.004 / +0.015 |
+| cos(shift, critic gradient) | 0.700 | 0.754 | 0.792 | 0.32 to 0.35 |
+| TD loss: with shift / with BC draw | 2.3250 / 2.3247 | 2.6561 / 2.6558 | 2.6476 / 2.6478 | equal to 4th decimal |
+| TD target abs mean: with shift / with BC draw | 65.290 / 65.285 | 90.797 / 90.794 | 104.562 / 104.560 | |
+
+Against the 05:55 expectation: at 0.5 the bootstrap's nearest-data distance is above the BC draw's by 0.002
+(0.2146 vs 0.2127; the best-of-64 pick is at 0.224), its percentile 63.6 (above 55), the TD target differs in
+the 3rd decimal (0.006 of 65); at 0.1 all three at A's values. The guided shift points along the critic's
+gradient at twice A's cosine, and still buys the score of a best-of-2 pick at 0.5 and less below; the
+bootstrap stays within the data at every w_boot. What is new against A is the actor: the same network that
+supplies the bootstrap acts at 0.32 to 0.61 per task at 50k, where A's actor acts at BC (0.11) at every
+checkpoint. The full 30-cell table (hgoal_each and the actor at w 1 for the three w_boot, w 2 for ag sd0)
+decides the 09:30 reading; then the 250k three-seed lines (aws about 22:00 CEST).
+
+
 ### 05:55 CEST 10-20, guided arm at 25k on aws (five runs): bootstrap shift 0.57 to 0.59 at w_boot 0.5 (6x A's nudge 0.09), 0.30 at 0.25, 0.13 at 0.1; own-next mass 0.35 to 0.41 and rising at every w_boot; kisski's queued copies of the 0.5 line replaced by seeds 1-2 of the 0.25 and 0.1 controls (2525916-2525919); the ladder diagnostic made to read the guided bootstrap
 
 aws post 2026-10-20T03-49-39Z, train.csv at 25k (5k in brackets); 0.26 to 0.29 s per update, 23.5 min per 5k
