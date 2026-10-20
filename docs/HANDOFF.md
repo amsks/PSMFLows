@@ -108,7 +108,11 @@ the kisski 250k sd000 run only in paths, step counts, seed and keys added since 
 s per update while sharing the machine. At 25k (aws post 15-57-16Z): 0.355 s per update, so 250k about 16:00
 CEST 10-21 and 500k about 15:00 CEST 10-22; signals match the kisski 250k arm's 25k row on all three seeds
 (proxy correlation 0.64 to 0.67 vs 0.64 to 0.67, own-next mass 0.35 to 0.38 vs 0.36 to 0.38, feature spread
-0.086 to 0.090 vs 0.079). Readouts (ri_actor, ri_gpi, ri_gpi_reward) at 250k and 500k. Meeting summary at `docs/notes/2026-10-20-meeting-summary.md`.
+0.086 to 0.090 vs 0.079). Readouts (ri_actor, ri_gpi, ri_gpi_reward) at 250k and 500k.
+21:55 CEST: kisski's copies started (2525859 sd3 and 2525860 sd4 on gpu006 at 21:53, 2525861 sd5 waiting on
+resources); flags re-read (policy_index reward, coef_source ridge, actor_input w, 500000 steps). On an H100
+500k takes about 7 h, so kisski's 250k and 500k readouts (ri eval watcher armed) land before aws's; aws's line
+becomes the parity check. Meeting summary at `docs/notes/2026-10-20-meeting-summary.md`.
 
 
 ### 15:05 CEST 10-20, luis's copy of the guided arm (w_boot 0.5, three seeds) running; 25k signals match aws within 0.03 on every column; sd1 on an A100 (0.20 s per update) will hit its 12 h limit at about 215k, to be read at its 200k checkpoint if cut, no resubmission
