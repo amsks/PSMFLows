@@ -56,7 +56,7 @@ both; push the tool and upload the labels npz.
 
 ### 13:10 CEST 10-20, guided arm best-of-64 at 100k (aws): w_boot 0.5 three seeds 0.694 ± 0.181 (50k 0.523 ± 0.103), w_boot 0.25 sd0 0.692, w_boot 0.1 sd0 0.761 on three of five tasks; the full 25k ladder of A and B is in: A's nudge grows from 0.057 to 0.083 and its cosine to the critic gradient falls from 0.58 to 0.32 over 250k; B's step stays at 0.0002
 
-Cells read from `runs/ag/aws/*_100000_hgoal_each_task*.json` (aws's post pending):
+Cells read from `runs/ag/aws/*_100000_hgoal_each_task*.json`; aws's post 2026-10-20T11-19-02Z confirms them (0.694 ± 0.182 with aws's rounding). The w_boot 0.1 seed-0 actor alone (0.618) is above its best-of-64 (0.581), one seed.
 
 | best-of-64 by the critic, 100k | t1 | t2 | t3 | t4 | t5 | 100k | 50k |
 |---|---|---|---|---|---|---|---|
@@ -65,7 +65,7 @@ Cells read from `runs/ag/aws/*_100000_hgoal_each_task*.json` (aws's post pending
 | w_boot 0.5 sd002 | 0.840 | 0.788 | 0.876 | 0.522 | 0.806 | 0.766 | 0.570 |
 | w_boot 0.5, mean ± 95% CI | | | | | | 0.694 ± 0.181 | 0.523 ± 0.103 |
 | w_boot 0.25 sd000 | 0.790 | 0.796 | 0.850 | 0.414 | 0.608 | 0.692 | 0.481 |
-| w_boot 0.1 sd000 | 0.716 | 0.688 | 0.880 | running | running | (0.761 on 3 tasks) | 0.418 |
+| w_boot 0.1 sd000 | 0.716 | 0.688 | 0.880 | 0.246 | 0.376 | 0.581 | 0.418 |
 | the actor alone at w 1, w_boot 0.5, 3 seeds (12:00 entry) | | | | | | 0.434 ± 0.240 | 0.431 ± 0.131 |
 | BC | | | | | | 0.111 | |
 
