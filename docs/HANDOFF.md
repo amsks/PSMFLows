@@ -54,6 +54,31 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 17:50 CEST 10-21, z-conditioned critic (reward index) at 500k, three seeds (kisski 3-5): best-of-64 by the critic at the fitted vector 0.371 ± 0.158, best-of-64 by expected reward 0.248 ± 0.071, the actor conditioned on the vector 0.106 ± 0.016; no gain from 250k (0.426 / 0.250 / 0.105); critic A 0.805; BC 0.111
+
+Five tasks, 500 episodes per task (`psmgoal_ri_fbc3_500k_cube` seeds 3-5, 500k steps, kisski; 45 cells, all
+exit 0).
+
+| 500k | t1 | t2 | t3 | t4 | t5 | five-task |
+|---|---|---|---|---|---|---|
+| best-of-64 at the fitted vector, sd3 | 0.266 | 0.226 | 0.602 | 0.478 | 0.038 | 0.322 |
+| same, sd4 | 0.740 | 0.370 | 0.474 | 0.008 | 0.150 | 0.348 |
+| same, sd5 | 0.570 | 0.384 | 0.760 | 0.226 | 0.274 | 0.443 |
+| best-of-64 by expected reward, sd3 / sd4 / sd5 | | | | | | 0.271 / 0.216 / 0.258 |
+| the actor at the vector, sd3 / sd4 / sd5 | | | | | | 0.099 / 0.109 / 0.111 |
+
+| z-conditioned, mean ± 95% CI | 250k seeds 0-2 | 250k seeds 3-5 | 500k seeds 3-5 |
+|---|---|---|---|
+| best-of-64 at the fitted vector | 0.389 ± 0.052 | 0.426 ± 0.127 | 0.371 ± 0.158 |
+| best-of-64 by expected reward | 0.214 ± 0.073 | 0.250 ± 0.130 | 0.248 ± 0.071 |
+| the actor at the vector | 0.107 ± 0.009 | 0.105 ± 0.011 | 0.106 ± 0.016 |
+
+Six seeds at 250k and three at 500k read the same band, 0.37 to 0.43 for the critic's pick and BC for the
+actor. Against the design doc's "500k closes the gap to A" reading: not met; the 250k-to-500k change is
+-0.055, inside the CI. Per task, task 4 swings 0.008 to 0.478 across seeds and task 5 is 0.04 to 0.27. The
+line is closed at half of the goal index on the same critic. aws's three copies reach 500k about 19:30Z 10-22
+and serve as the cross-machine check only.
+
 ### 12:50 CEST 10-21, landed overnight on kisski: z-conditioned 500k line at its 250k checkpoint (seeds 3-5) best-of-64 by the goal mass 0.426 ± 0.127, the actor alone 0.105 ± 0.011, matching seeds 0-2 at 250k (0.389 ± 0.052 / 0.09); guided-arm controls seed 1 at 250k: w_boot 0.25 best-of-64 0.688 / the actor alone 0.592, w_boot 0.1 0.682 / 0.656
 
 Five tasks, 500 episodes per task. z-conditioned (`psmgoal_ri_fbc3_500k_cube`, evals 2526008-2526014): ri_gpi 0.472 /

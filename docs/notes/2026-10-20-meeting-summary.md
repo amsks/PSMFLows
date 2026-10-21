@@ -69,8 +69,9 @@ Figure: `docs/figures/2026-10-20-actor-ladder/ladder_A_s25_B_s25.png`; with the 
 
 - Half of the goal index on the same critic; the actor at BC with or without the kernel reward (the actor's
   step is 1/13 of critic A's; the BC term holds it).
-- One seed's readout rose 0.26 to 0.42 from 50k to 250k; the 500k line is running on aws (slow GPUs, about 36 h)
-  and queued on kisski.
+- 500k, three more seeds (10-21): best-of-64 at the fitted vector 0.371 ± 0.158, by expected reward
+  0.248 ± 0.071, the actor 0.106 ± 0.016. Same band as 250k (six seeds 0.39 / 0.43). Closed at half of the
+  goal index.
 
 ## 4. Distillation (luis): a student trained on best-of-64 picks
 
