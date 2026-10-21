@@ -1410,8 +1410,8 @@ seed (0.696 / 0.620 / 0.766 to 0.614 / 0.578 / 0.714) while the actor alone rose
 +0.14); the tilt sweep peaks at w 1 (aws sd0: w 0.5 0.485, w 2 0.676, w 4 0.362). Against the design doc's
 expectations: best-of-64 at or above A's 0.79, not met (0.17 below A's 0.805); the actor alone 0.5 to 0.8,
 met. The co-trained actor is the first in-loop actor on this branch above BC on its own and acts at its own
-critic's best-of-64 level; that critic's best-of-64 is 0.17 below A's. Pending: luis sd2 250k / sd1 200k, the
-controls' seeds 1-2 on kisski.
+critic's best-of-64 level; that critic's best-of-64 is 0.17 below A's. luis's three seeds (sd0 250k, sd1 200k after a 12 h cut at 215k, sd2 250k): 0.630 ± 0.314 / 0.569 ± 0.190,
+within 0.04 of aws on both readouts. Pending: the controls' seeds 1-2 on kisski.
 
 ## 7. Open questions and the next arms, with predictions
 

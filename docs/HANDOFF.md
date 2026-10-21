@@ -82,8 +82,13 @@ below nf2's 0.866); the 0.66 to 0.72 band "if the regression actor is too slow",
 regression-actor arm therefore gives the first in-loop actor on this branch above BC on its own (5.5 x BC)
 and acts at the level of its own critic's best-of-64, and that critic's best-of-64 is below critic A's. Not
 shown: whether the critic's 100k-to-250k drop continues to 500k (no 500k checkpoints in this arm; the runs
-stop at 250k). Pending: luis sd2 250k and sd1 200k (queued on both machines), kisski's w_boot 0.25 / 0.1
-seeds 1-2 (0.25 running since 03:10 / 03:25, 0.1 queued).
+stop at 250k). luis's copy (post 02-25-54Z, 04:30 CEST): sd2 250k best-of-64 0.670 / the actor alone 0.520; sd1 stopped by
+the 12 h limit at 215k, its 200k checkpoint 0.489 / 0.530; luis three-seed final (sd0 250k, sd1 200k, sd2 250k)
+0.630 ± 0.314 / 0.569 ± 0.190, within 0.04 of aws's three-seed means on both readouts; the 250k-only pair (sd0,
+sd2) 0.701 / 0.589. Six 250k-or-200k checkpoints over two machines: best-of-64 0.58 to 0.73, the actor alone
+0.52 to 0.74; task 5 is the actor's weakest task on every luis seed (0.36 / 0.20 / 0.22). kisski's queued
+copies of the luis sd2 / sd1 evals (2525995-2525998) cancelled as redundant after the sd0 parity. Pending:
+kisski's w_boot 0.25 / 0.1 seeds 1-2 (0.25 running since 03:10 / 03:25, 0.1 queued).
 
 ### 03:30 CEST 10-21, antmaze posterior-latent arm at 100k on all three seeds: own-next mass 0.129 / 0.096 / 0.106 against the point arm's 0.095 / 0.116 / 0.111, in-loop 50-episode success 0.04 to 0.14; the stated 100k signal (own-next mass above the point arm) is not met; kisski control seeds of the guided arm started at 16 / 32
 
