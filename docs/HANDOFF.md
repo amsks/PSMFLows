@@ -71,9 +71,8 @@ mean ± 95% CI over the three seeds (t with 2 degrees of freedom).
 | w_boot 0.25 sd0 | 0.469 | 0.728 |
 | w_boot 0.1 sd0 | 0.664 | 0.540 |
 
-Measured: best-of-64 by the critic fell from 100k to 250k on two of the three seeds (0.696 to 0.614, 0.620 to
-0.578) and fell on the w_boot 0.25 run (0.692 to 0.469, task 4 at 0.008); seed 2 rose 0.766 to 0.714 down as
-well, luis sd0 reads 0.732 at 250k. The actor alone rose on every seed from 100k (+0.21 / +0.18 / +0.14) and
+Measured: best-of-64 by the critic fell from 100k to 250k on all three seeds (0.696 to 0.614, 0.620 to 0.578,
+0.766 to 0.714) and on the w_boot 0.25 run (0.692 to 0.469, task 4 at 0.008); luis sd0 reads 0.732 at 250k. The actor alone rose on every seed from 100k (+0.21 / +0.18 / +0.14) and
 on seed 0 reads above best-of-64 (0.742 against 0.614). Over the four w_boot 0.5 checkpoints at 250k (three
 aws, one luis) best-of-64 is 0.659 ± 0.120 and the actor alone 0.620 ± 0.157. The tilt sweep at 250k peaks at
 w 1 on aws sd0 (w 0.5 0.485, w 2 0.676, w 4 0.362) and ties w 1 with w 2 on luis sd0 (0.666 / 0.671).
