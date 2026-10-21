@@ -54,6 +54,33 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 20:30 CEST 10-21, antmaze with the regenerated posterior latents at 500k, three seeds: best-of-64 by the critic 0.022 ± 0.039, the actor alone 0.085 ± 0.007; point-latent arm 500k 0.070 ± 0.103; BC 0.072; closed at BC, the posterior latent does not change antmaze
+
+Five tasks, 500 episodes per task, kisski (30 cells, all exit 0; `psmgoal_ja_fbc3_mix_k70_antmaze` seeds 0-2).
+
+| k70 posterior latent, 500k | t1 | t2 | t3 | t4 | t5 | five-task |
+|---|---|---|---|---|---|---|
+| best-of-64 by the critic, sd0 | 0.008 | 0.000 | 0.106 | 0.014 | 0.054 | 0.036 |
+| best-of-64 by the critic, sd1 | 0.000 | 0.004 | 0.000 | 0.000 | 0.022 | 0.005 |
+| best-of-64 by the critic, sd2 | 0.008 | 0.000 | 0.060 | 0.052 | 0.000 | 0.024 |
+| the actor alone, sd0 | 0.078 | 0.196 | 0.044 | 0.012 | 0.110 | 0.088 |
+| the actor alone, sd1 | 0.060 | 0.186 | 0.038 | 0.006 | 0.120 | 0.082 |
+| the actor alone, sd2 | 0.094 | 0.176 | 0.038 | 0.010 | 0.108 | 0.085 |
+
+| mean ± 95% CI, antmaze | 250k | 500k |
+|---|---|---|
+| k70 posterior latent, best-of-64 | 0.062 ± 0.053 | 0.022 ± 0.039 |
+| k70 posterior latent, the actor alone | 0.085 ± 0.017 | 0.085 ± 0.007 |
+| point-latent arm (A's antmaze recipe) | 0.063 ± 0.106 | 0.070 ± 0.103 |
+| nf2 | 0.101 ± 0.162 | 0.034 ± 0.069 |
+| BC | 0.072 | 0.072 |
+
+250k to 500k moves best-of-64 down by 0.04 on every seed, the same drift the point arm and nf2 show. The actor
+alone stays at BC on every seed and every task profile (task 2 0.18 to 0.20, task 4 at 0.01) is the BC profile.
+Both readings stated 10-20 17:40 hold at 500k as at 250k: within 0.05 of BC, not 0.15 to 0.30. Line closed; the
+posterior latent is not what limits antmaze. aws's three copies reach 250k about 00:30 CEST 10-22 and serve as
+the cross-machine check only.
+
 ### 17:50 CEST 10-21, z-conditioned critic (reward index) at 500k, three seeds (kisski 3-5): best-of-64 by the critic at the fitted vector 0.371 ± 0.158, best-of-64 by expected reward 0.248 ± 0.071, the actor conditioned on the vector 0.106 ± 0.016; no gain from 250k (0.426 / 0.250 / 0.105); critic A 0.805; BC 0.111
 
 Five tasks, 500 episodes per task (`psmgoal_ri_fbc3_500k_cube` seeds 3-5, 500k steps, kisski; 45 cells, all

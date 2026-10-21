@@ -82,8 +82,9 @@ Figure: `docs/figures/2026-10-20-actor-ladder/ladder_A_s25_B_s25.png`; with the 
 
 - 500k, three seeds: 0.034 ± 0.069 (BC 0.072). Closed at BC for both arms.
 - Regenerated posterior latents (uoft-isl/inversion-noisy-q EM fixes, effective sample size 130 against 5.6),
-  critic A's recipe, 250k, three seeds (10-21): best-of-64 0.062 ± 0.053, the actor alone 0.085 ± 0.017,
-  point-latent arm 0.063 ± 0.106, BC 0.072. The posterior latent does not change antmaze.
+  critic A's recipe, three seeds (10-21): 250k best-of-64 0.062 ± 0.053, the actor alone 0.085 ± 0.017; 500k
+  0.022 ± 0.039 and 0.085 ± 0.007; point-latent arm 0.063 ± 0.106 / 0.070 ± 0.103, BC 0.072. The posterior
+  latent does not change antmaze. Line closed.
 
 ## 6. Cube-double
 
