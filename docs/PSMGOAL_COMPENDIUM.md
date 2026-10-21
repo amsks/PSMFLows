@@ -1352,8 +1352,11 @@ is the centered view the 250k arm ran). Arm `psmgoal_ri_fbc3_kern_cube` seeds 0-
 0.30 or above if the reward rows were the limit; within 0.05 of BC if the BC term holds it.
 Result (10-20 11:30, three seeds, 250k): the actor at w 0.104 ± 0.005 (BC 0.111), best-of-64 at w 0.408 ±
 0.211, by expected reward 0.265 ± 0.142; the actor's latent step 0.007 (A's nudge 0.09) with a value term six
-times the centered arm's. The kernel actor reward changes nothing; the reward index is closed at 250k, the 500k
-line pending.
+times the centered arm's. The kernel actor reward changes nothing; the reward index is closed at 250k.
+500k line (`psmgoal_ri_fbc3_500k_cube`, seeds 3-5, kisski, 10-21 17:50): at 250k best-of-64 at w 0.426 ± 0.127,
+by expected reward 0.250 ± 0.130, the actor at w 0.105 ± 0.011; at 500k 0.371 ± 0.158 (0.322 / 0.348 / 0.443),
+0.248 ± 0.071, 0.106 ± 0.016. Six seeds at 250k and three at 500k sit in one band, 0.37 to 0.43, half of the goal
+index on the same critic; the "500k closes the gap to A" reading is not met. Line closed.
 
 ### 6.6 The advantage-guided actor (2026-10-20, `docs/design/2026-10-20-advantage-guided-actor.md`; 250k three seeds: best-of-64 0.635 ± 0.175, the actor alone 0.608 ± 0.291, BC 0.111, critic A 0.805)
 
