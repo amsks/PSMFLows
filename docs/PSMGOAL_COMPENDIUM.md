@@ -1355,7 +1355,7 @@ Result (10-20 11:30, three seeds, 250k): the actor at w 0.104 ± 0.005 (BC 0.111
 times the centered arm's. The kernel actor reward changes nothing; the reward index is closed at 250k, the 500k
 line pending.
 
-### 6.6 The advantage-guided actor (2026-10-20, `docs/design/2026-10-20-advantage-guided-actor.md`; 50k seed 0: the actor alone 0.480, best-of-64 0.507, BC 0.111)
+### 6.6 The advantage-guided actor (2026-10-20, `docs/design/2026-10-20-advantage-guided-actor.md`; 250k three seeds: best-of-64 0.635 ± 0.175, the actor alone 0.608 ± 0.291, BC 0.111, critic A 0.805)
 
 The user's ask of 10-20: one network that is trained with the critic, supplies the TD bootstrap and acts at
 test time, in place of A's nudge actor for the bootstrap plus an offline distilled student for acting. Port of
@@ -1403,8 +1403,14 @@ the gap: w 2 is 0.13 / 0.30 below w 1 on the 0.5 / 0.1 runs, w 4 is below BC. Th
 (bootstrap at the 64th percentile, 0.002 above a BC draw in distance to the data, TD loss equal). Reading:
 the actor learns a smooth shift along the average score; the critic's gain is in which few draws it ranks on
 top, and a smooth shift does not reproduce that choice.
-First 250k reading (luis sd0, 21:30): best-of-64 0.732, the actor alone at w 1 0.657 (gap 0.075; at 100k on
-aws the gap was 0.26). Pending: aws's three seeds at 250k, kisski's readouts of the luis checkpoint, the
+250k, three seeds (aws, 04:15 10-21): best-of-64 0.635 ± 0.175 (0.614 / 0.578 / 0.714), the actor alone at w 1
+0.608 ± 0.291 (0.742 / 0.524 / 0.558); luis sd0 0.732 / 0.657 (kisski's readout of the same checkpoint 0.717 /
+0.666); w_boot 0.25 sd0 0.469 / 0.728; w_boot 0.1 sd0 0.664 / 0.540. Best-of-64 fell from 100k on every aws
+seed (0.696 / 0.620 / 0.766 to 0.614 / 0.578 / 0.714) while the actor alone rose on every seed (+0.21 / +0.18 /
++0.14); the tilt sweep peaks at w 1 (aws sd0: w 0.5 0.485, w 2 0.676, w 4 0.362). Against the design doc's
+expectations: best-of-64 at or above A's 0.79, not met (0.17 below A's 0.805); the actor alone 0.5 to 0.8,
+met. The co-trained actor is the first in-loop actor on this branch above BC on its own and acts at its own
+critic's best-of-64 level; that critic's best-of-64 is 0.17 below A's. Pending: luis sd2 250k / sd1 200k, the
 controls' seeds 1-2 on kisski.
 
 ## 7. Open questions and the next arms, with predictions

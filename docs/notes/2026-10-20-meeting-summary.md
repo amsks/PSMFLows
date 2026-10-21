@@ -18,14 +18,18 @@ can replace best-of-64 plus the offline student; none of it is a new top number.
 ## 1. The co-trained actor (advantage-guided actor, arXiv 2610.19783 ported onto critic A)
 
 One network trained next to the critic supplies the TD bootstrap and acts at test time.
-Three seeds, bootstrap weight 0.5, on aws. 250k lands tonight.
+Three seeds, bootstrap weight 0.5, on aws (250k landed 04:15 on 10-21).
 
-| | 50k | 100k |
-|---|---|---|
-| best-of-64 by the critic (critic at test time) | 0.523 ± 0.103 | 0.694 ± 0.182 |
-| the actor alone (no critic at test time) | 0.431 ± 0.131 | 0.434 ± 0.240 |
-| BC | 0.111 | 0.111 |
-| critic A's own actor, for comparison | 0.11 | 0.11 |
+| | 50k | 100k | 250k |
+|---|---|---|---|
+| best-of-64 by the critic (critic at test time) | 0.523 ± 0.103 | 0.694 ± 0.182 | 0.635 ± 0.175 |
+| the actor alone (no critic at test time) | 0.431 ± 0.131 | 0.434 ± 0.240 | 0.608 ± 0.291 |
+| BC | 0.111 | 0.111 | 0.111 |
+| critic A's own actor, for comparison | 0.11 | 0.11 | 0.11 |
+| critic A's best-of-64 (five seeds) | | | 0.805 |
+
+- 250k: the actor alone is at its own critic's best-of-64 level (0.61 against 0.64); that best-of-64 is 0.17
+  below critic A's. The actor rose on every seed from 100k; best-of-64 fell on every seed from 100k.
 
 - First actor trained next to this critic that acts above BC on its own (four times BC).
 - The critic's pick keeps improving; the actor does not follow. Gap 0.09 at 50k, 0.26 at 100k.

@@ -54,6 +54,38 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 04:15 CEST 10-21, the co-trained actor at 250k, three seeds (aws, w_boot 0.5): best-of-64 by the critic 0.635 ± 0.175, the actor alone at w 1 0.608 ± 0.291; BC 0.111; critic A 0.805 (five seeds); the design doc's "best-of-64 at or above A's 0.79" is not met, the actor alone lands in the stated 0.5 to 0.8 band
+
+aws post 01-33-00Z plus the sd2 cells that landed 04:10 (`runs/ag/aws/`); five tasks, 500 episodes per task,
+mean ± 95% CI over the three seeds (t with 2 degrees of freedom).
+
+| w_boot 0.5, aws | 50k | 100k | 250k |
+|---|---|---|---|
+| best-of-64 by the critic | 0.523 ± 0.103 | 0.694 ± 0.181 | 0.635 ± 0.175 (0.614 / 0.578 / 0.714) |
+| the actor alone at w 1 | 0.431 ± 0.131 | 0.434 ± 0.240 | 0.608 ± 0.291 (0.742 / 0.524 / 0.558) |
+| BC | 0.111 | 0.111 | 0.111 |
+
+| 250k, one seed each | best-of-64 | the actor alone at w 1 |
+|---|---|---|
+| luis sd0, w_boot 0.5 (kisski's readout) | 0.732 (0.717) | 0.657 (0.666) |
+| w_boot 0.25 sd0 | 0.469 | 0.728 |
+| w_boot 0.1 sd0 | 0.664 | 0.540 |
+
+Measured: best-of-64 by the critic fell from 100k to 250k on two of the three seeds (0.696 to 0.614, 0.620 to
+0.578) and fell on the w_boot 0.25 run (0.692 to 0.469, task 4 at 0.008); seed 2 rose 0.766 to 0.714 down as
+well, luis sd0 reads 0.732 at 250k. The actor alone rose on every seed from 100k (+0.21 / +0.18 / +0.14) and
+on seed 0 reads above best-of-64 (0.742 against 0.614). Over the four w_boot 0.5 checkpoints at 250k (three
+aws, one luis) best-of-64 is 0.659 ± 0.120 and the actor alone 0.620 ± 0.157. The tilt sweep at 250k peaks at
+w 1 on aws sd0 (w 0.5 0.485, w 2 0.676, w 4 0.362) and ties w 1 with w 2 on luis sd0 (0.666 / 0.671).
+Against the design doc: best-of-64 at or above A's 0.79 at 250k, no (0.635, 0.17 below A's 0.805 and 0.23
+below nf2's 0.866); the 0.66 to 0.72 band "if the regression actor is too slow", the three-seed mean sits
+0.03 under it; the actor alone 0.5 to 0.8 at the best w, yes (0.608, every seed above 0.5). The
+regression-actor arm therefore gives the first in-loop actor on this branch above BC on its own (5.5 x BC)
+and acts at the level of its own critic's best-of-64, and that critic's best-of-64 is below critic A's. Not
+shown: whether the critic's 100k-to-250k drop continues to 500k (no 500k checkpoints in this arm; the runs
+stop at 250k). Pending: luis sd2 250k and sd1 200k (queued on both machines), kisski's w_boot 0.25 / 0.1
+seeds 1-2 (0.25 running since 03:10 / 03:25, 0.1 queued).
+
 ### 03:30 CEST 10-21, antmaze posterior-latent arm at 100k on all three seeds: own-next mass 0.129 / 0.096 / 0.106 against the point arm's 0.095 / 0.116 / 0.111, in-loop 50-episode success 0.04 to 0.14; the stated 100k signal (own-next mass above the point arm) is not met; kisski control seeds of the guided arm started at 16 / 32
 
 All three seeds run (sd1 from 01:33, sd2 from 01:57; 0.049 s per update). At 100k the TD loss (4.10 / 4.32 /
