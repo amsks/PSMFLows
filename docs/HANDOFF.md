@@ -54,6 +54,29 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 09:20 CEST 10-21, antmaze with the regenerated posterior latents at 250k, three seeds: best-of-64 by the critic 0.062 ± 0.053, the actor alone 0.085 ± 0.017; point-latent arm 0.063 ± 0.106; BC 0.072; the "within 0.05 of BC" expectation is met, the posterior latent does not change antmaze
+
+Five tasks, 500 episodes per task, kisski (eval jobs 2526015-2526044, all exit 0).
+
+| k70 posterior latent, 250k | t1 | t2 | t3 | t4 | t5 | five-task |
+|---|---|---|---|---|---|---|
+| best-of-64 by the critic, sd0 | 0.060 | 0.234 | 0.002 | 0.018 | 0.002 | 0.063 |
+| best-of-64 by the critic, sd1 | 0.000 | 0.064 | 0.110 | 0.238 | 0.004 | 0.083 |
+| best-of-64 by the critic, sd2 | 0.008 | 0.000 | 0.176 | 0.000 | 0.018 | 0.040 |
+| the actor alone, sd0 | 0.074 | 0.180 | 0.050 | 0.004 | 0.098 | 0.081 |
+| the actor alone, sd1 | 0.094 | 0.198 | 0.038 | 0.016 | 0.118 | 0.093 |
+| the actor alone, sd2 | 0.084 | 0.168 | 0.042 | 0.010 | 0.108 | 0.082 |
+| mean ± 95% CI, best-of-64 / the actor alone | | | | | | 0.062 ± 0.053 / 0.085 ± 0.017 |
+| point-latent arm (A), 250k, 3 seeds | | | | | | 0.063 ± 0.106 |
+| BC | | | | | | 0.072 |
+
+Against the expectation stated at 17:40 10-20: 0.15 to 0.30 if the September posterior result was the
+collapsed posterior's fault, not met; within 0.05 of BC if antmaze fails for the horizon reason, met (0.062
+and 0.085 against 0.072). The posterior latent with ESS 130 trains the same measure as the point latent on
+antmaze (every training signal equal at 5k, 25k, 100k) and acts the same. The actor alone equals BC's 0.072
+within 0.013 on every seed, as A's antmaze actor did. 500k cells (30) submitted 07:50 to 08:50, pending; aws's
+three copies reach 250k about 00:30 CEST 10-22.
+
 ### 04:15 CEST 10-21, the co-trained actor at 250k, three seeds (aws, w_boot 0.5): best-of-64 by the critic 0.635 ± 0.175, the actor alone at w 1 0.608 ± 0.291; BC 0.111; critic A 0.805 (five seeds); the design doc's "best-of-64 at or above A's 0.79" is not met, the actor alone lands in the stated 0.5 to 0.8 band
 
 aws post 01-33-00Z plus the sd2 cells that landed 04:10 (`runs/ag/aws/`); five tasks, 500 episodes per task,

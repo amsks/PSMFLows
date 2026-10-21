@@ -1413,6 +1413,19 @@ met. The co-trained actor is the first in-loop actor on this branch above BC on 
 critic's best-of-64 level; that critic's best-of-64 is 0.17 below A's. luis's three seeds (sd0 250k, sd1 200k after a 12 h cut at 215k, sd2 250k): 0.630 ± 0.314 / 0.569 ± 0.190,
 within 0.04 of aws on both readouts. Pending: the controls' seeds 1-2 on kisski.
 
+### 6.7 Antmaze with the regenerated posterior latents (2026-10-21; 250k three seeds: best-of-64 0.062 ± 0.053, the actor alone 0.085 ± 0.017, point arm 0.063 ± 0.106, BC 0.072)
+
+Arm `psmgoal_ja_fbc3_mix_k70_antmaze` (`scripts/campaign_2026-10/antmaze_k70_arms.sh`): critic A's antmaze
+recipe (goal_discount 0.99, fb_hit_spec 0:2:0.5, discount 0.99) with the TD latent drawn per batch from each
+transition's stored posterior (`agent.use_point_preimage=false`) read from the preimage file regenerated with
+the init_at_preimage and cov_shrinkage 70 EM fixes (median ESS 130 against 5.6 in the original file; the point
+preimage is identical in both). Stated before results: 0.15 to 0.30 if the September posterior result was the
+collapsed posterior's fault, within 0.05 of BC if antmaze fails for the horizon reason. Measured: every
+training signal (own-next mass, TD loss, phi rank, actor step) equal to the point arm's at 5k, 25k and 100k on
+all three seeds and on aws's three copies; at 250k best-of-64 0.062 ± 0.053 (0.063 / 0.083 / 0.040) and the
+actor alone 0.085 ± 0.017 (0.081 / 0.093 / 0.082) against the point arm's 0.063 ± 0.106 and BC 0.072. The
+within-0.05-of-BC reading holds. The posterior latent is not what limits antmaze. 500k pending.
+
 ## 7. Open questions and the next arms, with predictions
 
 Each item gives the question, the measurement that decides it, and the predicted outcome under
