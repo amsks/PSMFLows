@@ -54,6 +54,19 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 03:30 CEST 10-21, antmaze posterior-latent arm at 100k on all three seeds: own-next mass 0.129 / 0.096 / 0.106 against the point arm's 0.095 / 0.116 / 0.111, in-loop 50-episode success 0.04 to 0.14; the stated 100k signal (own-next mass above the point arm) is not met; kisski control seeds of the guided arm started at 16 / 32
+
+All three seeds run (sd1 from 01:33, sd2 from 01:57; 0.049 s per update). At 100k the TD loss (4.10 / 4.32 /
+4.20), phi effective rank (1.014 / 1.020 / 1.024) and actor step (0.009 / 0.005 / 0.008) match the point arm's
+values at the same step to the second decimal. In-loop 50-episode success at 100k: 0.14 / 0.04 / 0.08 (point
+arm at 100k: 0.08 to 0.16). The posterior latent with ESS 130 trains the same measure the point latent trains
+on antmaze, as far as these signals read; the 250k five-task numbers (seed 0 about 04:20, evals at nice 600
+behind a priority-blocked queue) decide the 0.15 to 0.30 against within-0.05-of-BC expectations.
+Guided-arm controls on kisski: w_boot 0.25 sd1 (2525986) started 03:10 and sd2 (2525987) 03:25, flags re-read
+ag_k 16 / ag_pool 32 / w_boot 0.25; at 10k on sd1 own-next mass 0.333, actor step 0.337, regression loss 0.90.
+w_boot 0.1 sd1-2 (2525988-9) still queued. The reward-index 500k copies reached 250k; their evals
+(2526008-2526014) are queued, the first running.
+
 ### 01:20 CEST 10-21, antmaze posterior-latent arm (init-k70 preimages) seed 0 started 00:56 on kisski; flags re-read correct; at 20k the measure's mass on the dataset's own next state is 0.078 against the point arm's 0.094 / 0.098 / 0.113 at the same step; eval watcher armed
 
 Seed 0 (2525966) runs at 0.049 s per update, so 250k lands about 04:20 and 500k about 07:50 CEST; seeds 1 and
