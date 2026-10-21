@@ -37,7 +37,9 @@ Three seeds, bootstrap weight 0.5, on aws (250k landed 04:15 on 10-21).
 - Training curves: the actor's supervised loss is 0.92 from 5k on (the score explains 8% of a draw's variance);
   the critic's spread over draws shrinks 25% and gets more peaked while best-of-64 rises. The actor learns a
   smooth shift along the average score; the critic's gain is in which few draws it ranks on top.
-- Bootstrap weight: 0.5 / 0.25 / 0.1 give best-of-64 0.70 / 0.69 / 0.58 at 100k (one seed each for 0.25 and 0.1).
+- Bootstrap weight, 250k, three seeds each: best-of-64 0.635 ± 0.175 / 0.638 ± 0.374 / 0.698 ± 0.110 and the
+  actor alone 0.608 ± 0.291 / 0.657 ± 0.170 / 0.589 ± 0.149 for 0.5 / 0.25 / 0.1. The weight does not move
+  either readout; the best mean is 0.11 below critic A.
 
 ## 2. Where the bootstrap action sits over training (ladder, checkpoint every 25k, critic A and its BC-bootstrap control)
 

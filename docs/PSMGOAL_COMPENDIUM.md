@@ -1415,7 +1415,12 @@ seed (0.696 / 0.620 / 0.766 to 0.614 / 0.578 / 0.714) while the actor alone rose
 expectations: best-of-64 at or above A's 0.79, not met (0.17 below A's 0.805); the actor alone 0.5 to 0.8,
 met. The co-trained actor is the first in-loop actor on this branch above BC on its own and acts at its own
 critic's best-of-64 level; that critic's best-of-64 is 0.17 below A's. luis's three seeds (sd0 250k, sd1 200k after a 12 h cut at 215k, sd2 250k): 0.630 ± 0.314 / 0.569 ± 0.190,
-within 0.04 of aws on both readouts. Pending: the controls' seeds 1-2 on kisski.
+within 0.04 of aws on both readouts. Controls at 250k, three seeds each (10-21 21:40; seed 0 aws, seeds 1-2
+kisski): w_boot 0.25 best-of-64 0.638 ± 0.374 (0.469 / 0.688 / 0.757), the actor alone at w 1 0.657 ± 0.170
+(0.728 / 0.592 / 0.650); w_boot 0.1 0.698 ± 0.110 (0.664 / 0.682 / 0.748) and 0.589 ± 0.149 (0.540 / 0.656 /
+0.571). The three bootstrap weights differ by less than one CI on both readouts; the best control mean is 0.11
+below A. The tilt sweep peaks at w 1 or 2 on every seed; w 4 is lowest on every seed (0.08 to 0.36). Nothing
+of the co-trained arm is running; the 500k extension and the next recipe are with the user.
 
 ### 6.7 Antmaze with the regenerated posterior latents (2026-10-21; 250k / 500k three seeds: best-of-64 0.062 ± 0.053 / 0.022 ± 0.039, the actor alone 0.085 ± 0.017 / 0.085 ± 0.007, point arm 0.063 ± 0.106 / 0.070 ± 0.103, BC 0.072)
 

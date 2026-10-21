@@ -54,6 +54,35 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
+### 21:40 CEST 10-21, co-trained actor controls at 250k, three seeds each: w_boot 0.25 best-of-64 0.638 ± 0.374, the actor alone at w 1 0.657 ± 0.170; w_boot 0.1 best-of-64 0.698 ± 0.110, the actor alone 0.589 ± 0.149; w_boot 0.5 (main arm) 0.635 ± 0.175 / 0.608 ± 0.291; critic A 0.805; BC 0.111. The bootstrap weight does not move either readout
+
+Five tasks, 500 episodes per task. Seed 0 of each control on aws (post 01-33-00Z 10-21), seeds 1-2 on kisski
+(`psmgoal_ag_wb025_cube` / `psmgoal_ag_wb01_cube`, ag_k 16 / ag_pool 32 confirmed in flags.json; seed 2 cells
+jobs 2526172-2526181, submitted 20:28 after the per-arm watchers had exited at seed 1's count, all exit 0).
+
+| 250k, seed 2 | t1 | t2 | t3 | t4 | t5 | five-task |
+|---|---|---|---|---|---|---|
+| w_boot 0.25, best-of-64 | 0.780 | 0.742 | 0.882 | 0.658 | 0.724 | 0.757 |
+| w_boot 0.25, the actor alone w 0.5 / 1 / 2 / 4 | | | | | | 0.461 / 0.650 / 0.692 / 0.307 |
+| w_boot 0.1, best-of-64 | 0.608 | 0.828 | 0.932 | 0.762 | 0.280 | 0.748 |
+| w_boot 0.1, the actor alone w 0.5 / 1 / 2 / 4 | | | | | | 0.472 / 0.571 / 0.397 / 0.092 |
+
+| 250k, mean ± 95% CI over three seeds | best-of-64 by the critic | the actor alone at w 1 |
+|---|---|---|
+| w_boot 0.5 (aws seeds 0-2) | 0.635 ± 0.175 (0.614 / 0.578 / 0.714) | 0.608 ± 0.291 (0.742 / 0.524 / 0.558) |
+| w_boot 0.25 | 0.638 ± 0.374 (0.469 / 0.688 / 0.757) | 0.657 ± 0.170 (0.728 / 0.592 / 0.650) |
+| w_boot 0.1 | 0.698 ± 0.110 (0.664 / 0.682 / 0.748) | 0.589 ± 0.149 (0.540 / 0.656 / 0.571) |
+| critic A (five seeds) | 0.805 | 0.11 |
+| BC | 0.111 | 0.111 |
+
+Against the expectation stated 20:30: best-of-64 0.45 to 0.70, not met on either seed 2 (0.757 and 0.748, both
+0.05 above the band); the actor alone at w 1 0.52 to 0.73, met (0.650 / 0.571); w 4 below BC, met for w_boot
+0.1 (0.092) and not for w_boot 0.25 (0.307). Across the nine seeds of the three bootstrap weights, best-of-64
+is 0.47 to 0.76 and the actor alone at w 1 is 0.52 to 0.74; the three-seed means differ by less than one CI,
+so the bootstrap weight is not what sets either readout. The highest control mean (w_boot 0.1, 0.698) stays
+0.11 below critic A's 0.805. The tilt sweep peaks at w 1 or w 2 on every seed and w 4 is the lowest on every
+seed. Control line closed; nothing of the co-trained arm is left running on any machine.
+
 ### 20:30 CEST 10-21, antmaze with the regenerated posterior latents at 500k, three seeds: best-of-64 by the critic 0.022 ± 0.039, the actor alone 0.085 ± 0.007; point-latent arm 500k 0.070 ± 0.103; BC 0.072; closed at BC, the posterior latent does not change antmaze
 
 Five tasks, 500 episodes per task, kisski (30 cells, all exit 0; `psmgoal_ja_fbc3_mix_k70_antmaze` seeds 0-2).
