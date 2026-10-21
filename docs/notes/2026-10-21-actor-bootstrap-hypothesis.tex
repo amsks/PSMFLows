@@ -1,0 +1,55 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=2.2cm]{geometry}
+\usepackage{array}
+\setlength{\parskip}{6pt}
+\setlength{\parindent}{0pt}
+\title{The actor bootstrap in critic A: leading hypothesis and eliminated readings}
+\author{PSMFlows lab record}
+\date{2026-10-21}
+\begin{document}
+\maketitle
+
+\textbf{Leading hypothesis.} The actor bootstrap is one small policy-improvement step inside the target. The critic's target evaluates the next state under a policy that is BC plus a 4 percent move along the critic's own gradient toward the goal. Because the actor is retrained every update, the target policy keeps improving as the critic improves, which is policy iteration with a support constraint. The critic then learns a ranking over BC draws that reflects a slightly better-than-BC policy, and best-of-64 reads that ranking.
+
+Evidence for it. The step points along the critic's gradient and toward the critic's preferred set, which agree with each other, and not toward the recorded action. With the direction frozen and the length fixed, forward beats no step, random equals no step, and reversed loses most. The gain switches on at a small step and saturates, and a greedy argmax step collapses, which is what a conservative improvement step should do.
+
+\begin{center}
+\begin{tabular}{l r}
+\hline
+frozen field, fixed length, 500k & success \\
+\hline
+step forward & 0.741 \\
+no step & 0.687 \\
+random direction & 0.683 \\
+reversed & 0.577 \\
+live arm (critic A) & 0.805 \\
+live sign-flip & 0.640 \\
+\hline
+\end{tabular}
+\end{center}
+
+What it does not yet explain. The frozen step gives 0.05 over no step and the live arm gives 0.15 over critic B, so 0.10 is attributed to the actor and critic improving together and that has not been isolated. The TD loss is equal to four decimals with and without the step, and the bootstrap action sits at the 52nd percentile of BC draws, so no training signal shows the step at work. The one measured difference between A and B is the critic's mass on the goal, 0.151 against 0.107.
+
+\textbf{Eliminated.}
+
+\begin{center}
+\begin{tabular}{p{5.2cm} p{4.8cm} p{5cm}}
+\hline
+reading & measurement & result \\
+\hline
+the step only adds noise or exploration & random direction at the same length & equals no step \\
+only the step's presence matters, not direction & sign-flip arm; reversed frozen step & at critic B's level; worst of the four \\
+A's critic is sharper across latents at a state & within-state spread, gradient norm & 0.0335 against 0.0317; no \\
+A's critic ranks single actions more like real outcomes & one-action rollout check & at the noise ceiling \\
+A acts better on short segments & segment swap both ways & switching helps either way \\
+B fails at one stage of the task & failure stages & B slower at every stage \\
+the gain comes from direct start-to-goal trajectories & stitching removed, random drops & 0.786 / 0.787, unchanged \\
+the goal mix or actor goals matched to the measure & three goal variants & 0.70 to 0.76, no gain \\
+the gain appears early in training & checkpoints every 25k & A and B tie to 150k, separate after \\
+a bigger step helps & half, 2x, 4x, greedy argmax & half worse, 2x and 4x equal, greedy collapses \\
+the actor acts well at test time & every in-loop actor alone & at BC, except the advantage actor at 0.61 \\
+\hline
+\end{tabular}
+\end{center}
+
+\end{document}
