@@ -54,10 +54,10 @@ best-of-64 level on this branch (every earlier actor arm: 0.10 to 0.19). Reply t
 rerun; then (a) weight decay / early stopping on val NLL and (b) the set-encoder descriptor for the held-out test,
 both; push the tool and upload the labels npz.
 
-### 12:50 CEST 10-21, landed overnight on kisski: z-conditioned 500k line at its 250k checkpoint (seeds 3-5) best-of-64 by the goal mass 0.426 ± 0.129, the actor alone 0.105 ± 0.011, matching seeds 0-2 at 250k (0.389 ± 0.052 / 0.09); guided-arm controls seed 1 at 250k: w_boot 0.25 best-of-64 0.688 / the actor alone 0.592, w_boot 0.1 0.682 / 0.656
+### 12:50 CEST 10-21, landed overnight on kisski: z-conditioned 500k line at its 250k checkpoint (seeds 3-5) best-of-64 by the goal mass 0.426 ± 0.127, the actor alone 0.105 ± 0.011, matching seeds 0-2 at 250k (0.389 ± 0.052 / 0.09); guided-arm controls seed 1 at 250k: w_boot 0.25 best-of-64 0.688 / the actor alone 0.592, w_boot 0.1 0.682 / 0.656
 
 Five tasks, 500 episodes per task. z-conditioned (`psmgoal_ri_fbc3_500k_cube`, evals 2526008-2526014): ri_gpi 0.472 /
-0.371 / 0.434, ri_actor 0.109 / 0.105 / 0.100, ri_gpi_reward 0.264 / 0.192 / 0.294 (0.250 ± 0.131). The 500k
+0.371 / 0.434, ri_actor 0.109 / 0.105 / 0.100, ri_gpi_reward 0.264 / 0.192 / 0.294 (0.250 ± 0.130). The 500k
 readouts of this line follow when the runs finish (started 21:53 / 22:10 10-20, about 7 h on an H100, then
 evals at nice 600).
 Guided-arm controls (kisski, 16 / 32, seed 1 at 250k): w_boot 0.25 best-of-64 0.688, the actor alone w 0.5 /
