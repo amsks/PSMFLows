@@ -1436,8 +1436,9 @@ actor alone 0.085 ± 0.017 (0.081 / 0.093 / 0.082) against the point arm's 0.063
 within-0.05-of-BC reading holds. At 500k (10-21 20:30, 30 cells): best-of-64 0.022 ± 0.039 (0.036 / 0.005 /
 0.024), the actor alone 0.085 ± 0.007 (0.088 / 0.082 / 0.085), against the point arm's 500k 0.070 ± 0.103, nf2's
 0.034 ± 0.069 and BC 0.072; best-of-64 drifts down 0.04 from 250k on every seed as the point arm and nf2 did,
-the actor alone stays at BC with the BC task profile. Line closed. The posterior latent is not what limits
-antmaze.
+the actor alone stays at BC with the BC task profile. aws's copies at 250k (10-22 03:00Z): 0.085 ± 0.107 /
+0.084 ± 0.009, the actor within 0.01 of kisski seed for seed. Line closed. The posterior latent is not what
+limits antmaze.
 
 ## 7. Open questions and the next arms, with predictions
 

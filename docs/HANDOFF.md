@@ -107,8 +107,10 @@ Five tasks, 500 episodes per task, kisski (30 cells, all exit 0; `psmgoal_ja_fbc
 250k to 500k moves best-of-64 down by 0.04 on every seed, the same drift the point arm and nf2 show. The actor
 alone stays at BC on every seed and every task profile (task 2 0.18 to 0.20, task 4 at 0.01) is the BC profile.
 Both readings stated 10-20 17:40 hold at 500k as at 250k: within 0.05 of BC, not 0.15 to 0.30. Line closed; the
-posterior latent is not what limits antmaze. aws's three copies reach 250k about 00:30 CEST 10-22 and serve as
-the cross-machine check only.
+posterior latent is not what limits antmaze. aws's three copies at 250k (post 03:00Z 10-22, 30 cells): best-of-64
+0.085 ± 0.107 (0.126 / 0.089 / 0.040), the actor alone 0.084 ± 0.009 (0.084 / 0.087 / 0.080); the actor matches
+kisski seed for seed within 0.01, best-of-64 matches on seeds 1-2 and is 0.06 higher on seed 0 from task 2
+alone. aws stopped training at 250k, so no 500k copies exist.
 
 ### 17:50 CEST 10-21, z-conditioned critic (reward index) at 500k, three seeds (kisski 3-5): best-of-64 by the critic at the fitted vector 0.371 ± 0.158, best-of-64 by expected reward 0.248 ± 0.071, the actor conditioned on the vector 0.106 ± 0.016; no gain from 250k (0.426 / 0.250 / 0.105); critic A 0.805; BC 0.111
 
