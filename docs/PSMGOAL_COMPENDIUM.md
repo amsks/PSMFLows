@@ -1357,7 +1357,8 @@ times the centered arm's. The kernel actor reward changes nothing; the reward in
 by expected reward 0.250 ± 0.130, the actor at w 0.105 ± 0.011; at 500k 0.371 ± 0.158 (0.322 / 0.348 / 0.443),
 0.248 ± 0.071, 0.106 ± 0.016. Six seeds at 250k and three at 500k sit in one band, 0.37 to 0.43, half of the goal
 index on the same critic; the "500k closes the gap to A" reading is not met. Line closed. aws's copies of seeds 3-5 at
-250k (10-21 18:10Z): 0.429 ± 0.169 / 0.268 ± 0.174 / 0.103 ± 0.011, within 0.02 of kisski on every readout.
+250k (10-21 18:10Z): 0.429 ± 0.169 / 0.268 ± 0.174 / 0.103 ± 0.011, within 0.02 of kisski on every readout;
+at 500k (10-22 19:06Z) 0.393 ± 0.194 / the actor 0.109 ± 0.021, within 0.03 of kisski.
 
 ### 6.6 The advantage-guided actor (2026-10-20, `docs/design/2026-10-20-advantage-guided-actor.md`; 250k three seeds: best-of-64 0.635 ± 0.175, the actor alone 0.608 ± 0.291, BC 0.111, critic A 0.805)
 

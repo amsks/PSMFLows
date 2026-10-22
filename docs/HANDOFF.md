@@ -136,8 +136,10 @@ actor. Against the design doc's "500k closes the gap to A" reading: not met; the
 -0.055, inside the CI. Per task, task 4 swings 0.008 to 0.478 across seeds and task 5 is 0.04 to 0.27. The
 line is closed at half of the goal index on the same critic. aws's three copies (seeds 3-5, separate L4s) at
 250k, posted 18:10Z 10-21: 0.429 ± 0.169 / 0.268 ± 0.174 / 0.103 ± 0.011, within 0.02 of kisski's three-seed
-means on every readout. They reach 500k about 13:30Z 10-22 (fitted-vector best-of-64 and the actor only) as the
-cross-machine check.
+means on every readout. At 500k (aws post 19:06Z 10-22, 30 cells, all exit 0): best-of-64 at the fitted vector
+0.393 ± 0.194 (0.304 / 0.421 / 0.453), the actor alone 0.109 ± 0.021 (0.116 / 0.100 / 0.110); within 0.03 of
+kisski's three-seed means, seed for seed within 0.07 on best-of-64 and 0.02 on the actor. Both machines read the
+500k checkpoints at their 250k values. aws is idle.
 
 ### 12:50 CEST 10-21, landed overnight on kisski: z-conditioned 500k line at its 250k checkpoint (seeds 3-5) best-of-64 by the goal mass 0.426 ± 0.127, the actor alone 0.105 ± 0.011, matching seeds 0-2 at 250k (0.389 ± 0.052 / 0.09); guided-arm controls seed 1 at 250k: w_boot 0.25 best-of-64 0.688 / the actor alone 0.592, w_boot 0.1 0.682 / 0.656
 
