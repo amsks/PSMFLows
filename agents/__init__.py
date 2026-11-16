@@ -11,14 +11,17 @@ comparator; `psmflow` remains a backward-compat alias to the same class, so exis
 checkpoints (`flags.json` records `agent_name: psmflow`) and `agent=psmflow` scripts keep
 working.
 
-Every other agent this repo has carried (psm, affine_psm, latent_affine_psm, latentrl, fb,
+Every other agent this repo has carried (psm, affine_psm, latent_affine_psm, latentrl,
 ifql, iql, rebrac, sac) moved to `archive/agents/` on 2026-09-04 and is deliberately NOT
-importable here -- `agent=fb` etc. now fail at the hydra config group, which is the point.
-See `archive/README.md` for what each one was and how to revive it.
+importable here. `fb` was brought back on 2026-11-02 as the raw-action baseline, with
+`fb_latent` its port onto the frozen flow's latents. See `archive/README.md` for the rest.
 """
 
-from agents.fql import FQLAgent
 from agents.f_psmflow import PSMFlowAgent
+from agents.density_fb_latent import DensityFBLatentAgent
+from agents.fb import FBAgent
+from agents.fb_latent import FBLatentAgent
+from agents.fql import FQLAgent
 from agents.psmgoal import PSMGoalAgent
 
 agents = dict(
@@ -31,4 +34,16 @@ agents = dict(
     # configs/agent/f_psmgoal2p.yaml and docs/design/2026-09-21-psmgoal-2p-dsrl.md.
     f_psmgoal2p=PSMFlowAgent,
     psmgoal=PSMGoalAgent,
+    # psmz (2026-11-10): the z-conditioned PSM, the same PSMGoalAgent class with configs/agent/psmz.yaml
+    # (factorised measure, reward-sample ridge index, FlowBC latent actor at bc 0.1). psmgoal is the
+    # goal-conditioned one. Cube-single actor alone 0.712 at 500k, 3 seeds (docs/HANDOFF.md 2026-11-09).
+    psmz=PSMGoalAgent,
+    # fb (2026-11-02): the archived raw-action Forward-Backward agent restored as the baseline
+    # (cube-single 0.721 under its own flow actor). fb_latent: the same FB on the frozen flow's
+    # latent u in place of the action, with the Density FB seams (docs/design/2026-11-02-fb-latent-port.md).
+    fb=FBAgent,
+    fb_latent=FBLatentAgent,
+    # density_fb_latent (2026-11-02): the paper's Density FB softmax measure + FlowBC actor with the
+    # action replaced by the flow latent (docs/design/2026-11-02-density-fb-latent-port.md).
+    density_fb_latent=DensityFBLatentAgent,
 )

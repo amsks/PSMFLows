@@ -18,7 +18,1500 @@ hunt (2026-07-07 → 07-15) is **CLOSED** — see the 07-13 entry and `PAPER/RES
 §4: no code bug, the gap was seed variance + a training-budget ceiling.
 
 Branch: `feat/inversion-integration` · Machine: `kisski` (GWDG, SLURM/H100) · prior: `midi-01` (UT CS)
-Date: **2026-10-20** (latest) · prior: 2026-10-19, 2026-10-17, 2026-10-15, 2026-10-07, 2026-10-05, 2026-09-23, 2026-09-17, 2026-09-16, 2026-09-15, 2026-09-14, 2026-09-11, 2026-09-10, 2026-09-09, 2026-09-08, 2026-09-07, 2026-09-06, 2026-09-05, 2026-09-04, 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+Date: **2026-11-16** (latest) · prior: 2026-10-20, 2026-10-19, 2026-10-17, 2026-10-15, 2026-10-07, 2026-10-05, 2026-09-23, 2026-09-17, 2026-09-16, 2026-09-15, 2026-09-14, 2026-09-11, 2026-09-10, 2026-09-09, 2026-09-08, 2026-09-07, 2026-09-06, 2026-09-05, 2026-09-04, 2026-09-03, 2026-09-01, 2026-08-31, 2026-08-30, 2026-08-29, 2026-08-14, 2026-08-13, 2026-08-12, 2026-08-10, 2026-08-05, 08-04, 07-29, 07-28, 07-26, 07-15, 07-13, 07-07
+
+---
+
+## 2026-11-16 — psmz (z-conditioned flow PSM) on cube-double reaches 0.319 ± 0.027 at 250k (actor alone, 3 seeds) with the task vector fed into the (s,u) network and two critic heads; cube-single unchanged at 0.88-0.90; HQL read; follow-up arms, full-state arm and scene arm training; benchmark table started
+
+Code (agents/psmgoal.py, utils/psm_networks.py, configs/agent/psmgoal.yaml, configs/agent/psmz.yaml, agents/__init__.py,
+main.py, tools/eval_checkpoint.py, scripts/eval500.sh): `psmz` registered 11-10 as the z-conditioned algorithm (same
+class as psmgoal; psmz.yaml = factorised measure, reward-sample ridge index, flowbc_vf actor at bc 0.1).
+`critic_heads>1` now wired for measure_form=factorized (independent heads, min at every scoring; `_fact_apply`).
+`factorized_index_input=true`: A(s,u) and beta(s,u) read the row's task vector w (Density FB's F(s,u,z); `index_dim`
+in FactorizedMeasure, `mesh_phi_b(..., w_rows=)`). `bootstrap_bon_n=N`: the measure bootstraps through the best of N
+prior draws under the critic's reward readout at the target basis (HQL idea; `bon_bootstrap`). Tests:
+tests/test_psmgoal_factorized_heads_index_input.py (5), tests/test_psmgoal_bootstrap_bon.py (6); goldens
+(factorized_softmax 13, dfb_recipe 15, critic_heads 8) unchanged.
+
+Cube-double, actor alone, five tasks x 500 episodes, 3 seeds (1-3; seed 0's relabel draw has no rewarding row at the
+50k in-loop eval and dies), 95% CI = 4.303·SE; BC 0.019; latent Density FB coords 0.46 / 0.50 / 0.52 at 250k / 500k / 1M:
+
+| arm (all: both cubes' xyz into f, batch 1024, discount 0.99, anchor 0.1) | 250k | 500k | 750k | 1M |
+|---|---|---|---|---|
+| base (hb_b1024g99, 11-13) | 0.180 ± 0.074 | 0.154 ± 0.137 | — | 0.081 ± 0.029 |
+| + two heads | 0.222 ± 0.116 | 0.202 ± 0.140 | | |
+| + w into the (s,u) net | 0.294 ± 0.097 | 0.241 ± 0.028 | 0.140 ± 0.028 | 0.108 ± 0.081 |
+| + both | 0.319 ± 0.027 (0.318 / 0.331 / 0.310; tasks 0.71 / 0.30 / 0.35 / 0.07 / 0.17) | 0.303 ± 0.143 | pending | pending |
+| + two heads + best-of-4 bootstrap | 0.035 ± 0.017 | | | |
+
+Cube-single (psmz batch 1024 base 0.884 ± 0.025 at 500k): + two heads 0.897 ± 0.050, + w input 0.864 ± 0.055, + both
+0.880 ± 0.020 (500k, 3 seeds). Diagnostics behind the arms (psmgoal-vs-dfb-2026-11-09/README.md): on cube-double the
+measure ranks the true future at 0.98-1.00 even 50 steps ahead; the task-vector fit with coordinates is as good as
+DFB's (0.67-0.73 vs 0.64) and rises while success falls; the reward view responds to both cubes; no critic prefers
+stillness; the actor's one-step cube movement is the only one-step row that separates psmz from DFB. HQL
+(ryanxhr.github.io/hql): scalar Q, flow-BC sampler, gated multi-step targets; cube-double offline 67 (chunked 73);
+no hierarchy / goal-representation content; its best-of-N bootstrap hurts here (0.035).
+
+Full state: normalized FB's own full-state z-variant numbers are cube-single 0.91 (raw, anchor 3, paper protocol) /
+0.84 (latent, 500k) and cube-double 0.16 (raw, permuting env) / 0.05 (latent); the held-out R^2 of the reward on the
+full-state features is 0.29 vs 0.47-0.60 with coordinates on both raw and latent critics (85 % of the full-state
+distance is arm pose). psmz full state on cube-double: 0.011 (old config), 0.016-0.06 (batch arm).
+
+Training now (jobs in psmgoal-vs-dfb-2026-11-09/submitted.txt; evals auto-submitted by
+psmgoal-vs-dfb-2026-11-09/fix_eval_watcher.sh, marks in submitted_eval.txt, JSONs $PSM_DATA/logs/psmz_fix_*):
+cd_both to 1M; cd_heads2 to 1M; cd_bon4h2; cd_both_h4 (four heads); cd_both_alr (actor lr 3e-5); cd_both_fullstate
+(both fixes, full state into f); scene_both (winning config on scene, five-block hit spec; graded-index actor readout;
+the pass/fail-index readout is aws's binary_index protocol and is not yet wired here). Aggregation:
+`cd $PSM_DATA/logs && python - <<EOF` block in this entry's companion script psmgoal-vs-dfb-2026-11-09/agg_fix.py.
+Requests posted to aws (mailbox/kisski 2026-11-16): normalized FB full-state z-variant configs and numbers; the
+paper's full tables; MetaWorld / ManiSkill dataset access. Table to fill: docs/tables/density_fb_benchmark.md.
+
+To resume after the login-node maintenance (2026-11-16 11:00 UTC): `bash psmgoal-vs-dfb-2026-11-09/fix_eval_watcher.sh`
+(or the sbatch wrapper fix_eval_watcher.sbatch if it was accepted), then `python psmgoal-vs-dfb-2026-11-09/agg_fix.py`.
+
+---
+
+## 2026-11-15 — psmz on cube-double: the two cube-single fixes (coordinates into f, batch 1024 + discount 0.99) reach 0.18 at 250k and decay to 0.08 by 1M (3 seeds); latent Density FB with coordinates 0.46-0.52; more reward samples in the test-time fit change nothing
+
+Context: `psmz` (2026-11-10, `configs/agent/psmz.yaml`) is the z-conditioned factorised PSM; cube-single actor alone
+0.712 (batch 256) / 0.884 ± 0.025 (batch 1024) at 500k. On cube-double (batch 256) 0.011; on scene 0.248 ± 0.050 (1M).
+Diagnostics (`psmgoal-vs-dfb-2026-11-09/`, table_cubedouble.md): the measure ranks the true future at 0.98-1.00 even
+50 steps ahead on every cube-double critic; the training reward holds <1 positive per 256-batch (7.6 rewarding per 10k;
+cube-single 227); the task-vector fit (held-out Pearson) and the actor's gain over BC track success: DFB coords 0.64 /
+0.18, DFB full state 0.40 / 0.07, psmz 0.45 / 0.03.
+
+| cube-double, actor alone, 3 seeds (1-3 for the batch arms), 95% CI = 4.303·SE | 250k | 500k | 1M | 1M best-of-64 |
+|---|---|---|---|---|
+| psmz (full state, batch 256, discount 0.98) | — | 0.013 ± 0.010 | 0.011 ± 0.009 | 0.001 |
+| + both cubes' xyz into f (hitblocks) | 0.150 ± 0.038 | 0.085 ± 0.035 | 0.101 ± 0.075 | 0.007 |
+| + batch 1024, discount 0.99 (b1024g99) | 0.055 ± 0.035 | 0.051 ± 0.025 | 0.016 ± 0.007 | 0.000 |
+| + both (hb_b1024g99) | 0.180 ± 0.074 (0.214 / 0.158 / 0.168) | 0.154 ± 0.137 | 0.081 ± 0.029 | 0.004 |
+| psmz, task vector fitted on 100k rows instead of 10k (eval-only, 1M) | — | — | 0.013 ± 0.023 | — |
+| latent DFB full state, fitted on 1M rows (eval-only, 500k) | — | 0.062 ± 0.026 (10k: 0.05) | — | — |
+| latent DFB, coords into B (reference) | 0.46 | 0.50 | 0.52 | ~0.02 |
+Per task, hb_b1024g99 250k: 0.53 / 0.10 / 0.12 / 0.02 / 0.13. BC 0.019.
+
+Seed 0 of the two batch arms died at the 50k in-loop eval (relabel batch with no rewarding row); seed 3 replaced it.
+The psmz 1M-row fit eval ran out of its 4 h / memory with 4 workers; the 100k-row, 1-worker rerun is the row above.
+Files: `psmgoal-vs-dfb-2026-11-09/README.md` (all tables), JSONs `$PSM_DATA/logs/psmz_cd_*`, `$PSM_DATA/psmgoal-vs-dfb-2026-11-09/`.
+
+---
+
+## 2026-11-09 — factorised psmgoal critic at a weak anchor, three arms x 3 seeds, 500k: the actor alone reaches 0.53 / 0.68 / 0.71 (BC 0.111; same arm at anchor 3 0.157; joint critic at anchor 0.1-0.3 0.11-0.13; latent Density FB 0.95); best-of-64 0.23-0.27
+
+Question (user): is the Density FB port onto psmgoal correct, and what can the psmgoal checkpoints not do? All
+files in `psmgoal-vs-dfb-2026-11-09/` (README, `port_audit.md`, `diag_critic_compare.py`); JSONs under
+`$PSM_DATA/psmgoal-vs-dfb-2026-11-09/`.
+
+**Port audit** (read-only, every row of the recipe table against `density_fb_latent.py` and Factored-FB @571be6d):
+no undocumented difference; recipe flags landed. The index feature f of the joint critic has 1-3 effective
+directions (Density FB's B 21-30); phi effective rank 1.00; the w-free term b varies ~3x the phi^T w term.
+
+**Critic comparison** (same states, same 64 prior draws, five-task means; joint + recipe at bc 0.3, 3 seeds 500k,
+vs latent Density FB seed 0 500k at anchor 0.1 / 0.3):
+
+| measurement | Density FB | joint psmgoal + recipe |
+|---|---|---|
+| held-out correlation of the index's reward view with the task reward | 0.77 / 0.73 | 0.28-0.29 |
+| true future at 10 steps, percentile among 256 random states | 0.98 | 0.77-0.78 |
+| logit std over the random states | 6.0 / 3.8 | 0.42-0.52 |
+| actor's score gain over its BC latent, in within-state stds | 0.18 / 0.10 | 0.02-0.03 |
+
+Factorised vs joint on the base recipe (reward index, delta actor at anchor 3, 3 seeds each, 500k): index
+correlation 0.56 vs 0.32; true future at 50 steps 0.94 vs 0.73; actor distance from BC 0.02 vs 0.005.
+
+**Factorised critic at a weak anchor** (ladder `factorized` arm + one change; jobs 2530278-86; flags verified;
+evals jobs 2530324-503). Five-task means, 500 episodes per task, 95% CI = 4.303·SE:
+
+| arm | 250k actor | 500k actor | 250k best-of-64 | 500k best-of-64 |
+|---|---|---|---|---|
+| fwk03: delta actor, fb_bc_coeff 0.3 | 0.609 ± 0.262 | 0.530 ± 0.173 (0.482 / 0.498 / 0.610) | 0.311 ± 0.244 | 0.261 ± 0.068 |
+| fwk01: delta actor, fb_bc_coeff 0.1 | 0.636 ± 0.051 | 0.678 ± 0.128 (0.620 / 0.696 / 0.718) | 0.255 ± 0.098 | 0.234 ± 0.098 |
+| fvf01: Density FB's flowbc_vf actor, bc 0.1 | 0.674 ± 0.164 | 0.712 ± 0.131 (0.763 / 0.658 / 0.716) | 0.184 ± 0.201 | 0.271 ± 0.290 |
+
+Per task at 500k (fvf01): 0.79 / 0.78 / 0.86 / 0.66 / 0.47. Against the stated expectation (actor 0.4 or more if
+the critic form held the actor at BC): met. Reading: with the factorised critic the actor leaves BC once the
+anchor is weak; the joint critic's actor does not at the same anchors. The remaining 0.24 to latent Density FB
+(0.95) sits with the differences left between the two factorised critics: z as an input to F (psmgoal's A(s,u)
+does not see w), two heads, LayerNorm, B without the sphere projection, and the index read from the measure's own f.
+
+---
+
+## 2026-11-05 — full-state investigation opened (user order ~09:40Z): why the latent critic trails raw Density FB on the full state
+
+Status: cube-single full state, actor, reward inference, 3 seeds: raw Density FB 0.91, latent (anchor 0.1) 0.763,
+density PSM raw 0.50; cube-double: raw 0.16, latent 0.010. On cube coordinates the latent leads (0.948 vs 0.81).
+Three candidates, each with its own investigation:
+1. the flow latent already carries the arm pose, so a full-state kernel (19 of 22 dims are the arm) is redundant on
+   the latent — kisski agent, dataset-side: kernel composition, predictability of s+ blocks from s vs (s,u), reward
+   variance added by u under each kernel, goal-set spread in arm pose (`tools/diag_fullstate_kernel.py`, JSON under
+   `$PSM_DATA/logs/fullstate_diag/`);
+2. the index: ridge fit of the relabelled reward on B(s+) and the critic's within-state ranking of latents vs one-step
+   cube progress, full state vs coordinates — kisski agent on the latent checkpoints (`tools/diag_index_ranking.py`),
+   same metrics to be run by aws on the raw density_fb_z_state checkpoints. **Result (five-task means, 256 states x
+   64 prior latents, JSONs `$PSM_DATA/logs/fullstate_diag/index_ranking_*.json`):** the index fit is the candidate
+   that moves with the backward input — held-out R^2 of the ridge reward fit on B(s+) 0.31 / 0.28 (full state, anchor
+   3, 500k / 1M) vs 0.46 / 0.43 (coordinates, anchor 3) vs 0.59 (coordinates, anchor 0.1); Pearson 0.56 vs 0.69 vs
+   0.77; AUC on rewarding rows 0.98 vs 0.998; the EMA moments cost nothing (least-squares ceiling equals the ridge in
+   every row). The within-state ranking signal does not separate the inputs (ratio64 2.2-2.5 everywhere; within/across
+   0.065 vs 0.095-0.099); the critic's ranking of 64 draws by one-step cube progress is weak for all five
+   (pooled Spearman 0.01-0.10; the pick moves the cube 0.005 units/step vs 0.0007 random and 0.020 best; one-step
+   displacement is a coarse ground truth, the cube does not move at 47 % of states). The actor's latent sits at the
+   median of the 64 draws by the critic's own score at every checkpoint (percentile 0.50-0.54), including the 0.948
+   run, so "actor direction" does not separate the inputs either. Full-state anchor 0.1 (the 0.763 run, aws
+   checkpoint, added 11:2xZ): held-out R^2 0.30, Pearson 0.55, AUC 0.98, ratio64 2.26, within/across 0.059, pooled
+   Spearman 0.07, actor percentile 0.56 — the same low fit as full state at anchor 3 (0.31) against 0.59 for the
+   coordinate critic at the same anchor, so the fit tracks the backward input, not the anchor. **Raw side (aws
+   11:10Z, paper checkpoints, seed 0, `runs/aws/dfb_raw/diag_index_ranking/`):** full state (1M) held-out R^2 0.29,
+   Pearson 0.54, AUC 0.98; coordinates 0.47 (500k) / 0.60 (1M), AUC 0.998 — the same numbers as the latent side. So the
+   raw full-state critic reaches 0.91 with a reward fit as weak as the latent full-state critic's: the index fit is NOT
+   what separates them (the earlier "index is the gap" reading is withdrawn); what separates them is the training
+   kernel (the raw full-state run keeps the cube kernel; see the setting mismatch below). Raw ranking signal ratio64
+   0.8-1.0 vs latent 2.2-2.5 (behaviour-flow samples spread in Q like the data's own actions; prior latents 2-2.5x
+   more), one-step Spearman 0.04-0.11 on both sides, raw actor at percentile 0.52-0.65. Candidate 2 closed: no;
+3. the anchor: full-state latent sweep at 0.3 / 0.03 / 1.0 (aws, 9 runs), plus raw Density FB full state and
+   coordinates at anchor 0.1 (aws, Factored-FB cc6bf912) to separate "latent" from "anchor".
+
+**Point 1 result (`tools/diag_fullstate_kernel.py`, JSONs `$PSM_DATA/logs/fullstate_diag/kernel_{cube,cubedouble}.json`,
+50k rows each).** What the full-state kernel measures, as implemented (per-dim std of next_observations, radius 3.98 /
+4.23): on the hindsight pairs the critic trains on, 85 % of the standardised distance is the arm block; its hit
+decision agrees with the cube kernel's only 54 % of the time (P(cube hit | full hit) 0.55); the task's 32 goal states
+are as spread in arm pose as random states (4.6-5.2 vs 5.6-6.8 std units) and 5-6x tighter in cube position (0.38 vs
+2.2), so only 11-16 % of goal pairs count each other as hits under the full kernel vs 50-62 % under the cube kernel:
+the full-state critic is asked to reach 32 different arm configurations that share a cube position, and the rows it
+rewards for a task have the cube 16-19 cm apart on average (1.87 obs units vs 0.67). Two near-constant arm dims
+(joint_pos[4] std 2e-4, joint_vel[4] std 4e-3), standardised by their own std, each alone push 2.8 % of hindsight pairs
+past the radius and turn 8 % of cube hits into full-state misses. The action part of the hypothesis does not hold at
+one step: both kernel rewards are 91-98 % predictable from s alone and u adds ≤ 0.03 R^2 to either (u informs the
+arm's one-step change more than the cube's, +0.21 vs +0.10). Cube-double: same pattern, 4-15 rewarding rows per 10k.
+
+**Setting mismatch found while checking the raw side.** The paper's "full state" variant `density_fb_z_state` keeps
+`measure_hit_spec: "19:22:0.4"` — the CUBE kernel as the training reward — and changes only the backward input to the
+full state. Our latent "full state" arms changed both (`backward_input=state` AND `kernel_input=state` with the
+per-dim-std radius kernel). So raw 0.91 vs latent 0.763 compared different settings. The matching latent cell,
+`backward_input=state kernel_input=hit_spec` at anchor 0.1, has never been run; launched now on kisski (cube-single +
+cube-double, 3 seeds, 500k) and ordered on aws. Expected: if it lands near 0.9 on cube-single, the gap was the kernel
+and the privileged information the raw method keeps is in its training reward, not in B's input.
+**Result (aws 13:52Z, `runs/aws/dfb_latent/dfb_latent_statecubek_bc0p1_*`; three seeds cube-single, two cube-double):**
+
+| full state into B, cube kernel, anchor 0.1 | 250k actor | 500k actor | 500k best-of-64 |
+|---|---|---|---|
+| cube-single | 0.825 ± 0.024 | **0.844 ± 0.017** (0.848 / 0.848 / 0.836) | 0.518 ± 0.081 |
+| cube-double (seeds 0-1) | 0.061 | 0.051 (0.049 / 0.054) | 0.001 |
+
+Beside it at anchor 0.1: full state with the state kernel 0.763; coordinates for B and kernel 0.948; raw
+density_fb_z_state at anchor 3 0.91. Reading: the training kernel accounts for 0.76 → 0.84 (about half the gap to
+raw full state and 40 % of the gap to coordinates); the remaining 0.84 → 0.95 is B's input, which matches the weaker
+reward fit on full-state features (R^2 0.30 vs 0.59). On cube-double the cube kernel lifts the actor from 0.01 to 0.05,
+still far under raw's 0.16. Next on aws (ordered 14:0xZ): the same full-state-B + cube-kernel critic at anchors 0.3,
+1.0 and 3 (raw uses 3), replacing the state-kernel anchor sweep. **A'' complete (aws 18:48Z), cube-single, full state
+into B, cube kernel, three seeds, 500k:**
+
+| anchor | actor | best-of-64 |
+|---|---|---|
+| 0.1 | 0.844 ± 0.017 | 0.518 ± 0.081 |
+| 0.3 | 0.547 ± 0.025 (250k 0.549 ± 0.110) | 0.710 ± 0.125 (250k 0.687 ± 0.105) |
+| 1.0 | 0.247 ± 0.045 (250k 0.277 ± 0.092) | 0.595 ± 0.045 (250k 0.653 ± 0.207) |
+| 3.0 | 0.104 ± 0.019 (250k 0.109 ± 0.033) | 0.366 ± 0.195 (250k 0.511 ± 0.258) |
+
+The full-state B behaves like the coordinate B: the actor falls as the anchor tightens and is at BC at 3.0; best-of-64
+peaks at 0.3 and is the only readout that degrades with training at 3.0. The best number on this critic is the
+anchor-0.1 actor, so the 0.84-vs-0.91 gap to raw at anchor 3 is not an anchor effect. A' cube-double, three seeds:
+actor 0.064 ± 0.033 (250k) / 0.052 ± 0.008 (500k), best-of-64 at 0; the 13:52Z reading stands (raw 0.16, coords 0.516).
+**Scene with the full state into B (aws 22:13Z; five-block kernel, anchor 0.1, three seeds, 500k):** actor graded
+0.471 ± 0.042 (coordinate B 0.563 ± 0.017), pass/fail 0.763 ± 0.118 (0.857 ± 0.193), best-of-64 0.171 ± 0.023 (0.176).
+The full-state B costs ~0.09 on both actor readouts, close to the cube-single cost (0.95 → 0.84); almost all of it on
+task 3 (0.86 → 0.43 graded, 0.81 → 0.51 pass/fail), tasks 1-2 unchanged. So on scene as on cube-single the full-state
+B loses some and does not break; the large privileged-input dependence is a cube-double matter. **1M (aws 00:19Z
+11-06) confirms: graded 0.448 ± 0.040 (0.435 / 0.466 / 0.444) vs 0.543; pass/fail 0.758 ± 0.094 (0.729 / 0.746 /
+0.801) vs 0.856; best-of-64 0.166 ± 0.083 vs 0.184. Cost ~0.1 on both actor readouts, none on best-of-64; task 3
+carries most of the graded loss (0.32 vs 0.76). Scene full-state line closed.** aws's consolidated table of every
+number it posted 11-04 → 11-06 (each row with its post timestamp and JSON pattern): HF `runs/aws/RESULTS_2026-11-04_06.md`,
+copy at `$PSM_DATA/logs/aws_RESULTS_2026-11-04_06.md`.
+JSONs `runs/aws/dfb_latent/dfb_latent_statecubek_bc0p1_scene_*`, pass/fail under `diag/binary_index/scene_state_binary_*`. Kisski parity of A' on cube-single (jobs 2529215-7,
+independently trained, flags verified, actor alone at 500k): 0.830 / 0.864 / 0.795 = 0.830 ± 0.085 (aws 0.844 ± 0.017).
+Reproduced.
+
+**Line B result (aws 14:14Z, `runs/aws/dfb_raw/routeB_bc0p1/`): raw-action Density FB (full-state B, cube kernel)
+at anchor 0.1 collapses — Route B 0.003 ± 0.010 at 250k over three seeds (0.001 / 0.000 / 0.008; in-loop 0.00-0.05 on
+both routes from 50k to 350k; BC 0.111; the same method at anchor 3 reaches 0.91).** The raw actor's mean distance to
+the dataset action at the same state settles at 0.70-0.73 (from 1.23 at 5k) with a distillation error of 0.10 toward
+its own flow: it leaves the data enough to fail outright. At 500k it stays collapsed: 0.008 ± 0.024 (0.001 / 0.019 /
+0.004; in-loop 0.00-0.05 on both routes, every seed). The latent actor at the same anchor reaches 0.84-0.95. So
+the weak anchor is only usable because every latent decodes to a data-supported action: the flow is what lets the
+actor be set free. **Raw with cube coordinates into B at anchor 0.1 (aws 21:02Z) collapses the same way: Route B
+0.016 ± 0.033 at 250k, 0.022 ± 0.059 at 500k, three seeds (in-loop 0.00-0.20, mostly 0, on both routes).** So at
+anchor 0.1 both raw critics fail whichever input B gets (0.022 / 0.008) while the latent actor reaches 0.95 / 0.84:
+the anchor-0.1 result is specific to the latent parameterisation; the raw method needs its paper anchor (3). Line A
+(state kernel, anchor 0.3) stopped with two seeds at 250k: actor 0.315 / 0.452, best-of-64 0.551 / 0.704 — the
+coordinate critic's anchor-0.3 pattern (actor under anchor 0.1, best-of-64 above it). A'' (full-state B, cube kernel,
+anchors 0.3 / 1.0 / 3.0) started 14:08Z.
+
+---
+
+## 2026-11-05 — the Density FB recipe on the joint psmgoal critic at anchor 0.3, three seeds, 250k: actor 0.124 ± 0.059 (BC), best-of-64 0.358 ± 0.261; the factorised critic with the same recipe and anchor gives actor 0.894 / best-of-64 0.579 — the factorisation carries the single-actor result
+
+`psmgoal_recipe_bc03_cube` (jobs 2528791-3; the 47-key override of bundle v2: reward index, two heads, flow-BC actor
+with its own vector field at bc 0.3, ridge pool-softmax readout, batch 512; flags verified at start). Five-task
+means, 500 episodes per task, 95% CI = 4.303·SE. BC 0.111.
+
+| critic at anchor 0.3, 250k | actor alone | best-of-64 |
+|---|---|---|
+| joint psmgoal net + full recipe (this arm) | 0.124 ± 0.059 (0.118 / 0.104 / 0.151) | 0.358 ± 0.261 (0.276 / 0.322 / 0.476) |
+| factorised F(s,u,z)·B(s+) + same recipe (`dfb_latent_oc_bc0p3_cube`) | 0.894 ± 0.049 | 0.579 ± 0.259 |
+| joint net + recipe at anchor 3 (reference) | 0.100 ± 0.013 | 0.247 ± 0.054 |
+
+Per task, best-of-64 seed 2: 0.10 / 0.11 / 0.41 / 0.91 / 0.84 (tasks 4-5 carry it). What it shows: with every other
+Density FB decision in place and the anchor at the value that gives the factorised critic its 0.89 single actor, the
+joint net's actor stays at BC. The anchor is not what separates the two; the form of the net is. The recipe line on
+the joint critic is closed (anchor 3 and 0.3, both at BC on the actor). 500k, three seeds: actor 0.130 ± 0.050
+(0.120 / 0.116 / 0.153), best-of-64 0.356 ± 0.362 (0.482 / 0.197 / 0.390) — unchanged reading.
+
+---
+
+## 2026-11-05 — density-PSM reference under our protocol (aws): reward inference, 500 episodes per task, raw actions, cube-single: full state 0.504 ± 0.366 (1M, 3 seeds), object-coordinate variant 0.844 (500k, seed 0), plain PSM 0.253 ± 0.103
+
+aws posted 2026-11-05T02-24-56Z (files `runs/aws/psm_density/cube-single/routeB_e500_end/`, patch vs cc6bf912
+included). Factored-FB `scripts/relabel_rescore.py` at cc6bf912: 10,000 rows of the run's own data relabelled 0/1
+for the cube within 4 cm of the task goal, z by the critic's own `infer_cond`, goal frame blocked, success = the
+OGBench flag at the episode end (identical to any-step on all 35 rows: this build of cube-single-play-v0 ends the
+episode when success fires). 95% CI = 4.303·SE. BC 0.111.
+
+| checkpoint | t1 | t2 | t3 | t4 | t5 | five-task |
+|---|---|---|---|---|---|---|
+| psm_density full state, seeds 0 / 1 / 2, 1M | | | | | | 0.450 / 0.671 / 0.392 → **0.504 ± 0.366** |
+| psm_density object coordinates (cube xyz in phi), seed 0, 500k | 0.938 | 0.810 | 0.938 | 0.690 | 0.842 | **0.844** |
+| plain psm, seeds 0 / 1 / 2, 1M | | | | | | 0.216 / 0.298 / 0.245 → **0.253 ± 0.103** |
+
+Against the 2026-09 ten-episode rescore (0.540 ± 0.172 / 0.253 ± 0.103): same means within noise, wider spread at
+500 episodes (seed 2 task 3 0.064). Reading: the softmax head on PSM doubles plain PSM under reward inference on the
+full state (0.50 vs 0.25, 4.5x BC) with a large seed spread; with the cube coordinates in the goal embedding it
+reaches 0.844 on one seed, close to its goal-conditioned 0.88 and near nf2's best-of-64 (0.866), against our latent
+Density FB actor at 0.950 (500k) in the matching object-coordinate setting. **aws 04:19Z: object-coordinate variant
+retrained on aws (seed 0 retrain + seeds 1-2, seed 0's exact config), Route B at 250k: 0.847 / 0.636 / 0.785 =
+0.756 ± 0.269** (seed 1 task 2 0.250 is the outlier; in-loop goal-conditioned success peaks 0.90-0.92 at 200-250k
+and drifts down by 500k on seeds 1-2). **500k (aws 05:00Z): 0.832 / 0.836 / 0.729 = 0.799 ± 0.151** (with the
+original seed 0 in place of the retrain: 0.803 ± 0.160; the retrain reproduces the original at 0.832 vs 0.844, every
+task within 0.15; task 4 weakest on every seed, 0.54-0.69). The density-PSM comparator in our object-coordinate
+setting is therefore **0.80 at 500k over 3 seeds** (raw actions, reward inference), 7x BC, near nf2's best-of-64
+(0.866) and 0.15 under our latent Density FB actor (0.950 ± 0.017). Files `runs/aws/psm_density/cube-single/
+routeB_oc_aws_e500_end/`, checkpoints `psm_density_oc_aws_seed{0,1,2}/` (250k, 500k; SHA256SUMS_oc_aws). aws idle.
+
+---
+
+## 2026-11-05 — proto head at 500k, three seeds (aws): family-head GPI 0.525 ± 0.402 (from 0.629 at 250k) vs reward-head best-of-64 0.362 ± 0.477; actor 0.941 ± 0.044; one fixed family policy 0.105; line closed on cube-single
+
+aws posted 2026-11-05T01-45-31Z. Same setup as the 250k entry; BC 0.111; reference without the head: actor
+0.950, best-of-64 0.269 at 500k.
+
+| readout | 250k | 500k | 500k per seed |
+|---|---|---|---|
+| actor alone | 0.931 ± 0.017 | 0.941 ± 0.044 | 0.926 / 0.960 / 0.935 |
+| best-of-64, reward head | 0.446 ± 0.418 | 0.362 ± 0.477 | 0.311 / 0.201 / 0.574 |
+| best-of-64 x 16 codes, family head | 0.629 ± 0.092 | 0.525 ± 0.402 | 0.403 / 0.709 / 0.464 |
+| one fixed family policy | 0.104 ± 0.007 | 0.105 ± 0.006 | 0.102 / 0.106 / 0.107 |
+
+The family-indexed critic gives a better one-step pick than the single reward head at both checkpoints (by 0.18 /
+0.16) and does not hurt the actor; but it declines with training the way the reward head's pick does (0.63 → 0.53,
+seed spread 0.09 → 0.40) and stays 0.30-0.42 under the actor. The family itself holds no good policy. On cube-single
+the zero-shot PSM claim on the flow (critic-internal policy choice beating the trained actor) does not hold; the
+actor trained against the critic remains the policy-improvement step that works. JSONs under `runs/aws/dfb_latent/`.
+Kisski parity (jobs 2529045-7, independently trained, flags verified; 500k, actor + bon_proto only): actor 0.945 ±
+0.015 (0.941 / 0.952 / 0.943), family-head GPI 0.502 ± 0.171 (0.480 / 0.579 / 0.446) — aws 0.941 / 0.525. Reproduced.
+
+---
+
+## 2026-11-05 — proto head (factorised zero-shot PSM on latent Density FB) at 250k, three seeds (aws): GPI over the policy family 0.629 ± 0.092 beats the reward head's best-of-64 (0.446 ± 0.418), stays 0.30 under the actor (0.931); one fixed family policy at BC (0.104)
+
+aws posted 2026-11-05T00-59-46Z (`dfb_latent_proto_bc0p1_cube`, cube-single, anchor 0.1, 500 episodes per task,
+95% CI = 4.303·SE; JSONs `runs/aws/dfb_latent/dfb_latent_proto_bc0p1_cube_*`). BC 0.111. Reference without the head
+(`dfb_latent_oc_bc0p1_cube` at 250k): actor 0.931, best-of-64 0.462.
+
+| readout, 250k | mean | per seed | per task t1-5 |
+|---|---|---|---|
+| actor alone | 0.931 ± 0.017 | 0.934 / 0.937 / 0.924 | 0.951 / 0.987 / 0.975 / 0.931 / 0.814 |
+| best-of-64, reward head (bon) | 0.446 ± 0.418 | 0.496 / 0.259 / 0.584 | 0.452 / 0.713 / 0.598 / 0.089 / 0.381 |
+| best-of-64 x 16 codes, family head (bon_proto) | 0.629 ± 0.092 | 0.665 / 0.632 / 0.591 | 0.408 / 0.571 / 0.729 / 0.709 / 0.729 |
+| one fixed family policy (proto_policy) | 0.104 ± 0.007 | 0.104 / 0.107 / 0.101 | 0.119 / 0.073 / 0.219 / 0.091 / 0.018 |
+
+Against the stated expectations: the extra head does not hurt the reward head (actor 0.931 = 0.931); no single
+random-code policy is good on its own (BC level), as the fixed-noise policies were on the joint critic in September;
+the GPI pick over the family beats the single reward head's pick by 0.18 and is far more stable across seeds (CI
+0.09 vs 0.42), with the gain concentrated on task 4 (0.709 vs 0.089); it stays 0.30 under the actor alone, so at
+250k the family-indexed critic is a better one-step value than the single head but not the zero-shot PSM claim.
+500k evals ~02:30Z.
+
+---
+
+## 2026-11-05 — the Density FB recipe on the joint psmgoal critic at anchor 3, three seeds: actor 0.100 ± 0.013 / 0.107 ± 0.029, best-of-64 0.247 ± 0.054 / 0.201 ± 0.137 at 250k / 500k; line closed at anchor 3
+
+`psmgoal_dfb_recipe_cube` (jobs 2528649-51; `dfb_recipe=true agent.batch_size=512`: every Density FB decision except
+the factorisation, flow-BC actor at bc 3). Five-task means, 500 episodes per task, 95% CI = 4.303·SE. BC 0.111, nf2
+0.866, Density FB latent at anchor 3: best-of-64 0.829 / actor 0.240 (250k).
+
+| readout | 250k (3 seeds) | 500k |
+|---|---|---|
+| actor alone | 0.100 ± 0.013 (0.101 / 0.095 / 0.105) | 0.107 ± 0.029 (0.106 / 0.096 / 0.119) |
+| best-of-64 | 0.247 ± 0.054 (0.248 / 0.225 / 0.269) | 0.201 ± 0.137 (0.242 / 0.223 / 0.138) |
+
+Seed 0 per task at 250k, best-of-64: 0.02 / 0.14 / 0.08 / 0.25 / 0.74 (task 5 carries most of it). The whole recipe
+on the joint net leaves the actor at BC and the best-of-64 readout 0.6 under the factorised critic with the same
+recipe, and 0.6 under nf2. The anchor-0.3 version (`psmgoal_recipe_bc03_cube`, running) is the last cell of this
+line.
+
+---
+
+## 2026-11-05 — the grafting ladder launched: psmgoal (reward-z index) + ONE Density FB decision per arm, nine arms x 3 seeds x 500k on kisski (luis takes four as the fast copy); the density-PSM reference search is with aws
+
+User order 23:0xZ (11-04): find the single biggest change that takes psmgoal with z conditioning to Density FB
+performance. BASE = the reward-index line `psmgoal_ri_fbc3_cube` (nf2 + policy_index=reward, coef_source=ridge,
+actor_input=w, norm_future_k=0; 500k best-of-64 0.393, actor 0.109): EXTRA `agent.policy_index=reward
+agent.coef_source=ridge agent.measure_loss=softmax agent.train_actor=true agent.actor_kind=flowbc
+agent.goal_random_frac=0.0 agent.acting=distill agent.eval_redistill=false`. The hard one-hot term is already in
+BASE (policy_index=reward asserts norm_future_k=0), so that arm is dropped.
+
+| arm | keys on top of BASE | jobs |
+|---|---|---|
+| heads2 | critic_heads=2 | 2529069-71 |
+| arch | measure 512x3 + layer_norm, lr_measure 3e-4 (BASE 1024x2, none, 1e-4) | 2529072-4 |
+| disc99 | discount 0.99, tau 0.005, goal_discount 0.99 (BASE 0.98 / 0.01 / 0.98) | 2529075-7 |
+| vgoals | goal_cur_obs_frac 0.2, goal_random_frac 0.375 | 2529078-80 |
+| goalin | goal_input=hit_blocks (BASE full) | 2529081-3 |
+| fbcvf3 | actor_kind=flowbc_vf (NoiseConditionedActor + own FlowVectorField, distilled to its 10-step rollout, stepped after the critic, min over heads, q-centred) at bc 3 | 2529084-6 |
+| fbcvf01 | fbcvf3 at bc 0.1 | 2529087-9 |
+| index | z_dim 50, index_pool_m 256, ridge_score=pool_softmax (BASE 128 / 0 / goal) | 2529090-2 |
+| batch512 | batch_size 512 (BASE 256) | 2529093-5 |
+
+Everything else fixed at BASE (fb_rand_frac 0.5, enc_tau 5e-4, sigma_tau 5e-3, hit spec 19:22:0.4, …).
+**Ladder results (five-task means, 500 episodes per task, three seeds, 95% CI = 4.303·SE; BASE at 250k / 500k:
+best-of-64 0.429 / 0.393, actor ~0.10; BC 0.111; Density FB latent at anchor 3: best-of-64 0.829, actor 0.240):**
+
+| arm | 250k best-of-64 | 250k actor | 500k best-of-64 | 500k actor |
+|---|---|---|---|---|
+| arch (512x3 + layer norm, lr 3e-4) | 0.450 ± 0.178 (0.530 / 0.390 / 0.432) | 0.104 ± 0.016 | 0.409 ± 0.130 (0.468 / 0.367 / 0.393) | 0.099 ± 0.012 |
+| disc99 (discount 0.99, tau 0.005) | 0.373 ± 0.132 (0.317 / 0.423 / 0.379) | 0.108 ± 0.008 | 0.308 ± 0.033 (0.312 / 0.319 / 0.293) | 0.103 ± 0.012 |
+| vgoals (value-goal mix 0.2 / 0.5 / 0.3) | 0.358 ± 0.177 (0.405 / 0.394 / 0.276) | 0.105 ± 0.014 | 0.295 ± 0.184 (0.310 / 0.215 / 0.360) | 0.103 ± 0.003 |
+| heads2 (two critic heads, min at every scoring) | 0.392 ± 0.063 (0.380 / 0.421 / 0.375) | 0.102 ± 0.013 | 0.312 ± 0.173 (0.358 / 0.232 / 0.346) | 0.110 ± 0.023 |
+| batch512 (batch 512) | 0.382 ± 0.062 (0.354 / 0.392 / 0.401) | 0.092 ± 0.010 | 0.300 ± 0.336 (0.437 / 0.297 / 0.166) | 0.101 ± 0.016 |
+| **factorized (the spec's A(s,u)^T f(s+) + beta(s,u)^T f(s+) net in place of the joint net; softmax loss newly wired)** | 0.518 ± 0.221 (0.514 / 0.432 / 0.609) | **0.141 ± 0.011** (0.144 / 0.143 / 0.136; task 3 0.26-0.35) | 0.547 ± 0.260 (0.542 / 0.653 / 0.444) | **0.157 ± 0.045** (0.148 / 0.145 / 0.178; task 3 0.27-0.37) |
+| **goalin (cube coordinates as the goal slot, goal_input=hit_blocks)** | **0.732 ± 0.218** (0.673 / 0.833 / 0.690) | 0.109 ± 0.015 | **0.621 ± 0.212** (0.562 / 0.719 / 0.582) | 0.106 ± 0.005 |
+| index (z_dim 50; best-of-64 with BASE's scorer) [luis; kisski 250k 0.427 ± 0.332 (0.582 / 0.358 / 0.342), actor 0.103 ± 0.006; kisski 500k 0.291 ± 0.099 (0.246 / 0.324 / 0.303), actor 0.106 ± 0.020] | 0.386 ± 0.340 (0.540 / 0.278 / 0.340) | 0.107 ± 0.002 | 0.431 ± 0.219 (0.343 / 0.430 / 0.519) | 0.099 ± 0.002 |
+| fbcvf3 (flow-BC actor + own vector field as bootstrap, anchor 3) [luis 2 of 3 seeds; kisski 3 seeds] | luis 0.654 / 0.621; **kisski 0.662 ± 0.046** (0.646 / 0.683 / 0.657) | 0.092 / 0.107; kisski 0.102 ± 0.017 | luis 0.477 / 0.611; **kisski 0.551 ± 0.133** (0.587 / 0.490 / 0.577) | 0.105 / 0.099; kisski 0.105 ± 0.015 |
+| fbcvf01 (same, anchor 0.1) [luis; kisski 250k 0.549 ± 0.263 (0.672 / 0.491 / 0.485), actor 0.098 ± 0.018; kisski 500k 0.500 ± 0.194 (0.525 / 0.563 / 0.413), actor 0.111 ± 0.020] | 0.521 ± 0.292 (0.519 / 0.640 / 0.405) | 0.110 ± 0.031 (0.097 / 0.112 / 0.121) | **0.585 ± 0.041** (0.603 / 0.580 / 0.572) | 0.113 ± 0.042 (0.093 / 0.122 / 0.124) |
+
+**Kisski ladder complete (11-07 0x:xxZ): ten decisions, each alone on the reward-indexed base, three seeds, 250k and
+500k.** Best-of-64 at 500k against the base's 0.393: goalin 0.621, factorized 0.547, fbcvf3 0.551, fbcvf01 0.500
+(luis 0.585), arch 0.409, index 0.291 (luis 0.431), heads2 0.312, disc99 0.308, batch512 0.300, vgoals 0.295. Actor:
+at BC (0.09-0.11) in every arm except factorized (0.157). Reading: on the joint critic two decisions move the
+critic's ranking (the hit-block goal slot, the flow-BC bootstrap actor), the factorised net alone moves both readouts
+a little and is the only one that gives the actor a slope, and the other six are neutral or slightly negative. No
+single decision closes the gap to the factorised critic with the full recipe (best-of-64 0.83, actor 0.95); the
+factorisation is the enabling change and the rest of the recipe is what it enables. Luis copy (11-08): its four
+remaining runs died at 415-470k on a storage quota; only their 250k evals will be run (parity only, no retraining).
+
+Tenth arm added 11-06 (user: "and the factored net?"): `measure_form=factorized` now runs with `measure_loss=softmax`
+(agents/psmgoal.py; logits M_ij = (A(s_i,u_i)^T f(g_j))^T w_i + beta(s_i,u_i)^T f(g_j), f evaluated once per mesh
+state; same softmax TD loss as the joint path; `fb_feature` under the factorized form = f(s+) at the slow tower, so the
+ridge index lives in f's space (needs f_dim = z_dim = 128); joint-only seams assert; golden bit-identity of BASE and of
+factorized+squared against pre-edit fixtures; `tests/test_psmgoal_factorized_softmax.py` 13 pass; CPU smoke 200 steps,
+flags check OK, 0.155 s/step). Arm = BASE + `agent.measure_form=factorized`, three seeds, 500k. Expected: if it lifts
+best-of-64 well above 0.43 and the actor off BC, the factorisation alone is the single biggest change; if it stays on
+the base, the factorisation works only together with the other recipe items. **250k result (11-06 16:50Z, three
+seeds, flags verified):** best-of-64 0.518 ± 0.221 (+0.09 over the base, inside the seed spread), actor 0.141 ± 0.011
+— the first and only ladder arm whose actor leaves BC (0.14 vs 0.10-0.11 everywhere else; task 3 at 0.26-0.35), but far
+from the factorised net with the full recipe (actor 0.89 at anchor 0.3). Reading: the factorisation alone on the base
+gives the actor a slope to climb, and the climb goes far only with the rest of the recipe (the flow-BC actor with its
+own vector field and the weak anchor, the hit-block goal slot). 500k: best-of-64 0.547 ± 0.260 (+0.15 over the base's
+0.393), actor 0.157 ± 0.045, both rising slightly from 250k; the reading stands. Factorised arm closed.
+
+Second decisive row (kisski 19:1xZ): goalin — feeding the critic only the cube coordinates of the goal state instead of
+the full goal state — lifts best-of-64 from 0.43 to 0.732 ± 0.218 at 250k, the largest single-decision move on the
+joint critic (nf2, which has it, is 0.866; Density FB latent at anchor 3 0.829); the actor stays at BC.
+
+First decisive row (luis 14:54Z): fbcvf01's best-of-64 at 500k has a CI (0.544-0.626) above BASE's 0.393 — the flow-BC
+actor with its own vector field as the bootstrap moves best-of-64 by about +0.19 on the joint critic, with the actor
+readout itself at BC; it stays well under Density FB latent (0.81) and nf2 (0.866).
+
+**Bug found by luis (11-05 11:55Z):** `ridge_score=pool_softmax` reads the frozen pool `index_pool`, which is filled
+only in `fbc_actor_step` (actor_kind=flowbc_vf); with BASE's `actor_kind=flowbc` the pool stays zero, every candidate
+scores the same, and the readout acts as BC (index seed 0: 0.117 at 250k and 500k, identical episode lists). The
+index arm's single decision is therefore z_dim 50, read out with BASE's scorer (`acting=gpi ridge_score=goal`); the
+pool_softmax readout is covered by the recipe arms, where it is defined. Training and the actor readout of the index
+arm are unaffected. Kisski note (22:30Z): the running ladder watcher had parsed the unpatched script, so its first five
+index best-of-64 evals went out with the pool_softmax scorer (0.117, set aside under `logs/invalid_pool_softmax/`);
+the watcher was restarted with the goal scorer. Five old-scorer jobs were still queued and may overwrite by name;
+at tally time any index best-of-64 JSON whose config shows ridge_score=pool_softmax is discarded. Outcome: seeds 0
+and 2 came from the goal-scorer jobs (0.582 / 0.342 at 250k); seed 1's five JSONs came from the old-scorer jobs
+(0.134 / 0.086 / 0.236 / 0.118 / 0.012, BC level) and the later goal-scorer jobs did not overwrite them, so they were
+set aside and seed 1 is being re-run. First luis numbers (single seed, fbcvf3 seed 1): best-of-64 0.654 (250k) / 0.477 (500k), actor
+0.092 / 0.105; index actor 0.107 / 0.099 (two seeds). All nine arms
+smoked 200 CPU steps with every one of the 140 agent keys verified against yaml + BASE + arm
+(`$PSM_DATA/gc_scripts/ladder/{arms.tsv,arms_expected.json,check_flags.py,smoke_results.tsv}`). Readouts at 250k and
+500k: best-of-64 (`acting=gpi`) and actor alone (`acting=distill`), five tasks, 500 episodes. Files on HF
+`runs/kisski/code/2026-11-05-ladder/`; luis has fbcvf3 / fbcvf01 / index / batch512 as the fast copy; aws is 6x
+slower on psmgoal and is not used. Expected before results: each decision alone moves best-of-64 by less than the
+seed CI unless it is the one that separates Density FB (0.81 at anchor 3) from BASE (0.39); the fbcvf arms are read
+on the actor readout.
+
+Density-PSM reference: Factored-FB `impls/critics/psm_density.py` (c042c23, 2026-08-28; PSM's proto stage kept,
+the deployed SF head trained with the softmax cross-entropy and the reward read as the softmax-integrated phi^T z);
+cube-single goal-conditioned 16.4 ± 2.0 last-3 / 18.7 ± 2.3 final (3 seeds, 2026-09-09 aggregate), reward-inference
+route not run. **aws's search (23:22Z)** corrects this: Route B WAS run on 2026-09-07 (relabel_rescore_cs1m.jsonl rows
+46-60, never written into a note): psm_density 1M, 3 seeds x 5 tasks x 10 episodes, reward inference, **0.540 ± 0.172**
+(seeds 0.50 / 0.62 / 0.50; plain psm 0.253 ± 0.103, rldp 0.253, rldp_density 0.213 in the same rescore), with success
+counted at any step (TD-JEPA accounting). Variants: object-coordinate phi (cube xyz 19:22 at 0.4) seed 0 at 500k,
+Route A 0.88 final (0.92 peak; yaml comment "0.90 vs 0.15-0.20 full state"); "repair" (batch 1024, discount 0.98,
+ortho 1000) 0.03. The code exists only in Factored-FB (c042c239, 2026-08-28; deleted from main at bb73bae3
+2026-09-30; alive on branches density-fb cc6bf912, backup/archive-20260928); the runs started 2026-08-24 from
+untracked drafts. What it trains: PSM's proto stage unchanged (phi trained only there, 16-bit codes, FB contrastive
+loss + ortho), the deployed head psi(s,a,z)·phi(s+)/temp softmaxed over the batch's next states with the
+(1-γ) one-hot + γ target-softmax cross-entropy, Q = softmax-weighted phi(s+)·z with mean-minus-0.5x-disagreement
+over two heads, flow-BC actor at bc 3; batch 256, discount 0.99, z_dim 128, phi 256x2 at lr 1e-5, head 1024x1 at 1e-4.
+Checkpoints on HF `runs/aws/psm_density/cube-single/{psm_density_seed0-2 (1M), psm_density_oc_seed0 (500k),
+psm_density_repair_seed0 (500k)}` with config, eval.csv, train.csv, the Route B jsonl, and SHA256SUMS. Ordered from
+aws: the Route B rescore at 500 episodes per task with end-of-episode success on the three 1M checkpoints, then on
+the object-coordinate 500k checkpoint, then plain psm.
+
+---
+
+## 2026-11-04 — full state at anchor 0.1 (aws): cube-single actor 0.763 ± 0.032 at 1M (anchor 3 was 0.105; object coordinates 0.948); cube-double stays at BC (0.010) — the privileged coordinates are needed on two cubes
+
+aws posted 2026-11-04T22-44-05Z (JSONs `runs/aws/dfb_latent/dfb_latent_state_bc0p1_*`). Full observation as backward
+input and training kernel (calibrated radius), latent actor at anchor 0.1, three seeds, 500 episodes per task, 95% CI
+= 4.303·SE. BC 0.111 / 0.019.
+
+| cube-single | 250k | 500k | 1M |
+|---|---|---|---|
+| full state, anchor 0.1, actor | 0.777 ± 0.058 | 0.800 ± 0.030 | 0.763 ± 0.032 (0.776 / 0.750 / 0.763) |
+| full state, anchor 0.1, best-of-64 | 0.458 ± 0.196 | 0.407 ± 0.035 | 0.471 ± 0.098 |
+| full state, anchor 3, actor (reference) | 0.104 | 0.104 | 0.105 ± 0.030 |
+| object coordinates, anchor 0.1, actor (reference) | 0.931 | 0.950 | 0.948 ± 0.005 |
+
+| cube-double | 250k | 500k | 1M |
+|---|---|---|---|
+| full state, anchor 0.1, actor | 0.021 ± 0.005 | 0.012 ± 0.009 | 0.010 ± 0.002 (t1-5: 0.049 / 0 / 0 / 0 / 0.001) |
+| object coordinates, anchor 0.1, actor (reference) | 0.462 | 0.494 | 0.516 ± 0.073 |
+
+Per task at 1M, cube-single full state: 0.857 / 0.817 / 0.859 / 0.600 / 0.681; tasks 4-5 lose the most against the
+coordinates (0.936 / 0.883). What it shows: on cube-single the anchor was the main cause of the earlier full-state
+failure (0.105 → 0.763, 7x BC), and the object coordinates still add 0.19 with no CI overlap. On cube-double the full
+state is at BC at every checkpoint under either anchor; the method needs the object coordinates there. This goes into
+the write-up as the privileged-input limitation. aws's six GPUs are free; the proto arm goes there next.
+
+---
+
+## 2026-11-04 — factorised zero-shot PSM on the flow: the proto head built on latent Density FB and launched (kisski 3 seeds queued; bundle to luis / aws)
+
+User order 20:2xZ. `agents/density_fb_latent.py` gains a second measure head F_p(s,u,c)·B(s+) over a family of
+policies indexed by an 8-bit code c (policy c = a fixed random prior latent per (state, code) via a hash, as PSM's
+`sampling_actor`), sharing the backward net B and its slow/centred copies with the reward head, trained with the same
+softmax target (one random code per row, bootstrap through the target nets at (s', u'(s',c), c)), loss added at
+`proto_loss_coef` 1; its gradient is zero on the reward head's F and on the actor (test-verified). Readouts: `actor`
+and `bon` unchanged; `bon_proto` = 64 prior draws x a bank of 16 codes scored by the reward readout with F_p, act with
+the u of the best pair (PSM's GPI over the family for the one-step pick); `proto_policy` = one code chosen for the task
+by its mean value over 1024 dataset states, then act with that fixed family policy (measures the family itself).
+Flag-off path bit-identical to before (golden fixture `tests/fixtures/density_fb_latent_golden.npz`, 84 arrays);
+`tests/test_density_fb_proto.py` 10 pass; old checkpoints restore. Keys: proto_head, proto_code_bits 8, proto_policy
+hash, proto_bank 16, proto_loss_coef 1.0, proto_hidden_dim/layers, proto_hash_res 1e-3, proto_hash_seed 0,
+proto_bank_seed 0, proto_select_n 1024. CPU smoke through main.py: 200 steps, flags landed, 7.3 steps/s.
+
+Launched: `dfb_latent_proto_bc0p1_cube` seeds 0-2 on kisski (jobs 2529045-7, pending on priority; 500k, anchor 0.1,
+acting=bon_proto in-loop, otherwise identical to `dfb_latent_oc_bc0p1_cube`); bundle
+`runs/kisski/code/2026-11-04-proto/` (RUN_PROTO.md) posted to luis with aws as backup. Evals at 250k / 500k: four
+readouts x five tasks x 500 episodes. Expected before results: `proto_policy` at BC says the fixed-code family holds
+nothing good (as the fixed-noise policies on the joint critic in September); `bon_proto` above `bon` (0.46 / 0.27) says
+the GPI over the family gives a better one-step value than the single reward-indexed head; `bon_proto` above the actor
+(0.93 / 0.95) would be the zero-shot PSM claim on the flow; `actor` unchanged checks the extra head did not hurt.
+
+---
+
+## 2026-11-04 — best-of-8 bootstrap arms: one head 0.673 ± 0.122 at 500k (from 0.442 at 250k), two heads 0.509 ± 0.239 at 250k; both below nf2 0.866
+
+Five-task means, best-of-64 readout, 500 episodes per task, three seeds, 95% CI = 4.303·SE, cube-single, nf2 recipe
+with the bootstrap latent = the critic's pick among 8 prior draws.
+
+| arm | 250k | 500k |
+|---|---|---|
+| best-of-8 bootstrap, one head | 0.442 ± 0.241 | 0.673 ± 0.122 (0.728 / 0.660 / 0.632) |
+| best-of-8 bootstrap, two heads (min) | 0.509 ± 0.239 (0.400 / 0.581 / 0.546) | pending (~22 h limit) |
+| two heads, plain bootstrap | 0.845 ± 0.093 | — |
+
+The argmax bootstrap over 8 draws recovers with training (0.44 → 0.67) but stays 0.19 under the plain nf2 bootstrap
+at 500k; a second head adds about 0.07 at 250k, inside the seed noise. The pessimism line on the joint critic closes:
+no variant reaches nf2.
+
+---
+
+## 2026-11-04 — kisski parity of the successor-flow best-of-64 readout on independently trained 100k checkpoints: 0.751 / 0.715 / 0.102 (luis 0.750 / 0.724 / 0.102)
+
+Both successor flows retrained on kisski (jobs 2528978-9, 100k steps, 6 min each on an H100; final losses 0.0096 bc /
+0.0074 dfb_actor, matching luis's), then `tools/eval_successor_flow_bon.py` with K 64, k_samples 16, 500 episodes per
+task, seed 0 (jobs 2529013-5; `$PSM_DATA/exp/successor_flow/bon_*/`).
+
+| critic | t1 | t2 | t3 | t4 | t5 | five-task |
+|---|---|---|---|---|---|---|
+| successor flow of the anchor-0.3 actor | 0.858 | 0.742 | 0.888 | 0.738 | 0.528 | 0.751 |
+| successor flow of the behaviour policy | 0.676 | 0.864 | 0.940 | 0.714 | 0.382 | 0.715 |
+| BC control (one unscored draw) | 0.118 | 0.078 | 0.204 | 0.090 | 0.020 | 0.102 |
+
+Two machines, two independently trained critics, the same readout within 0.01 on both critic rows and exactly on the
+control. The acting result is reproduced.
+
+---
+
+## 2026-11-04 — the successor flow as the critic for best-of-64 acts at 0.750 on cube-single (luis, seed 0); behaviour-policy futures 0.724; BC control 0.102; follow-ups: the h-100 mass grows slowly with training (0.21 at 300k, truth 0.73), h50 = h100 at every checkpoint, horizon ramp no effect, marginal mode loses ranking
+
+luis posted 2026-11-04T20-12-47Z and 20-12-49Z (JSONs `runs/luis/successor_flow/bon/` and `.../followup/`).
+
+Acting (tools/eval_successor_flow_bon.py): at each step draw 64 prior latents, sample 16 futures per candidate from the
+successor flow at truncated-geometric horizons, score by the mean cube-kernel reward over the 32 rewarding goals, act
+with the best. Seed 0, the 100k checkpoints, 500 episodes per task. References: BC 0.111, nf2 best-of-64 0.866,
+Density FB latent best-of-64 at anchor 0.3 0.579 (250k) / 0.490 (500k).
+
+| critic | t1 | t2 | t3 | t4 | t5 | five-task | s/step (GPU) |
+|---|---|---|---|---|---|---|---|
+| successor flow of the anchor-0.3 actor | 0.836 | 0.762 | 0.890 | 0.740 | 0.524 | 0.750 | 0.0027 |
+| successor flow of the behaviour policy | 0.648 | 0.826 | 0.950 | 0.758 | 0.436 | 0.724 | 0.0022 |
+| BC control (one unscored draw, same loop) | 0.118 | 0.078 | 0.204 | 0.090 | 0.020 | 0.102 | 0.0003 |
+
+Against the stated expectation: between BC and nf2, much nearer nf2, and far above the Density FB best-of-64 readout
+of the same policy (0.58 / 0.49). The behaviour-policy critic is within ~2 binomial SE of the actor critic. The
+within-state ordering of candidates survives the lost long-horizon mass. One seed each.
+
+Follow-ups (same 64 start states; CIs 3 seeds, 4.303·SE). (1) Seeds 0-2 at 100k, actor-policy flow: occupancy
+estimate 0.004 ± 0.001 / 0.029 ± 0.004 / 0.115 ± 0.013 / 0.116 ± 0.009 at h 10/25/50/100 vs rollouts 0.014 / 0.039 /
+0.336 / 0.725; kernel Spearman 0.985 / 0.900 / 0.837 / 0.526 ± 0.051. The 3-6x under-estimate is not seed noise.
+(2) Seed 0 to 300k: h-100 mass 0.033 (25k) → 0.062 → 0.114 (100k) → 0.172 (200k) → 0.206 (300k), still climbing but
+at a slope that will not reach 0.73; h50 ≈ h100 at every checkpoint (the flow does not resolve arrival time past ~50
+steps); Spearman at h100 ~0.5 throughout; q estimate 8.49 vs 16.55. (3) Horizon ramp over 50k steps: no change.
+(4) Marginal (TD2-CFM) mode: flat over horizon by construction, Spearman 0.53 / 0.51 / 0.47 / 0.30, q 10.21: closer on
+the discounted value, worse on ranking. Bucket losses are at their plateau by 25k on every seed (no late rise).
+
+Next on luis: best-of-64 with the 300k checkpoint (more mass → better acting?), then seeds 1-2 of both critics for
+CIs, then `--fixed_h 50` as the score.
+
+---
+
+## 2026-11-04 — PSM-SM scale-10 at 500k, three seeds: best-of-64 0.642 ± 0.058 (flat from 250k), reward-vector GPI 0.443 ± 0.057; line closed at 0.22 under nf2
+
+Readouts from `$PSM_DATA/fable-brain-dump/eval/psmsm_b05_s10_sd00?_500000_e500_task?.json`, five-task means, 500
+episodes per task, three seeds, 95% CI = 4.303·SE. nf2 0.866, BC 0.111.
+
+| readout | 250k | 500k |
+|---|---|---|
+| best-of-64 over prior draws | 0.642 ± 0.055 | 0.642 ± 0.058 (0.621 / 0.667 / 0.638) |
+| reward-vector GPI | 0.423 ± 0.057 | 0.443 ± 0.057 (0.424 / 0.438 / 0.468) |
+
+The ratio-form measure with the fixed scale on m plateaus at 0.64 under best-of-64 between 250k and 500k on every
+seed. It stays 0.22 under the softmax psmgoal critic and well under the latent Density FB single actor (0.948). No
+further PSM-SM arms planned.
+
+---
+
+## 2026-11-04 — scene 1M (aws): anchor-0.1 actor 0.543 ± 0.062 under the graded index, 0.856 ± 0.111 under the pass/fail index; best-of-64 0.184; anchor 0.3 keeps falling
+
+aws posted 2026-11-04T18-34-11Z. Scene, object-coordinate hit spec, 500 episodes per task, three seeds, 95% CI =
+4.303·SE. BC 0.038. Pass/fail = the ridge index fitted on the binary completion reward (same relabel batch).
+
+| anchor | step | actor, graded index | actor, pass/fail index | best-of-64, graded |
+|---|---|---|---|---|
+| 0.1 | 250k | 0.570 ± 0.010 | — | 0.186 ± 0.153 |
+| 0.1 | 500k | 0.563 ± 0.017 | 0.857 ± 0.193 | 0.176 ± 0.113 |
+| 0.1 | 1M | 0.543 ± 0.062 | 0.856 ± 0.111 (0.900 / 0.810 / 0.858) | 0.184 ± 0.101 |
+| 0.3 | 250k | 0.385 ± 0.106 | — | 0.281 ± 0.413 |
+| 0.3 | 500k | 0.375 ± 0.101 | — | 0.331 ± 0.270 |
+| 0.3 | 1M | 0.304 ± 0.056 | — | 0.279 ± 0.107 |
+
+Per task at 1M, anchor 0.1: graded actor 0.985 / 0.975 / 0.756 / 0.001 / 0.000; pass/fail actor 0.981 / 0.968 /
+0.711 / 0.897 / 0.721 (drawer opened in 93-100 % of task 4-5 episodes; task 3 is the weak one on seeds 1-2 at 0.63 /
+0.65 vs 0.86); best-of-64 0.687 / 0.137 / 0.097 / 0 / 0. The pass/fail actor holds from 500k to 1M with a narrowing
+seed spread. Scene line closed at 1M; the scene row for the record is 0.856 ± 0.111 (pass/fail index) with the graded
+0.543 ± 0.062 beside it and the protocol caveat. Pass/fail reports under `runs/aws/dfb_latent/diag/binary_index/`
+(EVAL_WORKERS=1), graded JSONs under `runs/aws/dfb_latent/`.
+
+---
+
+## 2026-11-04 — binary-completion index on the cube envs (aws): cube-double 0.473 ± 0.058 vs graded 0.516 ± 0.073 (tasks 4-5 unchanged); cube-single identical by construction (0.954 vs 0.948)
+
+aws posted 2026-11-04T17-10-04Z and 17-13-34Z. Anchor-0.1 checkpoints at 1M, actor alone, 500 episodes per task,
+three seeds, 95% CI = 4.303·SE. Reports under `runs/aws/dfb_latent/diag/binary_index/`.
+
+| env | graded index (on record) | binary index | per-task mean t1-5, graded → binary |
+|---|---|---|---|
+| cube-double | 0.516 ± 0.073 | 0.473 ± 0.058 | 0.90→0.86 / 0.57→0.44 / 0.63→0.49 / 0.17→0.17 / 0.31→0.40 |
+| cube-single | 0.948 ± 0.005 | 0.954 ± 0.011 | same fit; difference is single-process vs 8-worker episode seeds |
+
+Binary rewarding rows in the relabel batch: cube-double 6 / 4 / 12 / 8 / 8 (scene 24-62, cube-single 203-260).
+What it shows: the binary index helps only on scene, where the graded reward has six levels and the goal needs a step
+that first undoes a met condition (opening the closed drawer). On cube-double the graded reward has three levels with
+no such dip, the binary target rests on 4-12 positives, and the mean drops by 0.04 with tasks 2-3 losing 0.12-0.14.
+On cube-single the shifted graded reward is already 0/1. The graded index stays the protocol for the cube envs; for
+scene the two targets are reported side by side with the protocol caveat.
+
+---
+
+## 2026-11-04 — scene, three seeds, 500 episodes: binary-completion index 0.857 ± 0.193 vs graded 0.563 ± 0.017 on the same 500k checkpoints; tasks 4-5 0.889 / 0.637
+
+aws posted 2026-11-04T16-57-21Z. Scene anchor-0.1, actor alone, 500 episodes per task, three seeds, 95% CI = 4.303·SE.
+BC 0.038. Binary rewarding rows in the (seed-fixed) relabel batch: 35 / 24 / 34 / 62 / 46.
+
+| index target | seed 0 | seed 1 | seed 2 | mean | per-task mean t1-5 |
+|---|---|---|---|---|---|
+| graded env reward | 0.560 | 0.558 | 0.571 | 0.563 ± 0.017 | 1.00 / 0.96 / 0.86 / 0.01 / 0.00 |
+| binary completion | 0.901 | 0.767 | 0.903 | 0.857 ± 0.193 | 0.99 / 0.96 / 0.81 / 0.89 / 0.64 |
+
+Drawer opened on task 4 under the binary index: 1.000 / 0.954 / 0.996 of episodes (graded: 0.05). Seed 1 is lower on
+tasks 2-5 under the binary index (task 3 0.87 → 0.60), which is where the CI comes from. Cube-double and cube-single
+anchor-0.1 1M re-scores with the binary index are running on aws (~2 h).
+
+---
+
+## 2026-11-04 — scene: fitting the task index on the binary completion reward instead of the graded env reward lifts tasks 4-5 from 0.00 to 0.89 / 0.72 (seed 0, 100 episodes); five-task mean 0.562 → 0.888 on the same checkpoint
+
+aws posted 2026-11-04T16-40-35Z (records under `runs/aws/dfb_latent/diag/binary_index/`). Scene anchor-0.1 seed 0 at
+500k, actor alone, 100 episodes per task, same eval seed and the same 10,000-row relabel batch; the only change is the
+ridge target: graded (shifted env reward = minus the number of unmet conditions, as in every number so far) or binary
+(1 if shifted reward > 0.5 else 0). Binary rewarding rows in the batch: 24 / 34 / 35 / 62 / 46.
+
+| task | graded index | binary index | drawer ever opened (graded / binary) |
+|---|---|---|---|
+| 1 | 1.00 | 1.00 | 1.00 / 1.00 |
+| 2 | 0.99 | 0.95 | 1.00 / 1.00 |
+| 3 | 0.82 | 0.88 | 0.98 / 0.96 |
+| 4 | 0.00 | 0.89 | 0.06 / 0.98 |
+| 5 | 0.00 | 0.72 | 0.01 / 0.99 |
+| mean | 0.562 | 0.888 | |
+
+Final-step met rates under the binary index, task 4: cube 0.90, buttons 0.98 / 0.98, drawer 0.96, window 0.99
+(graded: cube 0.00). What it shows: the stall was in the reward the index was fitted on. Under the graded reward the
+index points at the state with four of five conditions met and the actor never takes the one-condition dip to open
+the drawer; under the completion reward the same critic and actor open the drawer in 98-99 % of episodes. Caveat for
+the write-up: the binary target is a different eval protocol from the paper's reward-sample index, which regresses on
+the env reward as given; cube and cube-double rewards are graded the same way (minus unmet cubes), so the switch may
+matter there too. In flight on aws: the binary index at 500 episodes, tasks 1-5, three seeds (500k checkpoints);
+asked for the same re-score on the cube-double and cube-single anchor-0.1 1M checkpoints.
+
+---
+
+## 2026-11-04 — scene tasks 4-5 diagnosed (aws): the actor lifts the cube in every episode but almost never opens the drawer (5 % / 1 % of episodes vs BC 24 % / 28 %) and parks at the state with only the cube unmet
+
+aws posted 2026-11-04T16-27-02Z (JSON `runs/aws/dfb_latent/diag/scene_tasks45_conditions.json`, per-episode jsonl,
+script `diag_scene_conditions.py` wrapping `tools/eval_checkpoint.py`). Scene anchor-0.1 seed 0 at 500k, actor alone
+vs BC, 100 episodes per cell, env conditions (cube within 0.04 of target, button states equal, drawer / window within
+0.04). Task success in these cells: actor 0/100 on both tasks, BC 4/100 (task 4) and 1/100 (task 5).
+
+| met rate at the last step | cube | button 0 | button 1 | drawer | window | episodes with drawer ever opened |
+|---|---|---|---|---|---|---|
+| task 4 actor | 0.00 | 0.98 | 0.98 | 0.98 | 1.00 | 0.05 |
+| task 4 BC | 0.04 | 0.49 | 0.69 | 0.86 | 0.82 | 0.24 |
+| task 5 actor | 0.00 | 0.97 | 0.90 | 1.00 | 0.77 | 0.01 |
+| task 5 BC | 0.05 | 0.46 | 0.58 | 0.87 | 0.23 | 0.28 |
+
+The actor reaches "only the cube unmet" by step ~19 on task 4 (presses the required button; drawer and window start
+at their targets) and holds it to the end in 95 % of episodes; on task 5 it also sets the window in ~3/4 of episodes.
+It lifts the cube in every episode, so the grasp is not the stall; the carry into the drawer never starts because the
+drawer is never opened. aws's reading (untested): the eval index is the ridge fit on the graded env reward (minus the
+number of unmet conditions); the drawer target is closed in both tasks, so opening it costs one condition on the way,
+and the state with only the cube unmet is the best state reachable without that dip. Next (asked of aws): eval-only
+re-score of the same checkpoint with the index fitted on the binary completion reward (shifted reward > 0.5) instead
+of the graded one, tasks 1-5, seed 0; if tasks 4-5 move, the stall is in the index's reward, not in the measure or
+the actor.
+
+---
+
+## 2026-11-04 — scene-play at 500k (aws): flat from 250k (anchor 0.1 actor 0.563 ± 0.017); tasks 4-5 at zero although they have the most fully rewarding dataset rows
+
+aws posted 2026-11-04T16-03-25Z. Five-task means at 500k, 500 episodes per task, three seeds, 95% CI = 4.303·SE,
+250k in brackets. BC 0.038.
+
+| scene, 500k | actor alone | best-of-64 |
+|---|---|---|
+| anchor 0.1 | 0.563 ± 0.017 [0.570] (t1-5 seed 0: 1.00 / 0.96 / 0.84 / 0.00 / 0.00) | 0.176 ± 0.113 [0.186] |
+| anchor 0.3 | 0.375 ± 0.101 [0.385] | 0.331 ± 0.270 [0.281] |
+
+Rewarding rows per task in the 1M-row singletask dataset (eval reward = env reward, minus the number of unmet goal
+conditions, shifted by 1; fully done = 0 unmet): task1 0.26 % (23 in a 10k relabel draw), task2 0.22 % (15),
+task3 0.29 % (33), task4 0.64 % (57), task5 0.44 % (44). The graded reward is spread over the same levels on every
+task. So a shortage of rewarding states for the ridge index does not explain the zeros on tasks 4-5 (cube into the
+drawer, drawer closed, plus a button / the window). User order 16:3xZ: full state (backward input + kernel) at anchor 0.1, cube-single then cube-double, three seeds each,
+1M, on aws after the scene runs (posted to aws; expectation: object-coordinate level means the earlier full-state
+failure was the anchor; near BC means the latent critic needs the privileged coordinates). Asked aws for the per-condition met rate at episode end on tasks
+4-5 (which of cube / buttons / drawer / window the actor completes) for the actor and for BC. Scene checkpoint
+`dfb_latent_oc_bc0p1_scene_sd0` (250k, sha 6dc68a7d…) on HF and pulled to `$PSM_DATA/exp/PSMFLows/`. 1M ~19:00Z.
+
+---
+
+## 2026-11-04 — scene-play at 250k (aws): the anchor-0.1 single actor scores 0.570 ± 0.010; tasks 1-3 at 0.84-1.00 on every seed, tasks 4-5 at zero
+
+aws posted 2026-11-04T14-52-58Z. Latent Density FB on the scene flow (five-block hit spec: cube, two buttons, drawer,
+window). Five-task means at 250k, 500 episodes per task, three seeds, 95% CI = 4.303·SE. BC 0.038; nf2 best-of-64
+0.069 ± 0.074 (task 1 only).
+
+| scene, 250k | actor alone | best-of-64 | actor per task (seed 0) |
+|---|---|---|---|
+| anchor 0.1 | 0.570 ± 0.010 (0.574 / 0.567 / 0.568) | 0.186 ± 0.153 | 1.00 / 0.96 / 0.90 / 0.00 / 0.00 |
+| anchor 0.3 | 0.385 ± 0.106 | 0.281 ± 0.413 | 0.74 / 0.67 / 0.23 / 0.04 / 0.00 |
+
+Against the stated expectation: the gain transfers beyond cube and beyond task 1 (tasks 2-3 far above BC on every
+seed at both anchors). Tasks 4-5 stay at zero at anchor 0.1 and 0.00-0.07 at anchor 0.3. Anchor ordering as on cube.
+Pending: 500k and 1M (~17:30Z); what tasks 4-5 need that 1-3 do not.
+
+---
+
+## 2026-11-04 — best-of-64 acting with the successor flow as the critic: tool built, bundled, handed to luis (no numbers yet)
+
+`tools/eval_successor_flow_bon.py` (+ `tests/test_successor_flow_bon.py`, 9 pass; `state_rewards` in
+`tools/successor_flow.py` now takes a goal set and averages over it, old tests still pass): at every env step draw
+K=64 prior latents, sample 16 future states per candidate from the successor flow at truncated-geometric horizons,
+score each candidate by the mean cube-kernel reward over the task's 32 rewarding goals, act with the best through the
+frozen flow; five cube-single tasks, 500 episodes; `--policy_baseline bc` runs one unscored draw through the same loop.
+CPU: 0.035 s per step at the real size. Bundle `runs/kisski/code/2026-11-04-sf-bon/` (RUN_SF_BON.md), posted to luis
+13:40Z: critic = the anchor-0.3 actor's successor flow, critic = the behaviour policy's successor flow, BC control.
+Expected: near nf2 (0.866) if long-horizon rank is what best-of-64 needs; between BC (0.111) and nf2 if the lost mass
+at h 50/100 also spoils the within-state ordering; the behaviour-policy critic at or below the actor critic.
+
+---
+
+## 2026-11-04 — latent Density FB anchor sweep, complete (aws): 30 runs, both envs, 250k / 500k / 1M; the single actor at anchor 0.1 is 0.948 ± 0.005 on cube-single and 0.516 ± 0.073 on cube-double
+
+aws posted 2026-11-04T12-49-44Z (JSONs under HF `runs/aws/dfb_latent/`). Five-task means over three seeds, 500
+episodes per task, singletask envs, 95% CI = 4.303·SE. Task index by ridge regression on relabelled rewards. Actor =
+the latent flow-BC actor acting alone; best-of-64 = the critic's pick among 64 prior latent draws. Anchor = the
+actor's BC weight toward the frozen behaviour flow. Full state = full observation as backward input and kernel
+(anchor 3.0). Code 11d0f1a + bundle 11-03 (anchors 1.0, 0.3, full state) or bundle v2 (0.1, 0.03). BC 0.111 / 0.019.
+
+Cube-single
+
+| run | actor 250k | actor 500k | actor 1M | best-of-64 250k | best-of-64 500k | best-of-64 1M |
+|---|---|---|---|---|---|---|
+| anchor 1.0 | 0.532 ± 0.014 | 0.428 ± 0.073 | 0.375 ± 0.146 | 0.781 ± 0.066 | 0.763 ± 0.069 | 0.854 ± 0.053 |
+| anchor 0.3 | 0.894 ± 0.049 | 0.860 ± 0.083 | 0.842 ± 0.008 | 0.579 ± 0.259 | 0.490 ± 0.249 | 0.633 ± 0.048 |
+| anchor 0.1 | 0.931 ± 0.064 | 0.950 ± 0.017 | 0.948 ± 0.005 | 0.462 ± 0.533 | 0.269 ± 0.188 | 0.324 ± 0.353 |
+| anchor 0.03 | 0.869 ± 0.070 | 0.860 ± 0.217 | 0.839 ± 0.180 | 0.380 ± 0.453 | 0.151 ± 0.284 | 0.238 ± 0.444 |
+| full state | 0.104 ± 0.005 | 0.104 ± 0.020 | 0.105 ± 0.030 | 0.296 ± 0.196 | 0.321 ± 0.050 | 0.313 ± 0.180 |
+
+Cube-double
+
+| run | actor 250k | actor 500k | actor 1M | best-of-64 250k | best-of-64 500k | best-of-64 1M |
+|---|---|---|---|---|---|---|
+| anchor 1.0 | 0.016 ± 0.014 | 0.010 ± 0.004 | 0.010 ± 0.009 | 0.039 ± 0.070 | 0.012 ± 0.016 | 0.002 ± 0.002 |
+| anchor 0.3 | 0.179 ± 0.074 | 0.129 ± 0.099 | 0.043 ± 0.018 | 0.061 ± 0.112 | 0.068 ± 0.123 | 0.040 ± 0.025 |
+| anchor 0.1 | 0.462 ± 0.031 | 0.494 ± 0.034 | 0.516 ± 0.073 (0.511 / 0.489 / 0.547) | 0.047 ± 0.100 | 0.015 ± 0.032 | 0.021 ± 0.054 |
+| anchor 0.03 | 0.312 ± 0.188 | 0.288 ± 0.087 | 0.415 ± 0.073 | 0.001 ± 0.001 | 0.003 ± 0.014 | 0.008 ± 0.034 |
+| full state | 0.009 ± 0.001 | 0.011 ± 0.009 | 0.011 ± 0.003 | 0.003 ± 0.004 | 0.001 ± 0.001 | 0.001 ± 0.002 |
+
+What it shows. On both envs the actor is best at anchor 0.1 and is the only anchor whose actor neither decays nor
+swings between 250k and 1M; on cube-double all five tasks are above BC on every seed (seed 2 per task at 1M: 0.93 /
+0.60 / 0.63 / 0.19 / 0.39). Best-of-64 runs the other way: best at the tightest anchor (0.854 at anchor 1.0 on
+cube-single, above the nf2 line 0.866 within CI) and falling as the anchor loosens; on cube-double it never leaves BC.
+With the full state as backward input both envs stay at BC with the actor. Checkpoints on HF under
+`runs/aws/dfb_latent/ckpt/`: `dfb_latent_oc_bc0p3_cube_sd0` (500k), `dfb_latent_oc_bc0p1_cube_sd0` (500k),
+`dfb_latent_oc_bc0p1_cubedouble_sd0` (250k, 1M; sha 49eb6098…); all pulled to `$PSM_DATA/exp/PSMFLows/`.
+What it does not show: whether the joint psmgoal critic gets the same single-actor result without the factorisation
+(recipe-bc03, kisski pending + aws seed 0), and whether the within-state action ranking of the Density FB measure is
+what carries the actor (its across-state ranking is flat per luis's benchmark). aws has seven free GPUs.
+
+Next line on aws (posted 12:5xZ): the same latent Density FB on **scene-play** (goal 3), anchors 0.1 and 0.3, three
+seeds, 1M with 250k/500k evals, hit spec from the Density FB paper's scene domain
+(`19:22:0.4,28:30:0.5,32:34:0.5,36:37:0.72,38:39:0.6`: cube, two buttons, drawer, window, in observation units);
+flow `flow/scene-play` and preimages `scene-play-a40p0-ps0p70-ns12-N200` are on HF and on aws (nf2 scene ran there).
+Reference: nf2 best-of-64 on scene 0.069 ± 0.074 vs BC 0.038 (10-26 entry). Expected: if the single actor is above
+BC on tasks 2-5 the result transfers beyond cube; if only task 1 moves, as with nf2, the scene limit is elsewhere.
+
+---
+
+## 2026-11-04 — PSM-SM scale-10 at 250k, three seeds: best-of-64 0.642 ± 0.055, reward-vector GPI 0.423 ± 0.057; down from seed 0's 100k readout (0.762 / 0.501)
+
+The ratio-form full successor measure with the fixed multiplier `sm_m_scale=10` on m (`fable-brain-dump/sm_algo`,
+runs `psmsm_b05_s10_500k_cube` sd000-002, jobs 2527839-41). Five-task means, 500 episodes per task, three seeds,
+95% CI = 4.303·SE, from `$PSM_DATA/fable-brain-dump/eval/psmsm_b05_s10_sd00?_250000_e500_task?.json`. nf2 0.866,
+BC 0.111.
+
+| readout | 100k (seed 0) | 250k (3 seeds) |
+|---|---|---|
+| best-of-64 over prior draws (hgoal_each) | 0.762 | 0.642 ± 0.055 (0.648 / 0.660 / 0.617) |
+| reward-vector GPI (reward_gpi) | 0.501 | 0.423 ± 0.057 (0.428 / 0.444 / 0.398) |
+
+What it shows. The scale fix keeps the ratio-form measure well above its unscaled readout (0.144 / 0.063) on every
+seed, and below nf2 by 0.22 at 250k. Seed 0 fell from 100k to 250k on both readouts. 500k readouts are queued
+(watcher `gc_scripts/psmsm_eval_watcher.sh`, jobs 2528949-63).
+
+---
+
+## 2026-11-04 — kisski pessimism and temperature arms on nf2: two critic heads 0.845 ± 0.093 (no gain over nf2 0.866); best-of-8 bootstrap with one head 0.442 ± 0.241; measure temperature 0.5 at 500k 0.669 ± 0.253
+
+Five-task means, 500 episodes per task, best-of-64 readout (hgoal_each), three seeds, 95% CI = 4.303·SE, from
+`$PSM_DATA/logs/psmgoal_ja_fbc3_pt_nf2_{h2,bon8fix_h1,t05}_cube_sd00?_<step>_hgoal_each_task?.json`. Reference nf2
+0.866 (250k = 500k), BC 0.111.
+
+| arm (nf2 recipe + …) | 250k | 500k |
+|---|---|---|
+| `critic_heads=2`, min over heads at every action scoring | 0.845 ± 0.093 (0.802 / 0.872 / 0.861) | pending (runs at ~350k) |
+| bootstrap = best of 8 prior draws, one head (`bon8fix_h1`) | 0.442 ± 0.241 (0.554 / 0.398 / 0.376) | pending |
+| bootstrap = best of 8, two heads (`bon8fix_h2`) | pending (runs at 140k) | — |
+| `measure_temp=0.5` | 0.783 ± 0.232 (0.721 / 0.890 / 0.737) | 0.669 ± 0.253 (0.692 / 0.758 / 0.558) |
+
+What it shows. The pessimism hypothesis for the best-of-64 readout (the critic's noisy max over prior draws) gets no
+support: a second head with the min at every scoring leaves the readout at the nf2 level. An argmax bootstrap over
+8 prior draws degrades the measure as the earlier best-of-8 / best-of-64 bootstrap arms did (0.096 / 0.006 on luis),
+though less far at 250k with the nf2 recipe. Temperature 0.5 is below nf2 at both steps and falls from 250k to 500k.
+Pending: whether two heads rescue the best-of-8 bootstrap (`bon8fix_h2`, 250k in ~5 h), 500k of the two-head arm.
+
+---
+
+## 2026-11-04 — 1M points of the anchor sweep (aws): anchor 0.1 single actor flat from 500k to 1M on both envs, cube-single 0.948 ± 0.005, cube-double 0.511 / 0.489 (seeds 0-1); full state at BC through 1M
+
+aws posted 2026-11-04T10-14-07Z. Five-task means at 1M, 500 episodes per task, 95% CI = 4.303·SE over three seeds.
+BC 0.111 cube-single, 0.019 cube-double.
+
+| arm, 1M | actor alone | best-of-64 |
+|---|---|---|
+| cube-single anchor 0.1 | 0.948 ± 0.005 (0.946 / 0.950 / 0.948) | 0.324 ± 0.353 |
+| cube-single anchor 0.03 | 0.839 ± 0.180 (seed 2 task 4 at 0.06) | 0.238 ± 0.444 |
+| cube-double anchor 0.1, seeds 0-1 | 0.511 / 0.489 (t1-5: 0.91 / 0.55 / 0.64 / 0.17 / 0.28) | 0.013 / 0.004 |
+| full state cube-double | 0.011 ± 0.003 | 0.001 ± 0.002 |
+
+Anchor 0.1 does not move between 500k and 1M on either env (cube-single 0.950 → 0.948, cube-double 0.502 → 0.500),
+and does not decay the way anchor 0.3 does on cube-double. Anchor 0.03 keeps losing one task on one seed at a time
+(seed 0 recovered task 4 from 0.27 to 0.72; seed 2 lost it to 0.06). Pending: cube-double anchor 0.1 seed 2 and
+anchor 0.03 at 500k / 1M (~15:30Z), then aws's one-table summary of the full sweep.
+
+---
+
+## 2026-11-04 — successor-flow benchmark (luis, seed 0): the sampled measure ranks start states out to h 50 (Spearman 0.83) but carries 3-6x too little mass at h 50/100; the Density FB goal share does not rank start states at any range (Spearman 0.05-0.11)
+
+luis posted 2026-11-04T09-00-19Z (JSONs, train_log.csv, config.json under HF `runs/luis/successor_flow/`). Cube-single,
+seed 0, one checkpoint per arm, 64 dataset start states x 8 rollouts x 100 steps as ground truth, K 64 samples per
+estimate, 100k training steps (5.5 min per run on an H200). Policy: the anchor-0.3 latent actor (the 0.86-0.89
+single-actor checkpoint). Rollout occupancy = fraction of rollouts at the goal at step h.
+
+| h | rollout occupancy | successor-flow occupancy | abs err | Spearman (occupancy / kernel) |
+|---|---|---|---|---|
+| 10 | 0.014 | 0.003 | 0.011 | 1.00* / 0.985 |
+| 25 | 0.039 | 0.028 | 0.020 | 0.885 / 0.900 |
+| 50 | 0.336 | 0.116 | 0.232 | 0.762 / 0.833 |
+| 100 | 0.725 | 0.114 | 0.615 | 0.585 / 0.538 |
+
+Discounted value: successor flow 6.34 vs rollouts 16.55 (Spearman 0.683). Density FB on the same 64 states (no
+horizon axis): goal share 0.599, Spearman vs the rollouts' hit return 0.051, vs kernel return 0.106; pool-hit share
+0.046; the run's own actor value 0.051. (*h 10: one state of 64 has non-zero mass in both, the rest tie at zero.)
+Behaviour-flow arm: the policy rarely reaches the goal (occupancy ≤ 0.014), estimates match in mass, ranks rest on a
+handful of states; its Density FB row is a policy mismatch (measure trained under the actor) and does not count.
+Final loss by horizon bucket (dfb_actor): h1 0.138, h2-5 0.029, h6-10 0.013, h11-25 0.0089, h26-50 0.0054, h51+ 0.0027.
+
+What it shows. At h 10/25 the successor flow tracks the rollouts in rank and mass. At h 50/100 it keeps rank and
+loses mass: the estimate stays at ~0.11 while the true occupancy climbs to 0.34 / 0.73, so probability is lost at each
+bootstrap step h → h+1. The Density FB goal share, the value the single actor is trained against, does not order
+start states by rollout outcome at any horizon. What it does not show: seeds (one), whether the mass at h 50/100 grows
+with training steps or a horizon ramp (luis asked to run 3 seeds, 300k, h_ramp, and the marginal TD2-CFM mode), and
+whether the within-state action ranking of Density FB (what the actor uses) is also flat — the across-state Spearman
+does not measure that.
+
+---
+
+## 2026-11-04 — cube-double anchor sweep at 250k, three seeds: actor 0.462 ± 0.031 at anchor 0.1, 0.312 ± 0.188 at 0.03; the actor peaks at anchor 0.1 on both envs
+
+aws posted 2026-11-04T06-28-38Z. Five-task means at 250k, 500 episodes per task, three seeds, 95% CI = 4.303·SE.
+BC 0.019.
+
+| cube-double, 250k | actor alone | best-of-64 |
+|---|---|---|
+| anchor 1.0 | 0.016 | ~0.002 |
+| anchor 0.3 | 0.179 ± 0.074 | ~BC |
+| anchor 0.1 | 0.462 ± 0.031 (0.477 / 0.456 / 0.454) | 0.047 ± 0.100 |
+| anchor 0.03 | 0.312 ± 0.188 (0.227 / 0.337 / 0.372) | 0.001 ± 0.001 |
+
+Seed 2 at anchor 0.1 matches seeds 0-1 on every task. Anchor 0.03 is noisier across seeds and weaker on tasks 4-5,
+as on cube-single. Best-of-64 over prior draws is at BC at every anchor on cube-double. Pending from aws: the 1M points
+(3-10 h) and one summary table of the full sweep.
+
+---
+
+## 2026-11-04 — cube-double anchor 0.1 holds at 500k: single actor 0.497 / 0.506 (seeds 0-1; BC 0.019), rising from 250k; full state at BC
+
+aws posted 2026-11-04T06-03-16Z. Five-task means at 500k, 500 episodes per task, 250k in brackets. BC 0.019.
+
+| cube-double, 500k | five-task | t1 / t2 / t3 / t4 / t5 |
+|---|---|---|
+| anchor 0.1 actor, seed 0 | 0.497 [0.477] | 0.92 / 0.60 / 0.61 / 0.16 / 0.20 |
+| anchor 0.1 actor, seed 1 | 0.506 [0.456] | 0.91 / 0.58 / 0.63 / 0.21 / 0.19 |
+| anchor 0.1 best-of-64, seeds 0 / 1 | 0.030 / 0.005 | at BC |
+| full state actor, seeds 0-2 | 0.008 / 0.010 / 0.016 | at BC |
+
+Unlike anchor 0.3 (0.179 → 0.129 → 0.043) the anchor-0.1 actor rose from 250k to 500k on both seeds; tasks 1-3 up,
+tasks 4-5 held at 0.16-0.21. Pending: seed 2 and anchor 0.03 at 250k (~1 h), the 1M points. Checkpoints on HF under
+`runs/aws/dfb_latent/ckpt/`: `dfb_latent_oc_bc0p1_cube_sd0` (500k, sha 1298e9c9…), `dfb_latent_oc_bc0p1_cubedouble_sd0`
+(250k, pulled to `$PSM_DATA/exp/PSMFLows/dfb_latent_oc_bc0p1_cubedouble/sd000_aws_250k`).
+
+---
+
+## 2026-11-04 — cube-single anchor 0.1 holds at 500k: single actor 0.950 ± 0.017 (aws); anchor 0.03 unstable on single tasks; best-of-64 over prior draws keeps falling
+
+aws posted 2026-11-04T05-25-00Z. Five-task means at 500k, 500 episodes per task, three seeds, 95% CI = 4.303·SE,
+250k in brackets. BC 0.111; nf2 best-of-64 line 0.866.
+
+| cube-single, 500k | actor alone | best-of-64 |
+|---|---|---|
+| anchor 0.1 | 0.950 ± 0.017 (0.956 / 0.952 / 0.942) [0.931 ± 0.064] | 0.269 ± 0.188 [0.462] |
+| anchor 0.03 | 0.860 ± 0.217 (0.769 / 0.868 / 0.943) [0.869 ± 0.070] | 0.151 ± 0.284 [0.380] |
+
+At anchor 0.1 every seed is in 0.94-0.96 and every task at or above 0.84; no decay from 250k. At anchor 0.03 seed 0
+lost task 4 (0.86 to 0.27), so the actor loses single tasks once the pull toward the behaviour flow is very weak.
+Best-of-64 over prior draws falls with training at both anchors while the actor rises: the critic ranks prior draws
+worse as the policy it evaluates moves away from them (cause not examined). Pending: cube-double anchor 0.1 at 500k
+(~1 h), 1M points, recipe-bc03 on the joint critic (kisski, 250k ~09:00Z).
+
+---
+
+## 2026-11-04 — cube-double: the latent Density FB single actor at anchor 0.1 scores 0.477 / 0.456 at 250k (two seeds; BC 0.019), above BC on every task
+
+aws posted 2026-11-04T03-44-33Z. Five-task means at 250k, 500 episodes per task, cube-double-play singletask envs,
+backward input and kernel on both cubes' coordinates. BC 0.019. Two seeds done, no CI yet.
+
+| cube-double, anchor 0.1, 250k | five-task | t1 / t2 / t3 / t4 / t5 |
+|---|---|---|
+| actor alone, seed 0 | 0.477 | 0.87 / 0.54 / 0.54 / 0.14 / 0.29 |
+| actor alone, seed 1 | 0.456 | 0.81 / 0.53 / 0.58 / 0.11 / 0.24 |
+| best-of-64, seed 0 / 1 | 0.087 / 0.007 | 0.42 / 0.00 / 0.01 / 0.00 / 0.00 (seed 0) |
+
+Context: anchor 0.3 at 250k was 0.179 ± 0.074 and fell to 0.043 by 1M; anchor 1.0 and the full-state arm are at BC
+(full state seeds 1-2 at 250k: 0.009 / 0.010). The two seeds agree within 0.02 on the mean and 0.06 per task.
+Best-of-64 over prior draws stays at BC on cube-double at every anchor. Not shown: the 500k / 1M points (seeds 0-1
+reach 500k in ~4 h), seed 2, and anchor 0.03 (queued on aws; aws told to stop its recipe seeds 1-2 to free the slot
+since kisski runs that arm).
+
+---
+
+## 2026-11-04 — latent Density FB single actor at anchor 0.1 scores 0.931 ± 0.064 on cube-single at 250k (aws); the anchor sweep peaks at 0.1
+
+aws posted 2026-11-04T03-14-12Z (JSONs under HF `runs/aws/dfb_latent/`). Five-task means at 250k, 500 episodes per
+task, three seeds, 95% CI = 4.303·SE. BC 0.111. Anchor = the flow-BC weight of the latent actor (lower = freer).
+
+| anchor (250k, cube-single) | actor alone | best-of-64 |
+|---|---|---|
+| 1.0 | 0.532 | 0.781 |
+| 0.3 | 0.894 | 0.579 |
+| 0.1 | 0.931 ± 0.064 (0.941 / 0.950 / 0.902) | 0.462 ± 0.533 |
+| 0.03 | 0.869 ± 0.070 (0.857 / 0.849 / 0.901) | 0.380 ± 0.453 |
+
+The actor alone peaks at anchor 0.1 and is above the nf2 best-of-64 line (0.866) on every seed. Best-of-64 over prior
+draws falls and its seed spread widens as the anchor loosens (seed 1 is low on every task at 0.1 and 0.03), so the
+critic's ranking of prior draws degrades as the actor it bootstraps through moves away from the behaviour flow. Not
+shown yet: 500k/1M at 0.1 and 0.03 (the anchor-0.3 actor lost 0.05 from 250k to 1M), cube-double at 0.1 / 0.03
+(queued on aws, 5-7 h), and whether the joint psmgoal critic gets the same single-actor result (recipe-bc03, kisski
+jobs 2528791-3 and aws copies).
+
+---
+
+## 2026-11-04 — latent Density FB at 1M on aws (anchor 0.3 / 1.0, full state): the single actor holds on cube-single (0.842 ± 0.008) and decays to BC on cube-double (0.043); the anchor-0.3 recipe arm on the joint critic launched on kisski beside aws's L4 copies
+
+aws posted 2026-11-04T01-38-39Z (JSONs under HF `runs/aws/dfb_latent/`). Five-task means, 500 episodes per task, three
+seeds, 95% CI = 4.303·SE. BC 0.111 cube-single, 0.019 cube-double.
+
+| arm (1M) | actor alone | best-of-64 |
+|---|---|---|
+| cube-single, anchor 0.3 | 0.842 ± 0.008 (250k 0.894, 500k 0.860) | 0.633 ± 0.048 |
+| cube-single, anchor 1.0 | 0.375 ± 0.146 (falling from 0.532) | 0.854 ± 0.053 |
+| cube-double, anchor 0.3 | 0.043 ± 0.018 (250k 0.179, 500k 0.129; task 1 only at 1M) | 0.040 ± 0.025 |
+| cube-double, anchor 1.0 | 0.010 ± 0.009 | 0.002 ± 0.002 |
+| full state, cube-single | 0.105 ± 0.030 | 0.313 ± 0.180 |
+| full state, cube-double (seed 0) | 0.010 | 0.000 |
+
+What it shows. The tight anchor keeps the single actor near its 250k level through 1M with a shrinking seed spread.
+The loose anchor loses the actor and gains best-of-64, which at 1M is the best best-of-64 number of the batch
+(0.854, anchor-3 reference 0.829). On cube-double the above-BC actor at 250k was an early-training effect; by 1M
+only task 1 keeps any success. What it does not show: whether the factorisation or the anchor carries the single-actor
+result on the joint psmgoal critic. That is the recipe-bc03 arm.
+
+Recipe-bc03 on kisski. aws measures 0.8 updates/s per L4 for that arm (500k in ~7 days per seed); kisski runs the
+dfb_recipe arm at ~5/s. Launched `psmgoal_recipe_bc03_cube` seeds 0-2 (jobs 2528791-3, 48 h limit, 250k checkpoint
+in ~14 h) with the identical 47-key override string of bundle v2
+(`$PSM_DATA/logs/bundle_20261103/recipe_bc03_overrides.txt`; smoke `smoke_recipe_bc03` flags verified: reward index,
+two heads, flowbc_vf actor at anchor 0.3, ridge pool_softmax, GPI, batch 512). aws's three copies keep running as the
+parity check. Expected: actor alone at 250k near 0.8+ would say the recipe without the factorisation suffices; actor at
+BC with best-of-64 at nf2 level would put the single-actor result on the factorised measure.
+
+---
+
+## 2026-11-04 — generative successor measure (successor flow) built and handed to luis; no numbers yet
+
+A flow-matching model of the future-state distribution of a latent policy (LSM Eq. 8 form: horizon-conditioned,
+bootstrapped through an EMA target, over standardised observations, conditioned on (s, u, h); TD2-CFM marginal mode
+as `--mode marginal`). Value = Monte-Carlo mean of the cube kernel reward over K sampled futures at
+truncated-geometric horizons. Policy families: the frozen flow (`--policy bc`) and the anchor-0.3 latent actor
+(`--policy dfb_actor`, the 0.89 single-actor checkpoint `dfb_latent_oc_bc0p3_cube_sd0` at 500k, on HF under
+`runs/aws/dfb_latent/ckpt/`). Code: `tools/successor_flow.py`, `tools/eval_measure_vs_rollouts.py` (ground truth by
+`env.unwrapped.set_state` + R rollouts x 100 steps; per-horizon occupancy, kernel value, return; abs error and
+Spearman vs the successor flow and vs the Density FB softmax goal share), `tests/test_successor_flow.py` (13 pass),
+`docs/design/2026-11-04-successor-flow.md`. CPU smokes of both policies passed (`$PSM_DATA/exp/successor_flow_smoke/`).
+
+Offloaded to luis: bundle `runs/kisski/code/2026-11-04-successor-flow/` (patch vs 11d0f1a + untracked tar, verified
+to apply on a fresh worktree) with `RUN_ON_LUIS.md` (two 100k-step GPU trainings, two CPU benchmarks at 64 start
+states x 8 rollouts, K 64, horizons 10/25/50/100); posted to mailbox/luis at 2026-11-04T00-45-30Z. Results land in
+`runs/luis/successor_flow/`. Stated expectation: at horizons 10/25 both estimators track the rollouts; a lower error
+and higher Spearman for the sampled measure at 50/100 would say the generative family is the lever on horizon; both
+flat at 50/100 would put the limit in the bootstrapping rather than the measure's form.
+
+---
+
+## 2026-11-02 — FB and Density FB ported onto the behaviour flow (latent space) and launched beside the archived raw-action FB: four arms x 3 seeds x 1M steps on cube-single
+
+**Pick-up card for the next agent (written 20:20 CET 11-02).** What is in flight, where its output lands, and
+what to do with it:
+
+| line | jobs | output | what to do when it lands |
+|---|---|---|---|
+| latent Density FB, cube-single (`dfb_latent_oc_cube`, `dfb_latent_state_cube`) | 2527727-32, pending | eval500 JSONs `$PSM_DATA/logs/dfb_latent_*_cube_sd00?_{250000,500000,1000000}_{bon,actor}_e500_task?.json` via `gc_scripts/dfb_eval_watcher.sh` (log + `submitted_dfb_eval/`) | five-task mean per seed and readout, t = 4.303 over 3 seeds; compare with the paper's Density FB 0.829 / 0.909, the reference here 0.729 / 0.863, our critic 0.866, latent FB 0.03 |
+| latent Density FB, cube-double (`dfb_latent_oc_cubedouble`, `_state_cubedouble`; `fb_hit_spec` both cubes) | 2527736-41, pending | same pattern with `_cubedouble_`, watcher `dfb_cd_eval_watcher.sh` | compare with the paper's 0.317 ± 0.031 and our BC 0.019 |
+| PSM-SM scalar-scale fix (`psmsm_b05_s10_cube`, `_s100_cube`, seed 0, 100k) | 2527742-3, running | `$PSM_DATA/fable-brain-dump/exp/<group>/sd000*/`; readouts auto-submitted by a waiter through `fable-brain-dump/sm_algo/eval500.sbatch` -> `$PSM_DATA/fable-brain-dump/eval/psmsm_b05_s{10,100}_sd0_100k_e500_task?.json` (keys `readouts.hgoal_each/reward_gpi.<task>.success`) | compare with the scale-1 run's 0.144 / 0.063 and BC 0.111; prediction: unchanged = the ratio form lacks action dependence, line closes; toward 0.87 = the bound was the fault |
+| hindsight-goal student (`+label_goals=hindsight`: every sampled state paired with a later state of its own trajectory at a Geometric(0.02) offset as its goal, label = the critic's single-goal pick, student on [s, g]; 7 new tests, 24 pass) | 2527781-3, running (TAG `hindsight_cube_sd0teacher_s{0,1,2}`, n_data 100000, no rollouts) | reports `$PSM_DATA/logs/distill/hindsight_cube_sd0teacher_s?.json`, students `hindsight_set32` (the 32 goal states as the set) / `hindsight_single` (one rewarding state per episode) | three student seeds on the sd0 500k teacher, n_data 100000, 500 episodes; compare with uniform 0.70, near-goal 0.924, recipe 0.918 |
+
+| ranking signal vs Density FB (`$PSM_DATA/logs/onsupport/`) | done | ours: best-of-64 pick − random draw = 2.3x the score spread of nearby data latents; Density FB 0.78-0.98x, its two heads disagree 5-8.5x the spread and its actor climbs their min; FB 0.77x, heads 0.64x. Latent moves stay on data better than raw moves (move_probe); picks are 30% further from training latents than data is (stretch_probe) — the latent-stretch explanation is not supported | — |
+| nf2 + `critic_heads=2` (min at every action scoring) / + `critic_action_input=latent_and_action` / bootstrap best-of-8 with 1 head / with 2 heads | 2527820-31 (12 jobs, 24 h; seam tests 8 new + 40 existing pass; CPU step cost 1.79x / 1.08x) | groups `psmgoal_ja_fbc3_pt_nf2_{h2,act,bon8_h1,bon8_h2}_cube`, eval500 via `gc_scripts/heads_eval_watcher.sh` (JSON pattern `<group>_sd00?_<step>_hgoal_each_task?.json`) | pessimism test: bon8_h2 well above bon8_h1 (critic A's bon8 was 0.020) means the min over heads protects a greedy target; h2 vs nf2 0.866 says whether it helps the nudge recipe |
+| nf2 measure_temp 0.5 | 2527806-8 | `psmgoal_ja_fbc3_pt_nf2_t05_cube`, `gc_scripts/t05_eval_watcher.sh` | vs nf2 0.866 |
+| PSM-SM scale 10 / 100 | trained; readouts 2527810-19 | `$PSM_DATA/fable-brain-dump/eval/psmsm_b05_s{10,100}_sd0_100k_e500_task?.json` | training: own-next measure 1288 / 12840 (was capped at 129), own-future share 0.29 / 0.42, but feature rank 1.1 / 1.03 and nudge 0.011 / 0.005 |
+
+**Hindsight-goal student closed** (jobs 2527781-3, 500 episodes per task, three seeds): fed the task's 32 goal states
+0.663 / 0.721 / 0.681 = **0.688 ± 0.074**; fed one goal state per episode 0.537 / 0.515 / 0.461 = **0.504 ± 0.097**;
+uniform-label student 0.699, near-goal 0.924. The labelled states are still uniform; pairing them with their own
+future (mean offset ~46 steps, beyond the critic's ~25-step ranking horizon) adds no placement supervision near the
+task goals (tasks 4/5 at 0.45-0.59). Next (user's framing): both working schemes estimate d^pi_g(s)/rho(s); the
+principled version weights dataset states by the critic's own measure from start states — diagnostic + tool option
+`+data_weighted` in progress.
+
+**PSM-SM scalar-scale fix works (seed 0, 100k, 500 episodes per task; `sm_m_scale` in fable-brain-dump/sm_algo/psmsm_agent.py, a fixed multiplier on m in the loss; toy chain still exact):**
+
+| sm_m_scale | best-of-64 on goal states (hgoal_each) | reward-vector readout (reward_gpi) |
+|---|---|---|
+| 1 (10-26 run) | 0.144 | 0.063 |
+| 10 | **0.762** (0.746 / 0.824 / 0.812 / 0.666 / 0.764) | **0.501** (0.294 / 0.588 / 0.550 / 0.480 / 0.592) |
+| 100 | 0.660 | 0.447 |
+
+The ratio-form full successor measure reaches the softmax critic's region on goal states at 100k (nf2 0.866 at 500k,
+critic A 0.69 at 100k), and its reward readout, 0.501, is the highest any reward-vector readout has scored here
+(previous best: reward index 0.39-0.41, least squares 0.30, Lagrangian 0.001). One seed, 100k; feature rank still
+1.1 at scale 10. Launched: scale 10, 500k, three seeds (jobs 2527839-41, `psmsm_b05_s10_500k_cube`); readouts at
+250k/500k by `gc_scripts/psmsm_eval_watcher.sh` -> `$PSM_DATA/fable-brain-dump/eval/psmsm_b05_s10_sd00?_<step>_e500_task?.json`.
+Occupancy-weighted distillation launched (2527833-8): top-5000 states by the critic's measure from start states
+hold the cube near the goal 53-72% of the time (pool 5%), rewarding 27-46% (pool 2%).
+
+**Occupancy-weighted distillation** (`+data_weighted=5000`: top-5000 dataset states by the critic's own softmax measure
+from 64 start states, no cube coordinates; jobs 2527833-8, 500 episodes per task, three student seeds): random_only
+offset 0 **0.850 ± 0.080**, offset 30 **0.854 ± 0.094**; in_task 0.763 ± 0.052 / 0.703 ± 0.151. Between uniform
+(0.783 / 0.699) and the 6 cm rule (0.924 / 0.839): the measure recovers about half the gap with no hand-coding.
+**aws reply 11-02 23:34Z / 23:37Z** (Density-FB on manipulation): cube-double reward-inference is 62.4 ± 8.7 in the
+no-swap singletask env (the paper's 31.7 was the target-swapping env; ours already uses singletask); full-state B on
+cube-double 6-16 vs 66-69 with object coords; Density-FB's actor also stays at behaviour (0.05-0.08 action RMS from
+the BC sample, 0.6-0.7% value gain); log-linear fits concentrated cube futures far better than linear at fixed rank
+(TV 0.03 vs 0.25 cube-single, 0.05 vs 0.46 cube-double); the reward must be read averaged under the softmax and from a
+slow centred B (fast uncentred 22-43 vs 80); k-hot tasks 95 on cube-double goal route (1 seed, unconfirmed).
+Implication recorded with the user: PSM's affine measure placed inside a softmax with the A^T f factorisation is
+Density-FB; the reference zero-shot PSM on our flow (09-15) was 0.156, the linear family.
+
+**Latent Density FB, cube-single, complete** (500 episodes per task, three seeds, t = 4.303; z by ridge on relabelled rewards):
+
+| arm | readout | 250k | 500k | 1M |
+|---|---|---|---|---|
+| B on cube coords | best-of-64 by the critic | 0.829 ± 0.131 | 0.809 ± 0.047 | 0.807 ± 0.177 |
+| B on cube coords | its latent flow-BC actor | 0.240 ± 0.016 | 0.197 ± 0.041 | 0.187 ± 0.040 |
+| B on full state (cube kernel) | best-of-64 | 0.520 ± 0.112 | 0.433 ± 0.149 | 0.405 ± 0.187 |
+| B on full state (cube kernel) | actor | 0.113 ± 0.024 | 0.103 ± 0.031 | 0.099 ± 0.022 |
+
+Reference in raw actions here: 0.729 (coords) / 0.863 (state). The reward-indexed critic carries over to the latent
+with object-coordinate B (0.81-0.83); its own actor does not (0.19-0.24, near BC 0.111): selection at test time does
+the work, as with our critic. Full-state B loses half on our latent (0.41-0.52) where raw actions keep 0.86.
+
+**Latent Density FB on cube-double is at BC** (object-coord B on both cubes, no-swap singletask env, flags verified,
+three seeds, 500 episodes): best-of-64 0.008-0.020 (250k), 0.002-0.010 (500k); actor 0.007-0.009; full-state B also BC.
+Critic statistics look normal (softmax ESS ~10, reference 7.8-8.5). The raw-action code reaches 62.4 there (aws).
+Reading: best-of-64 ranks behaviour draws that never solve a two-cube task; the latent actor stays at behaviour
+(cube-single 0.19 vs the raw actor's paper number), so neither readout leaves behaviour. Test launched: latent actor
+anchor bc_coeff 3 -> 1.0 / 0.3 (`dfb_latent_oc_bc{1p0,0p3}_{cube,cubedouble}`, jobs 2528229-40, three seeds each;
+watchers `gc_scripts/dfb_bc_eval_watcher.sh`, `dfb_bc_cd_eval_watcher.sh`).
+
+**Offloaded to aws (11-03 16:11Z, user instruction):** the 18 latent Density FB runs (anchor bc 1.0 / 0.3 on cube-single and
+cube-double; full-state B + full-state kernel on both), code bundle `runs/kisski/code/2026-11-03/` (patch vs 11d0f1a +
+new files + RUN_ON_AWS.md), aws verified checksums, data hashes and flags; L4s, ~14 h per run, first wave ~1 day;
+results to `runs/aws/dfb_latent/` and mailbox/aws. kisski copies cancelled. Also cancelled on the user's instruction:
+89 pending cube-double eval jobs of the at-BC latent Density FB arms; the first best-of-8 arms failed at create
+(flowbc actor with train_actor=false) and were resubmitted as `nf2_bon8fix_h{1,2}` (2528448-53).
+
+**Density FB recipe on the joint critic** (`agent.dfb_recipe=true`, `docs/design/2026-11-03-psmgoal-dfb-recipe.md`;
+15 new tests + 9 existing files pass; default bit-identical to a pre-edit golden snapshot): every Density FB decision
+except the factorisation — reward-sample index by ridge on a slow (EMA 0.0005) centred copy of the projected-phi
+feature, z_rand_frac 0.5, softmax-weighted-reward readout over a frozen 256-state pool, min over 2 heads, q_center,
+latent FlowBC actor as the bootstrap, goals 0.2/0.5/0.3, lr 3e-4, layer norm, hit-block goal input, discount 0.99,
+batch 512. Deviation that confounds: the index feature is the joint critic's projected phi (256 passes per state), not
+a B tower. Launched `psmgoal_dfb_recipe_cube` sd0-2 (jobs 2528649-51, 500k, 48 h; CPU step 2.3x nf2), eval watcher
+`gc_scripts/dfbrecipe_eval_watcher.sh` (readouts bon and actor at 250k/500k). Question: does the joint critic reach the
+latent Density FB's 0.81 reward readout? ~0.8 = factorisation not needed; ~0.4 = factorisation carries it.
+
+**aws, latent Density FB anchor sweep (11-03 19:05Z / 21:16Z; 500 episodes per task, three seeds, t-CI):**
+
+| arm | readout | 250k | 500k |
+|---|---|---|---|
+| cube-single, bc 0.3 | latent actor | **0.894 ± 0.049** | **0.860 ± 0.083** |
+| cube-single, bc 0.3 | best-of-64 | 0.579 ± 0.259 | 0.490 ± 0.249 |
+| cube-single, bc 1.0 | actor / best-of-64 | 0.532 / 0.781 | 0.428 / 0.763 |
+| cube-single, bc 3.0 (kisski) | actor / best-of-64 | 0.240 / 0.829 | 0.197 / 0.809 |
+| cube-double, bc 0.3 | latent actor | **0.179 ± 0.074** | **0.129 ± 0.099** |
+| cube-double, bc 0.3 | best-of-64 | 0.061 | 0.068 |
+| cube-double, bc 1.0 | actor / best-of-64 | 0.016 / 0.039 | 0.010 / 0.012 |
+| full state B + kernel, cube-single | actor / best-of-64 | 0.104 / 0.296 | 0.104 / 0.321 |
+
+One actor on our flow: the latent flow-BC actor at bc 0.3 is the policy (0.86-0.89 on cube-single) and the critic's
+bootstrap; best-of-64 over behaviour draws falls as the anchor loosens (the critic now values the actor's policy).
+Cube-double: first result above BC (0.13-0.18 vs 0.019; tasks 2-5 nonzero on every seed), far below raw-action 62.4,
+drifting down 250k->500k. No cube coordinates anywhere: fails on our flow (actor 0.10, best-of-64 0.30-0.32).
+luis 11-03 17:02Z: nf2 on cube-double — the goal softmax share is ~0.99 for every draw out to 100-200 steps
+(cube-single: ~0.6 at k 1-10, ~0.1 at 25), so best-of-64 picks among flat scores and the picked latents grasp 3-6x less
+than the flow alone. kisski 250k: decoded-action arm 0.803 ± 0.241, temperature 0.5 0.783 ± 0.232 (nf2 0.865).
+
+**Second aws batch (11-04 00:00Z, user instruction):** bundle v2 `runs/kisski/code/2026-11-04/` (adds the dfb_recipe
+port). Priority 1: the Density FB recipe on our joint critic with the latent flow-BC actor anchor at 0.3
+(`psmgoal_dfb_recipe_bc03_cube`, 3 seeds, 500k; recipe keys expanded explicitly since `dfb_recipe=true` overrides the
+anchor — flags verified on a 20-step CPU run) — does the single actor need the factorised measure? Priority 2: latent
+Density FB anchor 0.1 / 0.03 on cube-single and cube-double (12 runs). kisski keeps the anchor-3 recipe arm.
+
+Tabulation snippets used today: glob the JSONs, `json.load(f)['success']`, mean over tasks 1-5, then mean ± 4.303·SE
+over seeds (the repo's three-seed convention; luis corrected the first 1.96 posts). Every result goes to
+`mailbox/kisski/<UTC>.md` on HF `amsks/psmflows-preimages` and into this entry. Pending on the user: the commit
+of everything since 10-26 (goal-input seam, distillation tool with zero-rollout / near-goal / full-state / hindsight
+options, student-bootstrap seam, PSM-SM scale, FB + Density FB ports, all tests, design docs, this HANDOFF); the
+HF upload of the cube-double sd0 checkpoints for luis (blocked since 10-26). Reference runs of the paper code live
+under `$PSM_DATA/fbref/` (`train_fb_tdj.sbatch`, exp/, eval CSVs `eval_relabel.csv` with columns step, task_id,
+success); the cube-double reference runs were cancelled on the user's instruction (paper numbers stand).
+
+The user's ask: port Density FB and plain FB onto our behaviour flow and run them, with the archived raw-action FB
+as the baseline. Two subagents: one ported, one verified every design decision by its own tests
+(`docs/design/2026-11-02-fb-latent-port.md`, `-REVIEW.md`). Files: `agents/fb.py`, `utils/fb_networks.py`,
+`configs/agent/fb.yaml` restored from the archive branch (byte-identical but the import path and three jit
+helpers); new `agents/fb_latent.py` (`fb_latent`: F(s,u,z) with an unbounded head, B(s') on the sphere, FB's z
+mix and two-term measure loss, ortho term, TD3 actor over the latent u with a `fb_bc_coeff` anchor to
+`noise_preimage`, u_clip 3, decode through the frozen flow, `acting=actor|bon` (best-of-64 prior draws by F^T z),
+eval z = mean B over the 32 rewarding goals or FB's reward-weighted mean (`eval_z_mode`); Density seams
+`density_backward` (B reads the fb_hit_spec blocks), `density_reward_index` (ridge z on B features),
+`density_kernel_actor`), `configs/agent/fb_latent.yaml`, `tests/test_fb_latent.py` (16), `tests/test_fb_latent_review.py`
+(21), registry + main.py + eval500.sh + eval_checkpoint.py entries. CPU smokes of all three agents passed (200
+steps, flags re-read). Review: every loss/network/target/update/clip/decode item VERIFIED; deviations: the archive's
+default flow actor (the 0.721 path) is not ported, only the TD3 actor; fb_bc_coeff default 0 vs the archive's
+bc 3 (actor latents drift: |u| 2.14, gap to the data latent 6.4 at 200 steps); actor_std 0.2 in latent units;
+eval task vector = goal set by default; reward-index slow copy = target_backward.
+
+Launched 01:42 CET, cube-single, 1M steps, 3 seeds each, in-loop 50-episode evals every 100k, checkpoints every
+250k, 24 h limit: `fb_raw_cube` (jobs 2527111-3; archived recipe, actor flow, ortho 1.0, discount 0.99;
+`scripts/slurm/train_fb_raw.sbatch`), `fb_latent_cube` (2527114-6; acting actor, bc 0), `fb_latent_dens_cube`
+(2527117-9; the three density seams, acting bon), `fb_latent_bc3_cube` (2527121-3; bc 3). Flags re-read on the
+first three arms. `gc_scripts/fb_eval_watcher.sh` submits eval500 (MODE=fb_latent) at 250k/500k/1M per task for
+the latent arms; the raw arm's 500-episode eval needs its own path. Stated before results: raw FB near its
+archived 0.72 on cube (a number that predates the five-task protocol and may be task 2 only); latent FB with bc 0
+at or below BC 0.111 (the actor leaves the prior); bc 3 between BC and the raw number; Density FB above plain
+latent FB only if the object-coordinate B and reward index carry on cube-single what they carried in the paper.
+
+**Results (all arms reached 1M within an hour; 500 episodes per task, three seeds, t = 4.303):**
+
+| arm | readout | 250k | 500k | 1M |
+|---|---|---|---|---|
+| raw-action FB, archived recipe | FB actor | 0.164 ± 0.169 | 0.149 ± 0.130 | 0.133 ± 0.030 |
+| latent FB, bc 0 | TD3 actor mean, decoded | 0.000 | 0.001 ± 0.002 | 0.001 ± 0.003 |
+| latent FB, bc 3 | TD3 actor mean, decoded | 0.099 ± 0.055 | 0.080 ± 0.034 | 0.067 ± 0.019 |
+| latent Density FB | best-of-64 prior draws by F^T z, ridge z | 0.001 ± 0.005 | 0.003 ± 0.011 | 0.014 ± 0.058 |
+| BC | | | | 0.111 |
+
+Raw FB per task at 1M (mean over seeds) 0.12 / 0.15 / 0.10 / 0.17 / 0.12: at BC's level on every task, not the
+archived 0.721 (which came from `eval500_fb_*.json` on midi-01 under the pre-2026-09-06 protocol; which checkpoint,
+readout and task produced it is not recoverable from this machine — asked luis). Latent FB with the TD3 actor
+unanchored decodes to nothing (the actor leaves the prior; the stated expectation); anchored at bc 3 it sits
+below BC and falls with training; the Density arm's F^T z ranking of prior draws is at zero. Best-of-64 readout
+(acting=bon, 64 prior draws ranked by F^T z, z = mean B over the 32 goals) of the two plain latent arms at 1M:
+bc 0 **0.031 ± 0.062** (0.056 / 0.032 / 0.006), bc 3 **0.029 ± 0.009** (0.025 / 0.032 / 0.029), per task 0.01-0.06
+— below BC (0.111): the latent FB measure ranks behaviour draws worse than a random draw, where our softmax critic
+ranks them to 0.866. FB in latent space closed at or below BC on cube-single under every readout; raw FB at BC.
+
+**Why raw FB did not reproduce (investigator, `docs/design/2026-11-02-fb-raw-reproduction.md`):** the August run
+behind 0.721 (`fb_cube_ortho1000_20260810` on midi-01, HANDOFF 08-10/08-12: `agent.ortho_coef=1000`, actor flow,
+bc 3.0, 500k, task 2 only, 500 episodes, infer_eval_z over 10k relabelled rows, final-step success; 0.716 / 0.730
+/ 0.716) trained at **ortho_coef 1000**; yesterday's rerun at **1.0** (the archived launch script's example
+override, not its run). No other difference in code (agents/fb.py byte-equal to 986b94e but docstring/import;
+networks AST-equal; main.py/evaluation/eval_checkpoint paths equal), data, z inference or accounting. The
+reference repo's paper config `fb_tdj` is ortho 1000 with every other key equal to ours (batch 256, z 50, 2 heads,
+discount 0.99, tau 0.005, lr 1e-4, actor vf lr 3e-4, flow actor bc 3 / 10 steps, F 512x2, B 512x4 norm); its own
+five-task FB on cube-single is 0.456 ± 0.072 (any-step success, mean of 800k-1M, three seeds). At ortho 1.0 the
+ortho term is 1-2% of the FB loss and rises from -23 to +15 over training; at 1000 it dominates. Relaunched:
+`fb_raw_o1000_cube` sd0-2 (jobs 2527361-3, 1M, checkpoints 250k/500k/750k/1M, `fb_raw_o1000_eval_watcher.sh`),
+`fb_latent_o1000_bc3_cube` (2527364-6) and `fb_latent_o1000_bc0_cube` (2527367-9) (ortho 1000, best-of-64 readout,
+`fb_o1000_eval_watcher.sh`). Stated before results: raw FB task 2 at 500k 0.60-0.75 per seed and five-task 0.45-0.55
+if ortho is the whole story; latent FB at ortho 1000 above its 0.03 only if the ortho term is what FB's ranking
+needed in latent space. The paper's Density FB is a softmax critic over F^T B with goal-conditioned sampling
+(p_cur 0.2 / p_traj 0.5 / p_rand 0.3, batch 1024, lr 3e-4, layer norm, temperature 1), not FB + seams: the
+latent Density arm of 11-02 is not the paper's method; a faithful port needs the softmax measure loss and that goal
+sampling in `fb_latent`.
+
+**Ortho-1000 results (500 episodes per task, three seeds, t = 4.303):**
+
+| arm | 250k | 500k | 1M | task 2 per seed at 500k |
+|---|---|---|---|---|
+| raw FB, archived recipe, ortho 1000 | 0.324 ± 0.150 | **0.439 ± 0.031** | 0.475 ± 0.103 | 0.73 / 0.79 / 0.75 |
+| latent FB, ortho 1000, bc 3, best-of-64 | 0.183 ± 0.071 | 0.054 ± 0.056 | 0.026 ± 0.004 | 0.01 / 0.02 / 0.09 |
+| latent FB, ortho 1000, bc 0, best-of-64 | 0.030 ± 0.072 | 0.049 ± 0.077 | 0.038 ± 0.116 | 0.03 / 0.02 / 0.01 |
+
+**Raw FB reproduces**: task 2 at 500k 0.73 / 0.79 / 0.75 against August's 0.716 / 0.730 / 0.716; five-task 0.44-0.48
+against the Density-FB repo's own 0.456 ± 0.072. Per task at 1M 0.16 / 0.74 / 0.69 / 0.40 / 0.39: FB is a task-2/3
+method on cube-single (task 1, the easiest for BC, 0.16). The restored code is correct; the 11-02 miss was the
+coefficient. **Latent FB does not**: with the right ortho the bc-3 arm peaks at 0.18 at 250k and decays to 0.03;
+bc 0 never leaves 0.03-0.05. FB's measure in the flow's latent space does not rank behaviour draws on this data,
+with or without the orthonormality term and the BC anchor; the ordering critic ranks the same draws to 0.866.
+Reference-code FB (`$PSM_DATA/fbref/train_fb_tdj.sbatch`, jobs 2527387-9, the paper launch line with
+eval_relabel_episodes 50; the Density-FB repo at 571be6d under this checkout's venv; 5.2-5.4 h per 1M on an H100)
+landed: paper score (mean of the 800k/900k/1M relabel evals, five tasks) 0.429 / 0.407 / 0.473 = **0.436 ± 0.084**,
+task 2 0.629; per task at 1M sd2 0.34 / 0.72 / 0.74 / 0.40 / 0.30. Three independent numbers agree: the repo's
+recorded 0.456 ± 0.072, the reference code here 0.436 ± 0.084, our restored agent at ortho 1000 0.439 ± 0.031 (500k)
+/ 0.475 ± 0.103 (1M). **FB on cube-single is 0.44-0.48 five-task; our critic's best-of-64 is 0.866 and the offline
+student 0.924.** The reference Density FB (`density_fb_z` object coords, `density_fb_z_state` full state; jobs
+2527571-6, hit spec passed with escaped quotes after a first batch failed on OmegaConf's sexagesimal parse) is
+running; the paper records 0.829 ± 0.040 / 0.909 for them on cube-single.
+
+**Density FB ported onto the flow latent** (`agents/density_fb_latent.py`, `configs/agent/density_fb_latent.yaml`,
+`docs/design/2026-11-02-density-fb-latent-port.md` + `-REVIEW.md`, `tests/test_density_fb_latent.py` 19,
+`tests/test_density_fb_latent_review.py` 16 — the verifier injects the port's parameter trees into the reference
+critic and compares loss / index / readout to 1e-6): the paper's `density_fb_z` critic transcribed from
+`Factored-FB/impls/critics/density_fb.py` with the action replaced by the latent u — softmax (hard one-hot target)
+measure over F^T B at temp 1, batch 1024, lr 3e-4, 512x3 LayerNorm towers, d 50, tau 0.005, goal sampling 0.2 cur /
+0.5 trajectory / 0.3 random geometric (the 0.2 share drawn in the agent, the dataset at random_frac 0.375), ridge
+reward-sample index on the slow B tower (enc tau 0.0005, sigma tau 0.005, z_rand_frac 0.5, frozen 256-row pool),
+latent flow-BC actor (bc 3, 10 steps, vf lr 3e-4) as the bootstrap, `backward_input hit_spec|state`, `acting bon|actor`
+(bon = 64 prior latent draws scored by the paper's actor value; actor = the paper's own readout), eval z by the same
+ridge on the 10k relabelled rows. Every checklist item VERIFIED; deviations: bon as the default readout (both
+readouts evaluated), the goal-Dirac z^G route not ported (unused by the singletask eval), goal rows = next_obs.
+Launched 19:00 CET: `dfb_latent_oc_cube` (B on cube coords; jobs 2527727-9) and `dfb_latent_state_cube` (full state;
+2527730-2), 1M, three seeds; `gc_scripts/dfb_eval_watcher.sh` runs eval500 at 250k/500k/1M under both readouts.
+Stated before results: the paper's own Density FB on cube-single is 0.829 (coords) / 0.909 (state); the latent
+port at or above 0.83 would mean the softmax-over-candidates critic survives the action-to-latent swap, as ours
+does (0.866); at the latent-FB level (0.03) it would mean the swap breaks FB-style critics regardless of loss.
+
+**Reference Density FB on this cluster** (paper code, jobs 2527571-6, 1M, three seeds, 50 relabel episodes per
+task, paper score = mean of the 800k/900k/1M evals): object coords `density_fb_z` 0.752 / 0.764 / 0.672 =
+**0.729 ± 0.124**; full state `density_fb_z_state` 0.848 / 0.923 / 0.817 = **0.863 ± 0.135**; paper 0.829 ± 0.040
+(5 seeds) / 0.909. Per task at 1M, state sd1: 0.92 / 1.00 / 0.98 / 0.88 / 0.92. Both within their intervals of the
+paper; the coords arm's 1M evals dip (0.62-0.66 on two seeds) which the paper's mean-of-three absorbs. The jobs
+report FAILED (exit 1) after the last eval: a post-training step, not the training (all evals and checkpoints
+present). The user cancelled the cube-double reference runs (paper 0.317 ± 0.031 stands). So on cube-single:
+FB 0.44, Density FB 0.73-0.86, ours 0.866 / student 0.924, all on the same cluster.
+
+## 2026-10-30 — the ratio-form successor measure (PSM-SM, 10-26 brain-dump) read out at 100k: best-of-64 0.144, reward-vector readout 0.063, BC 0.111; below the pre-stated 0.45 failure line
+
+The 10-26 campaign's PSM-SM run (`fable-brain-dump/sm_algo/`, job 2526446, seed 0, 100k, sm_beta 0.5, sm_future_k
+2, squared measure in ratio form against the dataset marginal, z = h(g), nudge bootstrap) had only 10-episode
+in-loop evals (0.0 / 0.0 / 0.1 / 0.0). `fable-brain-dump/sm_algo/eval_psmsm.py` + `eval500.sbatch` (new: the
+registry-based `tools/eval_checkpoint.py` cannot restore the subclass) rebuild the agent from the run's flags.json
+and run the five tasks at 500 episodes under two readouts (jobs 2526899-903, 15 min each):
+
+| readout | t1 | t2 | t3 | t4 | t5 | mean |
+|---|---|---|---|---|---|---|
+| best-of-64 on the 32 goal states (hgoal_each + gpi) | 0.076 | 0.154 | 0.224 | 0.142 | 0.124 | **0.144** |
+| the design's reward-vector readout (reward_gpi + gpi) | 0.020 | 0.070 | 0.100 | 0.028 | 0.096 | **0.063** |
+| BC | | | | | | 0.111 |
+
+Training statistics at 100k: own-future share 0.135 (predicted 0.2-0.5), measure at the own next state 129 (the
+head's norm bound from step 300, the architecture limit the campaign flagged), feature rank 2.2 (critic A 1.02),
+nudge step 0.009 (A 0.06-0.08). Against the pre-stated line (DESIGN.md section 4, prediction 2): best-of-64 below
+0.45 means the ratio form loses the action direction the softmax target keeps. One seed, 100k; the scalar scale on
+the measure and sm_beta toward 0 are the two changes on record, neither run.
+
+aws 07-32-09Z: scene nf2 500k, best-of-64, 500 episodes, three seeds **0.069 ± 0.074** (BC 0.038); ladder 50k
+0.059 ± 0.012, 100k 0.055 ± 0.042, 250k 0.069 ± 0.089, 500k 0.069 ± 0.074; all of the gain on task 1 (0.323 vs
+0.122), tasks 2-5 below BC. Scene closed at BC on tasks 2-5; checkpoints and all 60 JSONs on HF
+`runs/nf2_env/aws/`; aws idle. Environments beyond cube-single now closed at BC: antmaze, cube-double, scene.
+
+## 2026-10-28 — why the student beats best-of-64 on cube-single (per-state pick noise); dataset-only (fully off-policy) students lose about 0.2 (in-task 0.689 ± 0.190 / 0.699 ± 0.162 vs 0.918); `bootstrap_source=student` built and launched (the offline student as the TD bootstrap, 3 seeds x 2 arms)
+
+Cube-double round 0 is closed at BC (10-27 entry below). The user's questions today: what the student's gain
+over best-of-64 is on cube-single, where it comes from, whether the on-policy rows (the teacher's own rollouts
+in the labels) are needed, and whether the fully off-policy student can replace the two-actor setup (nudge actor
+for the bootstrap + offline student for acting) as the training-time bootstrap.
+
+**Student vs teacher on cube-single** (500 episodes per task, five-task mean, BC 0.111): teacher best-of-64
+three critic seeds at 500k 0.866 (0.912 / 0.829 / 0.852); random-regions student, one per critic seed, 0.889
+(0.904 / 0.877 / 0.886); three student seeds on the seed-0 critic 0.907 (20 regions) and 0.925 ± 0.011 (50
+regions); in-task student of the seed-0 critic 0.918 sample / 0.926 mode vs its teacher 0.912. Two numbers
+reached 0.95: one student seed on 20 regions (0.957; its siblings 0.904, 0.860) and the teacher with BC before
+the grasp (0.954, 2500 episodes, one seed).
+
+**Where the gain comes from** (`figures/2026-10-27-distill/`, from the saved label files): the teacher's picks
+have the same marginal on cube-single and cube-double (mean |u| 3.0 vs the prior's 2.1, per-dim std 1.1-1.6
+vs 1.0). Two best-of-64 picks at the same rollout state differ by 2.46-2.61, picks at unrelated states by
+3.82-4.01, cosine 0.58-0.63: about two thirds of a pick is per-step randomness. The student fits one mean per
+state and removes it (mode student = sample student on cube-single); on cube-double the mean direction carries
+no success, so the students stay at BC. On-policy share of the student's training rows: cube-single 29%
+(rollouts end at ~82 steps), cube-double 71% (rollouts run to 498 steps) — not a choice, the recipe was
+copied and the rollout count grew with the episode length.
+
+**Dataset-only students** (`+n_rollout_eps=0`; tool: zero rollouts supported, validation held out of the
+dataset rows, `+set_features=goal|goal_h`, set statistics saved; `tests/test_distill_bon_student.py` +3). Cube-
+single, 20000 dataset states per task + 20 random regions, no teacher rollouts, 500 episodes per task, jobs
+2526656-63. In-task students, sample: sd0 teacher x student seeds 0/1/2: goal+h 0.765 / 0.689 / 0.612 =
+**0.689 ± 0.190**, goal only 0.772 / 0.678 / 0.647 = **0.699 ± 0.162**; sd1 0.726, sd2 0.679. Against the
+recipe's 0.918 the 50 rollouts per task (29% of the rows) are worth about 0.2: tasks 1 and 3 hold at
+0.85-0.97, tasks 4 and 5 fall to 0.14-0.51 and 0.42-0.83. Random-only dataset-only students (20 regions, no
+rollouts, tested on the five real tasks): sd0 goal+h 0.631 / 0.782 / 0.796 = **0.736 ± 0.227**, goal only
+0.774 / 0.777 / 0.797 = **0.783 ± 0.031**; sd1 0.819, sd2 0.696; vs 0.904 / 0.957 / 0.860 with rollouts
+(all eight jobs COMPLETED, 1.2-1.4 h each). Task 4 is the weak task on every run (0.29-0.84). Not separated yet: on-policy coverage vs 8000 extra labelled rows (the
+rollout-only student would). **Where it loses** (`logs/studboot/student_phases_t451.json`, 30 logged episodes
+per task and mode): the dataset-only student grasps and lifts the cube in every task-4/5 episode (first move at
+step 34-44, the teacher's 35-41) and fails in the carry: task 4 lifted-not-placed 0.60 / 0.43 (sample / mode),
+task 5 0.20 / 0.27, task 1 0.07 / 0.23; the teacher's rollouts fail 0.00-0.10 after moving. The failed episodes
+bring the cube to a median 0.41-0.56 obs units of the goal (tolerance 0.4) at step 93-168, then hover (held at
+the end 0.50-0.85 on task 4) or drop, ending 0.5-1.6 away. Per-state fit is uniform (|mu - pick| 2.1-2.7 at
+rollout states, 2.2-2.3 at dataset states, pick noise 2.5); the carry-phase states are the ones farthest from
+the dataset-label states (2.1-2.9 standardised vs 1.6 between dataset states) and are what the teacher's
+rollouts add. Experiment-2 critics at 250k: best-of-64 **0.366 ± 0.232** (in_task student) / **0.369 ± 0.081**
+(random_only student) vs the nudge-actor critic's 0.865 and the BC-draw critic's 0.66 (the stated failure
+band); the student's mean at single hindsight goals is in range (|mu| 2.0 vs prior 2.1, 1.2% of dims beyond the
+clip, goal-dependent), measure_p_own_next 0.26 vs 0.36. 500k pending.
+
+**Near-goal dataset sampling closes the gap: the fully offline student reaches 0.924 ± 0.030.** The dataset
+holds 3400-3700 states per task with the cube lifted within 0.6 of the goal, a uniform 20000-draw holds 63-83,
+the teacher's 50 rollouts 77-112 (dense on the policy's path: nearest-neighbour 0.5 vs 2.2 to a dataset-sample
+carry state). `+data_near_goal=N +data_near_tol=0.6` adds up to N dataset states with the cube within tol of
+the task's goal cube position (anchor for random regions); `near_goal_rows` + test; smoke passed. Jobs 2526714-6
+(20000 uniform + 5000 near-goal per task, no rollouts, goal-only features, three student seeds, 500 episodes):
+in_task 0.828 / 0.848 / 0.841 = **0.839 ± 0.025** (task 4 still 0.54-0.59); random_only (20 regions, 443,862
+rows) 0.916 / 0.938 / 0.917 = **0.924 ± 0.030** (mode 0.901 ± 0.052) — equal to the online recipe's 0.925 ±
+0.011 and above its teacher's three-seed 0.866. The on-policy rollouts were supplying goal-neighbourhood
+coverage, which the dataset has at 50x the sampled count. Experiment 2b launched 14:45 CET: this 0.916 student
+(random_only ss0) as the TD bootstrap, `psmgoal_ja_fbc3_pt_nf2_sbnear_cube` sd0-2 (jobs 2526722-4),
+`gc_scripts/studboot_eval_watcher_near.sh`. Stated before results: unchanged ~0.37 if the fault is a fixed
+policy off the behaviour distribution in the target; above 0.87 only if it was the bootstrap student's quality. **Result (10-29, 250k, 500 episodes per task): 0.359 /
+0.339 / 0.366 = 0.355 ± 0.035** — the same as the weak-student arms (0.366 / 0.369). The bootstrap student's
+quality (0.72 vs 0.92 as a policy) does not move the critic; a fixed deterministic policy in the TD target, off
+the behaviour distribution, is the fault. Student-as-bootstrap closed negative at 0.36 vs the nudge actor's
+0.865, below the BC-draw bootstrap's 0.66 and the co-trained actor's 0.64. **Full-state neighbourhood** (`+data_near_mode=full`:
+the 5000 dataset states nearest to any of the task's 32 goal states in standardised full observation space, no
+observation layout named; `nearest_rows_full_state` + test; jobs 2526737-9, otherwise as above): in_task 0.786 /
+0.823 / 0.848 = **0.819 ± 0.078**, random_only 0.838 / 0.878 / 0.886 = **0.867 ± 0.064**; task 4 0.36-0.69.
+Between the uniform draw (0.783) and the cube-position neighbourhood (0.924): full-state distance is diluted by
+the arm pose and pulls in states with the cube elsewhere. **Cube-double near-goal offline students** (teacher projection arm sd1 at 450k, screening 0.120; both cubes within
+0.6 of their goals, 3200-5000 dataset states per task; no rollouts; 20 random two-cube regions; 50 episodes per
+task; jobs 2526793-5): in_task 0.076 / 0.048 / 0.048 = 0.057 ± 0.040, random_only 0.104 / 0.068 / 0.132 =
+**0.101 ± 0.080**; task 1 (one cube) 0.50 / 0.34 / 0.66 for the random student vs BC 0.094 and the teacher's
+0.5; tasks 2-5: 5 successes in 1200 episodes (six students x four tasks x 50; in_task 4, random_only 1; luis
+23-45-52Z corrected the first count of "1 in 3000"), BC 0.000. The student reproduces the teacher (0.10 vs 0.12):
+near-goal labels
+do not create two-cube behaviour the critic's picks do not have. Cube-double stays at BC on tasks 2-5. The sbin
+arm hit the 12 h job limit (TIMEOUT) at 370-375k with
+only params_250000 saved (save_interval 250000); sbrand (at 360-365k after 11.5 h) and sbnear (same sbatch) will
+too. The student bootstrap runs about 40% slower per step than the nudge-actor recipe on these nodes. 250k is the
+comparison point (the nudge-actor critic's 0.865 is a 250k number); no 500k for these arms unless continued from
+the 250k checkpoint (RESTORE_PATH/RESTORE_EPOCH, 8 h).
+
+**`bootstrap_source=student`** (`agents/psmgoal.py`; `utils/psm_networks.py` `gaussian_student_head` /
+`GaussianLatentStudent` / `student_tril`, one parameter tree with the tool's table-indexed student;
+`tests/test_psmgoal_student_bootstrap.py`, 11 tests; CPU smoke 200 steps). The TD target latent at (s', g) is
+the frozen dataset-only goal-only student's mean, clipped (`student_boot_mode=mode`; `sample` adds L eps);
+loaded from `student_path`, never updated. The flowbc actor still trains (an existing assert requires it with
+`actor_kind=flowbc`) but nothing in the critic's training reads it; the recipe is otherwise nf2 bit for bit.
+Launched 02:42 / 03:08 CET by `gc_scripts/studboot_submitter.sh`: `psmgoal_ja_fbc3_pt_nf2_sbin_cube` (in_task
+student, 0.772 / 0.721; jobs 2526668-70) and `psmgoal_ja_fbc3_pt_nf2_sbrand_cube` (random_only student, 0.774
+/ 0.728; jobs 2526676-8), three seeds each, 500k; flags re-read (bootstrap_source student, mode, norm_future_k
+2, softmax, fb_bc_coeff 3.0, discount 0.98). `gc_scripts/studboot_eval_watcher.sh` submits eval500 hgoal_each +
+gpi at 250k and 500k. Stated before results: best-of-64 at 500k above the nudge-actor critic's 0.866 if the
+bootstrap's direction is what the critic lacked; at or below 0.64 (the co-trained actor's level) if the critic
+follows the student off-data.
+
+Three-seed intervals in this entry are t = 4.303 x SE (luis 01-51-39Z and 10-30-28Z: the first posts used
+1.96 x SE; corrected here and in kisski's 10-29 post; no reading changes). aws 05-11-26Z: scene nf2 250k,
+best-of-64, 500 episodes, three seeds 0.069 ± 0.089 (BC 0.038), all of it task 1 (0.345 vs 0.122), tasks 2-5
+two successes in 7500 episodes; 500k about 02:00Z 10-30. luis's cube-double task-1 debug still waits on the
+checkpoint upload (user's clearance). Mailbox: kisski 00-56-19Z, 01-48-55Z, 01-49-22Z, 02-20-15Z, 10-28-42Z,
+10-30-33Z, 12-22-41Z, 13-45-24Z, 13-48-43Z (10-28), 06-01-22Z (10-29).
+
+## 2026-10-26 — cube-double round 0 launched: nf2 recipe with both cubes in the hit region and discount 0.99 (jobs 2526512-4, 3 seeds, 500k, 10-episode in-loop evals); the first-cube arm at 250k is 0.013 / 0.006 / 0.006 (BC 0.019); 10-episode screening protocol adopted
+
+Morning: the six-hour probe campaign closed (`fable-brain-dump/FINAL_REPORT.md`): best-of-64 earns its whole gain
+in the carry phase; BC before the grasp lifts A 0.736 -> 0.954 and nf2 0.909 -> 0.954 (2500 episodes, one seed).
+Cube-double nf2 (jobs 2526433-5, hit region `19:22:0.4` = the first cube only), five tasks, 500 episodes: 250k
+0.013 / 0.006 / 0.006, 100k 0.001 / 0.002 / 0.002; BC control 0.019 (0.094 / 0 / 0 / 0 / 0); drawing the 32 eval
+goals from the whole dataset instead of the relabel batch changes nothing (0.001 vs 0.001).
+
+Density FB on cube-double (Factored-FB repo, five seeds, 1M, 10 episodes per task over the last three
+checkpoints): 31.7 ± 3.1 with both cubes' positions in the backward tower, 16.3 with the full state, FB 2.2, with
+the goal given 68.6. Recipe differences that matter: actor outputs a real action and drifts off the data (pulled
+to the flow's action with weight 3), the critic bootstraps from that actor, both cubes in the hit region,
+discount 0.99. User decisions 13:00 CET: stay in latent space; keep 500k; adopt the 10-episode protocol; improve
+by selection + distillation (round 0 = BC-bootstrapped critic, best-of-64 picks, Gaussian latent student;
+round k = draw 64 from the student, bootstrap from the student, pick, distill). Design
+`docs/design/2026-10-26-cubedouble-round0.md`.
+
+Launch 13:50 CET: `psmgoal_ja_fbc3_pt_nf2_hit2_g99_cubedouble` seeds 0-2 (jobs 2526512-4, gpu002), the nf2
+flags of 2526433-5 plus `agent.fb_hit_spec="19:22:0.4,28:31:0.4" agent.discount=0.99 agent.goal_discount=0.99`,
+EVAL_EPS=10, SAVE_INT=50000. CPU smoke of the exact path passed (200 steps; flags.json carried both cubes and
+0.99). `scripts/eval500.sh` and `eval500_packed.sbatch` gained `EVAL_EPISODES` (default 500); screening = 10
+episodes per task, OUT tag `e10`. OGBench ends the episode at the first success, so last-step success = any-step.
+
+Correction 14:30 CET: `fb_hit_spec` is read only by the reward-index paths and `actor_value_kind=shaped`; the
+nf2 recipe never reads it, and phi, b, h and the actors take the full next-state observation as the goal. Jobs
+2526512-4 therefore test discount 0.99 alone (kept as the discount control). The faithful port of Density FB's
+"object coordinates in the backward tower" is a goal-input projection (`goal_input=hit_blocks`, new seam): the
+goal input of phi, b, h and the actors restricted to the hit-spec blocks (both cubes, 6 dims). Launched as a
+second arm once the seam passed its tests and a smoke (see the entry below this paragraph when it exists).
+
+Launch 14:58 CET, the projection arm: `psmgoal_ja_fbc3_pt_nf2_gin_g99_cubedouble` seeds 0-2 (jobs 2526516-8), the
+discount-control flags plus `agent.goal_input=hit_blocks` (new seam: phi, b, h and the actor take only the hit-spec
+blocks of s+ and g, 6 dims; default `full` is bit-identical, tests/test_psmgoal_goal_input.py, 5 passed, sibling
+test files unchanged). CPU smoke of the exact path passed (200 steps, flags carried goal_input=hit_blocks). Both
+arms get the 10-episode five-task eval at every 50k (watchers `gc_scripts/{hit2,gin}_e10_eval_watcher.sh`).
+Expected: the projection arm above the discount control on tasks 2-5 at 500k if the object-coordinate input is
+what carries Density FB's gain (their 31.7 vs 16.3); equal to it if the limit is the absence of successful
+behaviour draws.
+
+Stated before results (for the discount control): five-task best-of-64 at 500k, 10 episodes x 3 seeds, 0.03 to 0.10 if the second cube
+was the limit on tasks 2-5; at or below 0.02 if the limit is the absence of successful behaviour draws. Task 1
+(one cube) should stay at the first-cube arm's 0.03 to 0.06. Then round-0 distillation on the 500k checkpoints.
+
+Evening (first-cube arm closed, round-0 readouts to 150k). `psmgoal_ja_fbc3_pt_nf2_cubedouble` (jobs 2526433-5,
+discount 0.98) finished 500k; its 500-episode five-task evals (jobs 2526535-49, submitted by hand because
+`nf2_env_eval_watcher.sh` had exited on the scene marks before the cube-double 500k checkpoints landed; same
+sbatch line, hgoal_each + gpi) give 500k 0.005 / 0.002 / 0.004 = **0.004 ± 0.002**, BC 0.019. Full ladder, three
+seeds, 500 episodes per task: 50k 0.004 ± 0.004, 100k 0.002 ± 0.001, 250k 0.008 ± 0.005, 500k 0.004 ± 0.002.
+Task 1 (0.010-0.062 across checkpoints) is the only task with successes and stays below BC's 0.094 at every step;
+tasks 2-5 are 0.000-0.004. Below BC at every checkpoint; line closed. Round 0, 10 episodes per task, seeds 0/1/2:
+discount control 50k 0 / 0 / 0, 100k 0.020 / 0 / 0, 150k 0 / 0.020 / 0; projection arm 50k 0 / 0 / 0, 100k
+0.020 / 0 / 0 (every success so far is one task-1 episode). luis (12-43Z): the critic ranks the data's own action
+above chance only within about 25 steps of a goal on cube-single (percentile 0.87 at 1 step, 0.63 at 5-25, 0.49-0.55
+from 50); aws (16-09Z): scene nf2 50k, 500 episodes, three seeds, best-of-64 0.059 ± 0.012 vs BC 0.038, all of it on
+task 1 (0.27-0.32 vs 0.12), tasks 2-5 zero while BC has 0.6-2.8%. luis asked for the cube-double sd0 100k/250k
+checkpoints on HF (`runs/nf2_env/kisski/cube_double_sd0/`); the upload waits for the user's clearance.
+
+Morning 10-27 (round-0 screening closed at 500k; six distillation jobs launched). Ten-episode screening, 10 eps x 5
+tasks x 3 seeds = 150 episodes per checkpoint. Successes per checkpoint, discount control / projection arm: 50k 0/0,
+100k 1/1, 150k 1/6, 200k 2/3, 250k 0/2, 300k 4/8, 350k 1/2, 400k 0/8, 450k 1/8, 500k 1/6; totals 11/1500 and
+44/1500. Mean over seeds and checkpoints (Density FB's protocol): control 0.007, projection 0.029, BC 0.019 (500
+episodes). 500k per seed: control 0.000 / 0.000 / 0.020, projection 0.020 / 0.040 / 0.060. Two-cube successes
+(tasks 3-5) over the ladder: control 2, projection 7 (six of them projection sd1 task 5, 150k-450k). Projection
+sd1 task 1 was 0.5 at 400k and 450k and fell to 0.1 at 500k. Against the stated expectation: the control is at or
+below 0.02 (the "no successful behaviour draws" reading); the projection arm is above the control on tasks 2-5 in
+the ladder totals (projection 7 two-cube successes vs 2) but every per-seed 500k mean sits within the 10-episode
+noise of BC. Round-0 distillation launched 05:35-05:49 CET by `gc_scripts/dist_round0_submitter.sh`, one job per
+500k teacher (`scripts/slurm/distill_bon_student.sbatch`; jobs 2526591/2/5/6/7 and 2526600): best-of-64 labels on
+20000 dataset states + 50 teacher rollouts per task, five real tasks + 20 random two-cube goal regions, set
+descriptor, early stop, weight decay 1e-4, students in_task and random_only, 10 episodes per task; flags verified
+in the job logs (cube blocks 19:22 and 28:31, forced acting=gpi, coef_source=hgoal_each). Stated before results:
+all six students near BC 0.019; the projection sd1 student is the only one with a chance above it.
+
+Round-0 distillation landed 07:18-07:34 CET (all six COMPLETED exit 0, 1.7 h each). Student five-task mean,
+10 episodes per task, sample / mode; teacher rollout success at label time (50 episodes per task) in brackets:
+control sd0 (0.020) in_task 0.000 / 0.000, random_only 0.000 / 0.000; control sd1 (0.008) 0.000 / 0.000,
+0.000 / 0.000; control sd2 (0.004) 0.020 / 0.000, 0.000 / 0.020; projection sd0 (0.008) 0.020 / 0.000,
+0.020 / 0.020; projection sd1 (0.028) 0.060 / 0.000, 0.020 / 0.020; projection sd2 (0.008) 0.020 / 0.020,
+0.000 / 0.000. Every student success is one task-1 episode except projection sd1 in_task sample (3/10 on task 1)
+and projection sd2 in_task mode (1/10 on task 3). Teacher rollouts at label time: task 1 0.02-0.10, tasks 2-5 zero
+except projection sd1 (task 4 0.02, task 5 0.04); random two-cube regions 0-4 of 20 with any teacher success, mean
+0.000-0.006. Early stopping kept steps 2000-12000 of 50000; in_task validation NLL 7.1-7.6 vs prior 8.5-8.8.
+Reading: the labels carry almost no successful behaviour, so the students reproduce BC-level behaviour. Round 0 on
+cube-double closes at BC for both arms and both students; the selection + distillation loop has nothing to
+amplify here, unlike cube-single where the teacher stood at 0.87. Reports in
+`$PSM_DATA/logs/distill/dist_r0_*_500000.json`, students under `$PSM_DATA/exp/distill/dist_r0_*/`.
 
 ---
 

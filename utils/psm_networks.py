@@ -459,14 +459,19 @@ class AffinePsiMap(nn.Module):
 # docs/design/2026-09-17-psmgoal.md. No A/beta split and no state basis anywhere.
 # ---------------------------------------------------------------------------
 
-def _triple_trunk(obs, u, s_plus, hidden_dim, hidden_layers):
-    """PhiMap's stack on the concatenated triple: Dense, LayerNorm, tanh, [Dense, relu]*(L-1)."""
+def _triple_trunk(obs, u, s_plus, hidden_dim, hidden_layers, layer_norm_all=False):
+    """PhiMap's stack on the concatenated triple: Dense, LayerNorm, tanh, [Dense, relu]*(L-1).
+    layer_norm_all (psmgoal measure.layer_norm, 2026-11-03): a LayerNorm after every later Dense too,
+    [Dense, LayerNorm, relu]*(L-1) (Density FB's towers normalise every hidden layer). False builds the
+    unchanged parameter tree."""
     x = jnp.concatenate([obs, u, s_plus], -1)
     x = nn.Dense(hidden_dim, kernel_init=_ORTH1)(x)
     x = nn.LayerNorm(epsilon=1e-5)(x)
     x = jnp.tanh(x)
     for _ in range(hidden_layers - 1):
         x = nn.Dense(hidden_dim, kernel_init=_ORTH1)(x)
+        if layer_norm_all:
+            x = nn.LayerNorm(epsilon=1e-5)(x)
         x = nn.relu(x)
     return x
 
@@ -554,12 +559,13 @@ class RLUMeasure(nn.Module):
     z_dim: int
     hidden_dim: int
     hidden_layers: int = 2
+    trunk_layer_norm: bool = False      # LayerNorm after every hidden Dense (see _triple_trunk)
 
     @nn.compact
     def __call__(self, obs, u, g):
         # PSM basis M=phi.w+b (arXiv 2411.19418 v2 Eq. 2 Bellman-flow + Cor. 4.2 phi^T w+b);
         # RLU PSM.forward psm.py:191-196.
-        x = _triple_trunk(obs, u, g, self.hidden_dim, self.hidden_layers)
+        x = _triple_trunk(obs, u, g, self.hidden_dim, self.hidden_layers, self.trunk_layer_norm)
         # RMSNorm on the joint [phi, b] head bounds |M| ~ z_dim: the -(1-gamma) diagonal pull is
         # unbounded on continuous domains. RMSNorm, not LayerNorm -- LayerNorm centres phi, so
         # E[phi] (the LP objective's direction) goes degenerate. RLU fb_modules.py.
@@ -583,6 +589,7 @@ class FactorizedMeasure(nn.Module):
     f_dim: int
     hidden_dim: int
     hidden_layers: int = 2
+    index_dim: int = 0       # > 0 (2026-11-16): the trunk reads [s, u, w], w the row's task vector (Density FB's F(s,u,z))
 
     def setup(self):
         self.f_net = PhiMap(z_dim=self.f_dim, hidden_dim=self.hidden_dim,
@@ -595,9 +602,13 @@ class FactorizedMeasure(nn.Module):
         self.A_out = nn.Dense(self.f_dim * self.z_dim, kernel_init=_ORTH1)
         self.beta_out = nn.Dense(self.f_dim, kernel_init=_ORTH1)
 
-    def operators(self, obs, u):
-        """(A (..., f_dim, z_dim), beta (..., f_dim)) on [s, u]."""
-        x = jnp.concatenate([obs, u], -1)
+    def operators(self, obs, u, w=None):
+        """(A (..., f_dim, z_dim), beta (..., f_dim)) on [s, u], or on [s, u, w] under index_dim > 0."""
+        if self.index_dim > 0:
+            assert w is not None and w.shape[-1] == self.index_dim, "index_dim > 0: operators need the task vector w"
+            x = jnp.concatenate([obs, u, w], -1)
+        else:
+            x = jnp.concatenate([obs, u], -1)
         x = jnp.tanh(self.trunk_ln(self.trunk[0](x)))
         for layer in self.trunk[1:]:
             x = nn.relu(layer(x))
@@ -608,8 +619,8 @@ class FactorizedMeasure(nn.Module):
         """f(g) (..., f_dim) on the sqrt(f_dim) sphere."""
         return self.f_net(g)
 
-    def __call__(self, obs, u, g):
-        A, beta = self.operators(obs, u)
+    def __call__(self, obs, u, g, w=None):
+        A, beta = self.operators(obs, u, w)
         f = self.features(g)
         return jnp.einsum('...kd,...k->...d', A, f), jnp.einsum('...k,...k->...', beta, f)
 
@@ -700,3 +711,49 @@ class LatentResidualActor(nn.Module):
         for _ in range(self.hidden_layers):
             h = nn.relu(nn.Dense(self.hidden_dim, kernel_init=_ORTH1)(h))
         return nn.Dense(self.action_dim, kernel_init=nn.initializers.zeros, name="out")(h)
+
+
+# ---------------------------------------------------------------- the distilled latent student
+# tools/distill_bon_student.py's Gaussian student over the flow latent: N(mu(s, c), L L^T) with
+# L lower-triangular, c a task descriptor. The set form embeds every goal state of the task's goal
+# set with one MLP and averages (permutation-invariant), then joins the state. The head is a plain
+# function so the tool's table-indexed wrapper and the agent's goal-fed module (bootstrap_source=
+# student, 2026-10-28) share one parameter tree: Dense_0, Dense_1 (set encoder), the trunk, the output.
+def student_tril(raw, d):
+    """raw (..., d*(d+1)/2) -> lower-triangular L (..., d, d), softplus diagonal + 1e-3."""
+    import numpy as np
+    rows, cols = np.tril_indices(d)
+    L = jnp.zeros(raw.shape[:-1] + (d, d), raw.dtype).at[..., rows, cols].set(raw)
+    diag = jax.nn.softplus(jnp.diagonal(L, axis1=-2, axis2=-1)) + 1e-3
+    eye = jnp.eye(d, dtype=bool)
+    return jnp.where(eye, diag[..., None, :] * jnp.eye(d, dtype=raw.dtype), L)
+
+
+def gaussian_student_head(s, goals, d, hidden, n_layers, set_hidden=256):
+    """Call inside an nn.compact __call__. s (B, ob) standardised state (or [s, c] with a mean
+    descriptor when goals is None); goals (B, K, f) standardised goal features of the task's goal
+    set, K >= 1. Returns (mu (B, d), raw (B, d*(d+1)/2)); zero-initialised output so mu = 0 and
+    L = softplus(0) + 1e-3 on the diagonal at init, close to the prior."""
+    x = s
+    if goals is not None:
+        e = goals
+        for _ in range(2):
+            e = nn.gelu(nn.Dense(set_hidden)(e))
+        x = jnp.concatenate([s, e.mean(axis=-2)], axis=-1)
+    for _ in range(n_layers):
+        x = nn.gelu(nn.Dense(hidden)(x))
+    out = nn.Dense(d + d * (d + 1) // 2, kernel_init=nn.initializers.zeros)(x)
+    return out[..., :d], out[..., d:]
+
+
+class GaussianLatentStudent(nn.Module):
+    """The goal-fed student: (standardised s, standardised goal features (B, K, f)) -> (mu, raw).
+    Same parameter tree as the tool's table-indexed student, so a saved student loads into it."""
+    d: int
+    hidden: int = 512
+    n_layers: int = 2
+    set_hidden: int = 256
+
+    @nn.compact
+    def __call__(self, s, goals):
+        return gaussian_student_head(s, goals, self.d, self.hidden, self.n_layers, self.set_hidden)

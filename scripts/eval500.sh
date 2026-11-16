@@ -7,6 +7,10 @@
 # Usage:
 #   GPU=0 bash scripts/eval500.sh psmflow|psmgoal cube <run_dir> <out_name> [extra hydra args]
 #   GPU=0 bash scripts/eval500.sh bc      cube -         <out_name>
+#   GPU=0 bash scripts/eval500.sh density_fb_latent cube <run_dir> <out_name> agent.acting=bon_proto
+#       density_fb_latent readouts are selected by the agent.acting override (the run's own flags.json
+#       supplies the rest): actor | bon | bon_proto | proto_policy, the last two for proto_head=true
+#       runs (the code-indexed family head, 2026-11-04). Name the OUT after the readout.
 #
 # No arm flags are needed on the CLI: tools/eval_checkpoint.py takes the agent config from
 # the RUN'S OWN flags.json and only lets typed CLI overrides sit on top, so a checkpoint
@@ -48,15 +52,18 @@ main() {
   # number has ever used; set it to compare arms at a common EARLIER checkpoint (a run that
   # has not finished yet). Whatever it is, it is recorded in the report JSON's restore_epoch.
   RESTORE_EPOCH="${RESTORE_EPOCH:-500000}"
+  # Episodes per task. 500 is the reporting standard; EVAL_EPISODES=10 is the 2026-10-26
+  # screening protocol (Density FB's: 10 episodes per task, mean over seeds and checkpoints).
+  EVAL_EPISODES="${EVAL_EPISODES:-500}"
 
-  MODE="${1:?psmflow|psmgoal|bc}"
-  ENVKEY="${2:?cube|antmaze|pointmaze|scene}"
+  MODE="${1:?psmflow|psmgoal|psmz|fb_latent|density_fb_latent|bc}"
+  ENVKEY="${2:?cube|cubedouble|antmaze|pointmaze|scene|puzzle}"
   RUN_DIR="${3:?run dir, or - for bc}"
   OUT="${4:?output json basename}"
   shift 4
   EXTRA=("$@")
 
-  case "$MODE" in psmflow|psmgoal|f_psmgoal2p|bc) ;; *) echo "unknown mode: $MODE" >&2; exit 1 ;; esac
+  case "$MODE" in psmflow|psmgoal|psmz|f_psmgoal2p|fb_latent|density_fb_latent|bc) ;; *) echo "unknown mode: $MODE" >&2; exit 1 ;; esac
 
   # Paths default to midi-01, where every earlier eval500 JSON was produced. On another
   # machine (KISSKI/SLURM) override them in the environment rather than editing this file:
@@ -94,6 +101,14 @@ main() {
       ENV_NAME="${ENV_NAME:-scene-play-singletask-v0}"
       FLOW="${FLOW_DIR:-$EXP/flow/scene-play}"
       PRE="${PRE_NPZ:-$EXP/preimages/scene-play.npz}" ;;
+    cubedouble)
+      ENV_NAME="${ENV_NAME:-cube-double-play-singletask-v0}"
+      FLOW="${FLOW_DIR:-$EXP/flow/cube-double-play}"
+      PRE="${PRE_NPZ:-$EXP/preimages/cube-double-play.npz}" ;;
+    puzzle)
+      ENV_NAME="${ENV_NAME:-puzzle-3x3-play-singletask-v0}"
+      FLOW="${FLOW_DIR:-$EXP/flow/puzzle-3x3-play}"
+      PRE="${PRE_NPZ:-$EXP/preimages/puzzle-3x3-play.npz}" ;;
     *) echo "unknown env key: $ENVKEY" >&2; exit 1 ;;
   esac
 
@@ -143,14 +158,14 @@ main() {
     # and decodes it. No z inference, no preimages.
     "$PY" tools/eval_checkpoint.py agent=fql agent.bc_only=true \
       env_name="$ENV_NAME" restore_path="$FLOW" restore_epoch="$RESTORE_EPOCH" \
-      eval_episodes=500 report_out="$LOGS/$OUT.json" "${EXTRA[@]}"
+      eval_episodes="$EVAL_EPISODES" report_out="$LOGS/$OUT.json" "${EXTRA[@]}"
   else
     "$PY" tools/eval_checkpoint.py agent="$MODE" \
       env_name="$ENV_NAME" \
       agent.flow_ckpt_path="$FLOW" agent.flow_ckpt_epoch=500000 \
       agent.preimage_path="$PRE" agent.use_point_preimage=true \
       restore_path="$RUN_DIR" restore_epoch="$RESTORE_EPOCH" \
-      eval_episodes=500 report_out="$LOGS/$OUT.json" "${EXTRA[@]}"
+      eval_episodes="$EVAL_EPISODES" report_out="$LOGS/$OUT.json" "${EXTRA[@]}"
   fi
 }
 

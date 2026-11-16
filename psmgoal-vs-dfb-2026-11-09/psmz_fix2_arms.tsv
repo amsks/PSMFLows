@@ -1,0 +1,4 @@
+cd_both_h4	cubedouble	agent.fb_hit_spec='19:22:0.4,28:31:0.4' agent.goal_input=hit_blocks agent.batch_size=1024 agent.discount=0.99 agent.goal_discount=0.99 agent.factorized_index_input=true agent.critic_heads=4
+cd_both_alr	cubedouble	agent.fb_hit_spec='19:22:0.4,28:31:0.4' agent.goal_input=hit_blocks agent.batch_size=1024 agent.discount=0.99 agent.goal_discount=0.99 agent.critic_heads=2 agent.factorized_index_input=true agent.fbc_actor.lr=3e-5
+cd_both_fullstate	cubedouble	agent.fb_hit_spec='19:22:0.4,28:31:0.4' agent.batch_size=1024 agent.discount=0.99 agent.goal_discount=0.99 agent.critic_heads=2 agent.factorized_index_input=true
+scene_both	scene	agent.fb_hit_spec='19:22:0.4,28:30:0.5,32:34:0.5,36:37:0.72,38:39:0.6' agent.goal_input=hit_blocks agent.batch_size=1024 agent.discount=0.99 agent.goal_discount=0.99 agent.critic_heads=2 agent.factorized_index_input=true

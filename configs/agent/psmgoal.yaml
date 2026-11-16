@@ -23,7 +23,14 @@ ortho_coef: 0.0
 # Measure form (2026-10-01). joint: phi, b = RLUMeasure on [s, u, g] (RMSNorm head).
 # factorized: phi = A(s,u)^T f(g), b = beta(s,u)^T f(g), f on the sqrt(f_dim) sphere, plus
 # f_ortho_coef * ||E[f f^T] - I||_F^2 over the batch's next states (ignored when joint).
+# Under measure_loss=softmax (wired 2026-11-06) the loss is the joint path's cross-entropy with the
+# factored logits; f_ortho_coef is then ignored (f_ortho_loss logged only). policy_index=reward reads
+# the index feature as f(s+) itself, so f_dim must equal z_dim. Not wired with factorized: critic_heads>1,
+# critic_action_input=latent_and_action, measure.layer_norm, actor_value, measure_loss=pool.
 measure_form: joint
+# factorized only (2026-11-16): A(s,u) and beta(s,u) read the row's task vector w as an input, Density FB's F(s,u,z).
+# Needs policy_index=reward, coef_source=ridge. critic_heads > 1 is now wired for the factorized form too.
+factorized_index_input: false
 f_dim: 128
 f_ortho_coef: 1.0
 
@@ -89,6 +96,15 @@ bootstrap_delta_scale: 1.0 # factor on the flowbc actor's step in the TD target 
 frozen_delta_path: null
 frozen_delta_epoch: 500000
 frozen_delta_mode: plus
+# bootstrap_source=student (2026-10-28): the target latent is the distilled Gaussian latent student
+# (tools/distill_bon_student.py, descriptor=set, set_features=goal) read at (s', g) and never updated:
+# clip(mu) under student_boot_mode=mode, clip(mu + L eps) under sample. Needs policy_index=goal; with
+# train_actor=false no in-loop actor is trained (the one-actor recipe). student_hidden/student_layers
+# must match the saved student's config.json.
+student_path: null
+student_boot_mode: mode
+student_hidden: 512
+student_layers: 2
 # Advantage-guided actor (2026-10-20, docs/design/2026-10-20-advantage-guided-actor.md; OFF by default). With
 # ag_actor: true the flowbc delta net is trained by regression: ag_k prior draws per row, each scored by the point
 # value at the actor goal, scores standardised per row, delta(s, [g, c], 0) fit to the draw with score c. The TD
@@ -103,6 +119,18 @@ ag_score_eps: 1.0e-6
 ag_pool: 0             # next states the score normaliser reads per row (0 = the whole batch); 32 cuts the update cost 8x
 fb_rand_frac: 0.5          # random-direction task fraction (reference z_rand_frac)
 fb_hit_spec: "19:22:0.4"   # hindsight kernel reward blocks a:b:eps (cube xyz, eps 0.4)
+# goal_input: what every net that takes a goal state (phi, b, h, l, the goal-fed actor and delta) reads of it.
+# full = the whole observation; hit_blocks = only the fb_hit_spec blocks (cube: the cube positions), the
+# analogue of Density FB's backward tower taking the object coordinates. Default full is bit-identical to before.
+goal_input: full           # full | hit_blocks
+# critic_heads (2026-11-02): independent (phi, b) basis heads, params stacked on a leading axis, each
+# with its own target net, trained by the sum of the heads' measure losses. Every place that scores
+# actions (the nudge actor's value, best-of-64 via _hgoal_each_score, the argmax bootstrap) takes the
+# min over heads; other readouts use head 0. Not wired with measure_form=factorized or measure_loss=pool.
+critic_heads: 1            # 1 = the single basis (bit-identical to before)
+# critic_action_input: the basis's u slot. latent = [s, u, s+]; latent_and_action = [s, u, G(s, u), s+],
+# G the frozen flow's decode (gpi_decode, clipped to [-1, 1], stop-gradient), one decode per (s, u) row.
+critic_action_input: latent   # latent | latent_and_action
 fb_ridge_lambda_mult: 0.01 # lam = mult * tr(C)/D
 fb_cov_eig_floor: 1.0e-6   # eigenvalue floor on C, multiple of tr(C)/D
 fb_const_eps: 1.0e-6       # constant-reward fallback threshold
@@ -120,7 +148,17 @@ train_goal_head: false     # train h(g) by J(theta|g)+constraint during update()
 # there coef_source=amortized is the trained coefficient.
 coef_source: lp            # lp (RLU Lagrangian inference) | amortized (h(g) head) | regression (lstsq on phi) | ridge (actor_value) | trained (mean of w(z)) | hgoal_each, reward_gpi (policy_index=goal, eval only) | pool_reward (policy_index=goal|bank, eval only)
 reward_actor_reward: latent_centered  # policy_index=reward, the actor's reward rows: the index's centered view (latent_centered) | the exact kernel reward on hindsight rows, centered view on random rows (kernel)
-ridge_score: goal          # policy_index=reward, eval: best-of-64 by the goal mass at the ridge w (goal) | by the expected relabel reward over eval_ref at w (reward)
+ridge_score: goal          # policy_index=reward, eval: best-of-64 by the goal mass at the ridge w (goal) | by the expected relabel reward over eval_ref at w (reward) | Density FB's softmax readout on the frozen index pool (pool_softmax)
+# --- Density FB recipe on the joint critic (2026-11-03, docs/design/2026-11-03-psmgoal-dfb-recipe.md; all OFF) ---
+# dfb_recipe=true: main.py writes agents/psmgoal.py DFB_RECIPE into the agent config before the dataset and the
+# agent are built, and records the expanded values in the run's flags.json (batch_size is left to the caller).
+# The keys it sets are ordinary keys; each seam below can also be switched on alone.
+dfb_recipe: false
+goal_cur_obs_frac: 0.0     # policy_index=reward: share of measure goals replaced by the row's own observation (GCDataset curgoal)
+index_pool_m: 0            # policy_index=reward: frozen readout pool, the first update's first m next states (0 = none)
+reward_q_center: false     # actor_kind=flowbc_vf: centre Q in the actor's normaliser only (Density FB actor_q_center)
+# actor_kind=flowbc_vf: Density FB's FlowBC actor on the latent (NoiseConditionedActor + its own FlowVectorField)
+fbc_actor: {hidden_dim: 512, hidden_layers: 2, embedding_layers: 2, bc_coeff: 3.0, q_coeff: 1.0, flow_steps: 10, lr: 1.0e-4, lr_vf: 3.0e-4, flow_vf_hidden_dim: 512, flow_vf_hidden_layers: 4}
 # coef_source=pool_reward (2026-10-19, eval only, docs/design/2026-10-19-pool-measure.md): per task a
 # bank of pool_eval_size next states from the relabel batch, n_r = min(pool_eval_size/4, rewarding rows)
 # rewarding and the rest non-rewarding, weights omega_j = (class count in the batch) / (class count in
@@ -195,8 +233,12 @@ eval_goal_source: relabel  # relabel | env
 # the share of g among [g + the batch's next states]). No actor; bootstrap_n=1 is a plain BC draw.
 # bootstrap_source=bc_mean (2026-10-13; same needs as argmax): the target is the mean over
 # bootstrap_n clipped prior draws of the target measure (softmax: the mean of their softmax rows).
-bootstrap_source: actor    # actor | data | argmax | bc_mean
+bootstrap_source: actor    # actor | data | argmax | bc_mean | frozen_delta | student
 bootstrap_n: 8             # bootstrap_source=argmax: prior draws scored per row; bc_mean: draws averaged
+# bootstrap_bon_n (2026-11-16, HQL-style; needs policy_index=reward): the measure's u+ at s' is the best of
+# this many clipped prior draws under the critic's own reward readout (reward_softmax_q, min over heads) at
+# the row's index w on the target basis, in place of the actor's draw. The actor trains unchanged.
+bootstrap_bon_n: 0         # 0 = off (the actor's draw, bit-identical); N > 0 = best of N prior draws
 
 # --- 2026-10-04 ablations (OFF by default) ---
 # goal_sampling (policy_index=goal): geometric = the hindsight goal at offset ~
@@ -222,7 +264,7 @@ gpi_hold: 1
 # actor_value_kind: the Q the actor climbs. shaped = the kernel-weighted measure over the
 # batch's next states (fb_hit_spec); point = M(s,u,g) at the actor goal with w = h(g)
 # (softmax loss: the share of g among [g + the batch's next states]).
-actor_kind: tanh           # tanh | flowbc | dsrl
+actor_kind: tanh           # tanh | flowbc | dsrl | flowbc_vf (policy_index=reward, Density FB FlowBC)
 actor_value_kind: shaped   # shaped | point
 dsrl_actor: {target_entropy: 0.0, init_alpha: 1.0, lr_alpha: 3.0e-4}   # actor_kind=dsrl: SAC's alpha
 
@@ -238,7 +280,7 @@ bootstrap_switch: none     # none | prior_then_actor | actor_then_prior
 bootstrap_switch_step: 100000
 
 # --- nets ---
-measure: {hidden_dim: 1024, hidden_layers: 2}   # phi, b on [s, u, g] (RLU hidden 1024, was 512; capacity lift 2026-09-18)
+measure: {hidden_dim: 1024, hidden_layers: 2, layer_norm: false}   # phi, b on [s, u, g] (RLU hidden 1024, was 512; capacity lift 2026-09-18); layer_norm: LayerNorm after every hidden Dense (2026-11-03)
 w:    {hidden_dim: 256, hidden_layers: 2}   # w(z)
 l:    {hidden_dim: 256, hidden_layers: 2}   # l(s, u, g)
 actor:   {hidden_dim: 512, hidden_layers: 2}   # DSRL latent actor (acting=distill)

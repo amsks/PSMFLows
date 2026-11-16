@@ -1,0 +1,3 @@
+hitblocks	agent.fb_hit_spec='19:22:0.4,28:31:0.4' agent.goal_input=hit_blocks
+b1024g99	agent.fb_hit_spec='19:22:0.4,28:31:0.4' agent.batch_size=1024 agent.discount=0.99 agent.goal_discount=0.99
+hb_b1024g99	agent.fb_hit_spec='19:22:0.4,28:31:0.4' agent.goal_input=hit_blocks agent.batch_size=1024 agent.discount=0.99 agent.goal_discount=0.99

@@ -1,0 +1,32 @@
+# psmz (2026-11-10): the z-conditioned PSM on the frozen flow's latents. Same code as psmgoal
+# (agents/psmgoal.py, PSMGoalAgent); this file is psmgoal.yaml plus the keys below. psmgoal is the
+# goal-conditioned algorithm (w = h(g)); psmz conditions the measure and the actor on a task vector w
+# solved from reward samples (Density FB's index), never on a goal state.
+#
+#   M(s,u,s+; w) = (A(s,u)^T f(s+))^T w + beta(s,u)^T f(s+)      (measure_form=factorized)
+#   training w: centred ridge fit of the hindsight goal's kernel reward on the slow f(s+) over the
+#               batch's next states (half the rows a random sqrt(D)-sphere draw)
+#   test w:     the same ridge fit on 10,000 relabelled reward samples (coef_source=ridge)
+#   actor:      FlowBC on the latent, u = 3 tanh(actor(s, w, noise)), its own vector field, bc 0.1
+#
+# Cube-single, actor alone, five tasks x 500 episodes, 3 seeds, 500k: 0.712 +/- 0.131 (BC 0.111)
+# (docs/HANDOFF.md 2026-11-09, group psmgoal_fweak_fvf01_cube).
+defaults:
+  - psmgoal
+  - _self_
+
+agent_name: psmz
+measure_form: factorized
+policy_index: reward
+coef_source: ridge
+measure_loss: softmax
+train_actor: true
+actor_kind: flowbc_vf
+fbc_actor:
+  bc_coeff: 0.1
+reward_q_center: true
+ridge_score: pool_softmax
+index_pool_m: 256
+goal_random_frac: 0.0
+acting: distill
+eval_redistill: false

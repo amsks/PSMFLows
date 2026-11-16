@@ -1,0 +1,2 @@
+vgoals	agent.goal_cur_obs_frac=0.2 agent.goal_random_frac=0.375 agent.goal_discount=0.99
+b1024	agent.batch_size=1024

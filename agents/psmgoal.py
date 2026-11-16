@@ -11,17 +11,21 @@ import optax
 
 from agents.f_psmflow import _load_flow_params
 from utils.flax_utils import TrainState, nonpytree_field
-from utils.networks import ActorVectorField
+from utils.networks import ActorVectorField, ensemblize
 from utils.psm_common import _plain_config, polyak_update, pool_anchor, pool_hash, pool_sigma
 from utils.psm_networks import (
     FactorizedMeasure,
+    FlowVectorField,
+    GaussianLatentStudent,
     GoalCoefficient,
     LatentResidualActor,
     LogAlpha,
+    NoiseConditionedActor,
     PolicyCoefficient,
     RLUMeasure,
     TanhGaussianLatentActor,
     TripleMultiplier,
+    student_tril,
     tanh_gaussian_sample,
 )
 from utils.psm_proto import proto_latents, proto_seed_ints, sample_z_bin
@@ -72,6 +76,12 @@ def parse_hit_spec(spec):
         a, b, e = part.split(":")
         blocks.append((int(a), int(b), float(e)))
     return tuple(blocks)
+
+
+def goal_input_blocks(g, spec):
+    """goal_input=hit_blocks: the fb_hit_spec blocks of a goal state, concatenated on the last axis.
+    g (..., ob) -> (..., sum_b (b - a)). Pure slicing; the radii are not read."""
+    return jnp.concatenate([g[..., a:b] for (a, b, _) in parse_hit_spec(spec)], axis=-1)
 
 
 def kernel_reward(goals, pool, blocks):
@@ -137,7 +147,10 @@ POLICY_INDEXES = ("code", "goal", "bank", "reward")
 #: kernel reward of the row's hindsight goal over the batch's next states (fb_rand_frac of the rows a random
 #: sphere draw), at test the relabel rewards (coef_source=ridge). Critic A's loss, bootstrap and flowbc
 #: actor otherwise; the actor takes w. ridge_score picks the best-of-64 score at test time.
-RIDGE_SCORES = ("goal", "reward")
+#: pool_softmax (2026-11-03, docs/design/2026-11-03-psmgoal-dfb-recipe.md): Density FB's readout, best-of-64
+#: by Q = min_h sum_j softmax_j(M_h(s,u,y_j; w)/measure_temp) (f(y_j) - mu)^T w / sqrt(D) over the FROZEN
+#: index pool y_j (index_pool_m next states of the first update).
+RIDGE_SCORES = ("goal", "reward", "pool_softmax")
 REWARD_ACTOR_REWARDS = ("latent_centered", "kernel")
 REWARD_INDEX_KEY = 107
 REWARD_ACTOR_KEY = 108
@@ -193,7 +206,13 @@ REWARD_GPI_CANDS = ("top", "random", "both")
 #: prior draws at s', scored by the target measure on the row's goal (2026-10-07); no actor.
 #: bc_mean = the target measure averaged over bootstrap_n clipped prior draws at s' (2026-10-13;
 #: softmax: the mean of their softmax rows); no actor.
-BOOTSTRAP_SOURCES = ("actor", "data", "argmax", "bc_mean", "frozen_delta")
+BOOTSTRAP_SOURCES = ("actor", "data", "argmax", "bc_mean", "frozen_delta", "student")
+#: bootstrap_source=student (2026-10-28): the TD target latent is the distilled Gaussian latent student
+#: (tools/distill_bon_student.py, descriptor=set, set_features=goal) read at (s', g): clip(mu) with
+#: student_boot_mode=mode, clip(mu + L eps) with sample. Loaded from student_path (params.msgpack,
+#: standardisation.npz, config.json), never updated; no in-loop actor is needed (train_actor=false).
+#: The one-actor recipe: the same offline student that acts at test time also supplies the bootstrap.
+STUDENT_BOOT_MODES = ("mode", "sample")
 #: bootstrap_source=frozen_delta (2026-10-17): the TD target latent is clip(eps + step) with step built from a
 #: FROZEN flowbc delta loaded from another run (frozen_delta_path/epoch); no co-adaptation. plus = +delta
 #: (critic A's target with a fixed field), minus = -delta, random = a random direction of the same length
@@ -215,7 +234,10 @@ TRAINED_COEF_SEED = 0
 #: flowbc = u = clip(eps + delta(s, g, eps)), eps a prior draw, BC anchor at eps
 #: (`actor_loss_flowbc`); dsrl = the tanh-Gaussian actor with no BC term and a learned
 #: entropy weight, the f_psmflow dsrl_sac head (`actor_loss_dsrl`).
-ACTOR_KINDS = ("tanh", "flowbc", "dsrl")
+#: flowbc_vf (2026-11-03, policy_index=reward only): Density FB's FlowBC actor on the latent
+#: (impls/actors/flowbc.py, as agents/density_fb_latent.py): u = u_clip * tanh(actor(s, w, noise)), its own
+#: flow over u fit to the clipped preimage, the one-step actor distilled toward that flow's rollout.
+ACTOR_KINDS = ("tanh", "flowbc", "dsrl", "flowbc_vf")
 #: actor_value_kind options: the value the goal actor climbs. shaped = the kernel-weighted
 #: measure over the batch's next states; point = M(s,u,g) at the actor goal itself
 #: (softmax: the share of g among [g + the batch's next states]).
@@ -227,11 +249,65 @@ ACTOR_GOAL_SOURCES = ("future", "measure")
 #: draw) instead of the actor's latent. prior_then_actor = before bootstrap_switch_step training
 #: steps; actor_then_prior = from that step on. The actor trains throughout.
 BOOTSTRAP_SWITCHES = ("none", "prior_then_actor", "actor_then_prior")
+#: goal_input: what every goal-taking net (phi, b, h, l, the goal-fed actor and delta) reads of a goal state.
+#: full = the whole observation; hit_blocks = only the fb_hit_spec blocks (cube: the cube positions),
+#: the analogue of Density FB's backward tower taking the object coordinates.
+GOAL_INPUTS = ("full", "hit_blocks")
+#: critic_action_input options: the basis's u slot is the latent u, or [u, G(s, u)] with G the frozen decode.
+CRITIC_ACTION_INPUTS = ("latent", "latent_and_action")
 #: fold_in constant of the fresh prior draw eps the flowbc bootstrap uses at (s', g).
 FLOWBC_BOOT_KEY = 103
+#: fold_in constants of the Density FB recipe (2026-11-03): the cur-goal draw of goal_cur_obs_frac and the
+#: flowbc_vf actor's noise / flow-matching draws.
+DFB_CUR_GOAL_KEY = 110
+FBC_ACTOR_KEY = 111
+
+#: dfb_recipe=true (2026-11-03, docs/design/2026-11-03-psmgoal-dfb-recipe.md): every Density FB design
+#: decision except the F(s,u,z)^T B(s+) factorisation, on the joint phi(s,u,s+) critic. main.py writes these
+#: into the agent config (and the run's flags.json) before the dataset and the agent are built; batch_size
+#: is left to the caller (target 512). Reference values: Factored-FB impls/configs/critic/density_fb_z.yaml
+#: and impls/configs/actor/flowbc.yaml.
+DFB_RECIPE = {
+    # index: the reward-sample ridge index on the slow projected-phi feature (policy_index=reward)
+    "policy_index": "reward", "fb_rand_frac": 0.5, "fb_ridge_lambda_mult": 0.01, "fb_cov_eig_floor": 1.0e-6,
+    "fb_const_eps": 1.0e-6, "fb_enc_tau": 0.0005, "fb_sigma_tau": 0.005, "fb_hit_spec": "19:22:0.4",
+    "z_dim": 50, "index_pool_m": 256, "reward_actor_reward": "latent_centered",
+    # critic: softmax loss, hard one-hot immediate term, two heads, goal slot on the hit blocks
+    "measure_loss": "softmax", "measure_temp": 1.0, "norm_future_k": 0, "critic_heads": 2,
+    "goal_input": "hit_blocks", "discount": 0.99, "tau": 0.005, "lr_measure": 3.0e-4,
+    "measure": {"hidden_dim": 512, "hidden_layers": 3, "layer_norm": True},
+    # value goals 0.2 own observation / 0.5 geometric trajectory / 0.3 random (GCDataset value_p_*)
+    "goal_discount": 0.99, "goal_cur_frac": 0.0, "goal_random_frac": 0.375, "goal_cur_obs_frac": 0.2,
+    "goal_sampling": "geometric",
+    # actor and bootstrap: the latent FlowBC actor at (s', w_value)
+    "train_actor": True, "actor_kind": "flowbc_vf", "actor_input": "w", "bootstrap_source": "actor",
+    "actor_value": "none", "reward_q_center": True,
+    "fbc_actor": {"hidden_dim": 512, "hidden_layers": 2, "embedding_layers": 2, "bc_coeff": 3.0, "q_coeff": 1.0,
+                  "flow_steps": 10, "lr": 1.0e-4, "lr_vf": 3.0e-4, "flow_vf_hidden_dim": 512,
+                  "flow_vf_hidden_layers": 4},
+    # test time: the ridge solve on the relabel rewards, best-of-64 by the softmax readout on the frozen pool
+    "coef_source": "ridge", "acting": "gpi", "ridge_score": "pool_softmax", "gpi_num_u": 64,
+}
+
+
+def apply_dfb_recipe(config):
+    """dfb_recipe=true: write DFB_RECIPE into `config` (a ConfigDict or dict; nested dicts merged key by key)
+    and return it. A no-op when dfb_recipe is false. Idempotent."""
+    if not bool(config.get("dfb_recipe", False)):
+        return config
+    for k, v in DFB_RECIPE.items():
+        if isinstance(v, dict):
+            for kk, vv in v.items():
+                config[k][kk] = vv
+        else:
+            config[k] = v
+    return config
 AG_DRAW_KEY = 109  # advantage-guided actor: the K prior draws scored per update
 #: fold_in constant of the bootstrap_n prior draws the argmax bootstrap scores at (s', g).
 ARGMAX_BOOT_KEY = 104
+#: fold_in constant of the bootstrap_bon_n prior draws the reward-index best-of-N bootstrap scores at
+#: (s', w_i) (2026-11-16, HQL-style: the measure's u+ is the best draw under the critic's own reward readout).
+BON_BOOT_KEY = 112
 #: name of the flowbc actor's output layer in its params (zero-initialised).
 DELTA_OUT_LAYER = "out"
 
@@ -255,6 +331,42 @@ class InferenceState:
     w_opt: Any                # optax state for w
     l_params: Any          # l(s,u,g) params (softplus multiplier network)
     l_opt: Any             # optax state for the multiplier
+
+
+def _load_student_boot(path, ob_dim, d, config):
+    """bootstrap_source=student: read a saved student (tools/distill_bon_student.py save_student:
+    params.msgpack, standardisation.npz with x_mean/x_std over [s, task index] and set_mean/set_std
+    over the goal features, config.json) into {variables, x_mean, x_std, set_mean, set_std}. The
+    student must be descriptor=set with set_features=goal (its goal features are the goal state), so
+    it can be read at any single goal. path=None (tests/smokes, allow_untrained_flow): a fresh
+    zero-initialised student with identity standardisation, mu = 0 at every (s, g)."""
+    import json
+    import os
+
+    from flax import serialization
+    hidden, layers = int(config.get("student_hidden", 512)), int(config.get("student_layers", 2))
+    net = GaussianLatentStudent(d=int(d), hidden=hidden, n_layers=layers)
+    if not path:
+        variables = net.init(jax.random.PRNGKey(0), jnp.zeros((1, ob_dim)), jnp.zeros((1, 1, ob_dim)))
+        return {"variables": variables, "x_mean": jnp.zeros((ob_dim,)), "x_std": jnp.ones((ob_dim,)),
+                "set_mean": jnp.zeros((ob_dim,)), "set_std": jnp.ones((ob_dim,))}
+    arrays = np.load(os.path.join(path, "standardisation.npz"))
+    assert "set_mean" in arrays, f"{path}: no set_mean/set_std (needs descriptor=set, saved by the 2026-10-28 tool)"
+    with open(os.path.join(path, "config.json")) as f:
+        meta = json.load(f)
+    st = meta.get("settings", {})
+    assert st.get("descriptor") == "set" and st.get("set_features") == "goal", \
+        f"{path}: bootstrap_source=student needs descriptor=set, set_features=goal (got {st.get('descriptor')}, {st.get('set_features')})"
+    cfg = meta.get("cfg", {})
+    assert int(cfg.get("hidden", 512)) == hidden and int(cfg.get("n_layers", 2)) == layers, \
+        f"{path}: student hidden/n_layers {cfg.get('hidden', 512)}/{cfg.get('n_layers', 2)} vs config student_hidden/student_layers {hidden}/{layers}"
+    f_dim = int(arrays["set_mean"].shape[0])
+    template = net.init(jax.random.PRNGKey(0), jnp.zeros((1, ob_dim)), jnp.zeros((1, 1, f_dim)))
+    with open(os.path.join(path, "params.msgpack"), "rb") as fh:
+        variables = serialization.from_bytes(template, fh.read())
+    return {"variables": variables, "x_mean": jnp.asarray(arrays["x_mean"][:ob_dim]),
+            "x_std": jnp.asarray(arrays["x_std"][:ob_dim]),
+            "set_mean": jnp.asarray(arrays["set_mean"]), "set_std": jnp.asarray(arrays["set_std"])}
 
 
 def _load_frozen_delta_params(run_dir, epoch, template):
@@ -307,6 +419,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
     # Joint actor heads (2026-10-05; carried but unused unless actor_kind selects them).
     delta: Any = None            # actor_kind=flowbc: delta(s, g, eps) TrainState
     frozen_delta_params: Any = None   # bootstrap_source=frozen_delta: the loaded, never-updated delta params
+    student_boot: Any = None     # bootstrap_source=student: the loaded student (params + standardisation)
     delta_target: Any = None     # ag_actor: Polyak copy of delta that the TD bootstrap reads
     log_alpha: Any = None        # actor_kind=dsrl: SAC's log alpha TrainState
     # coef_source=reward_gpi (2026-10-15, eval only; carried but unused otherwise).
@@ -322,6 +435,15 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
     eval_bank: Any = None        # (pool_eval_size, ob) the bank's next states y_j
     eval_bank_r: Any = None      # (pool_eval_size,) r(y_j), the shifted relabel reward
     eval_bank_w: Any = None      # (pool_eval_size,) omega_j, the class importance weights
+    # Density FB recipe (2026-11-03; None unless switched on). actor_kind=flowbc_vf: the FlowBC one-step
+    # actor and its own flow over u. index_pool_m > 0: the frozen readout pool (the first update's first
+    # index_pool_m next states) and, after infer_eval_goals under ridge_score=pool_softmax, its reward
+    # (f(y_j) - mu)^T w / sqrt(D) at the eval w.
+    fbc_actor: Any = None
+    fbc_vf: Any = None
+    index_pool: Any = None       # (index_pool_m, ob)
+    index_pool_filled: Any = None
+    eval_pool_reward: Any = None  # (index_pool_m,)
 
     # ------------------------------------------------------------------ construction
     @classmethod
@@ -351,8 +473,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         measure_form = str(config.get("measure_form", "joint"))
         assert measure_form in MEASURE_FORMS, f"measure_form must be one of {MEASURE_FORMS}"
         if measure_form == "factorized":
-            # fb_feature evaluates the basis per (row, u, anchor) triple, which would build
-            # A(s,u) (f_dim x z_dim) per triple; not wired.
+            # actor_value's Factored-FB actor (actor_loss_fbtrick / fb_actor_step) is not wired for the
+            # factored basis; the reward index (policy_index=reward) is, through fb_feature = f(s+).
             assert actor_value == "none", "measure_form=factorized is not wired with actor_value"
         # goal-conditioned training switches (docs/design/2026-10-01-psmgoal-goal-conditioned.md)
         policy_index = str(config.get("policy_index", "code"))
@@ -379,6 +501,12 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                 f"frozen_delta_mode must be one of {FROZEN_DELTA_MODES}"
             assert config.get("frozen_delta_path", None) or config.get("allow_untrained_flow", False), \
                 "bootstrap_source=frozen_delta needs frozen_delta_path (a run dir with params_<frozen_delta_epoch>.pkl)"
+        if bootstrap_source == "student":
+            assert policy_index == "goal", "bootstrap_source=student reads the student at (s', g): needs policy_index=goal"
+            assert str(config.get("student_boot_mode", "mode")) in STUDENT_BOOT_MODES, \
+                f"student_boot_mode must be one of {STUDENT_BOOT_MODES}"
+            assert config.get("student_path", None) or config.get("allow_untrained_flow", False), \
+                "bootstrap_source=student needs student_path (a student dir with params.msgpack, standardisation.npz)"
         if bootstrap_source == "data":
             # docs/design/2026-10-03-psmgoal-data-bootstrap.md: u' = u_{i+1} is a sample of the
             # goal's policy at s' only for a hindsight goal from the row's own future.
@@ -411,7 +539,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             assert not bool(config.get("train_goal_head", False)), "policy_index=bank has no goal head to train"
             assert coef_source not in GOAL_COEF_SOURCES, f"coef_source={coef_source} reads h(g): needs policy_index=goal"
         if policy_index == "goal":
-            assert bool(config.get("train_actor", False)) or bootstrap_source in ("data", "argmax", "bc_mean", "frozen_delta"), \
+            assert bool(config.get("train_actor", False)) or bootstrap_source in ("data", "argmax", "bc_mean", "frozen_delta", "student"), \
                 ("policy_index=goal bootstraps from the goal-fed actor: set train_actor=true "
                  "(or bootstrap_source=data|argmax|bc_mean|frozen_delta)")
             assert not bool(config.get("train_goal_head", False)), \
@@ -425,7 +553,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             assert measure_loss == "softmax", "policy_index=reward uses critic A's softmax loss: set measure_loss=softmax"
             assert bool(config.get("train_actor", False)), \
                 "policy_index=reward bootstraps from the w-fed flowbc actor: set train_actor=true"
-            assert str(config.get("actor_kind", "tanh")) == "flowbc", "policy_index=reward: set actor_kind=flowbc"
+            assert str(config.get("actor_kind", "tanh")) in ("flowbc", "flowbc_vf"), \
+                "policy_index=reward: set actor_kind=flowbc (or flowbc_vf)"
             assert actor_input == "w", "policy_index=reward feeds the actor the index w: actor_input=w"
             assert bootstrap_source == "actor", "policy_index=reward bootstraps from the actor at (s', w): bootstrap_source=actor"
             assert actor_value == "none", "policy_index=reward has its own actor loss; set actor_value=none"
@@ -441,6 +570,27 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             assert str(config["acting"]) in ("gpi", "distill"), "policy_index=reward acts by gpi (best-of-64 at w) or distill (the actor at w)"
             if str(config["acting"]) == "distill":
                 assert not bool(config.get("eval_redistill", True)), "policy_index=reward: the flowbc actor is not re-distilled; set eval_redistill=false"
+        # Density FB recipe seams (2026-11-03, docs/design/2026-11-03-psmgoal-dfb-recipe.md; all off by default)
+        goal_cur_obs_frac = float(config.get("goal_cur_obs_frac", 0.0))
+        assert 0.0 <= goal_cur_obs_frac < 1.0, "goal_cur_obs_frac must be in [0, 1)"
+        if goal_cur_obs_frac > 0.0:
+            assert policy_index == "reward", "goal_cur_obs_frac replaces reward-index measure goals: needs policy_index=reward"
+        if str(config.get("actor_kind", "tanh")) == "flowbc_vf":
+            assert policy_index == "reward", "actor_kind=flowbc_vf is the reward-index FlowBC actor: needs policy_index=reward"
+            assert str(config.get("reward_actor_reward", "latent_centered")) == "latent_centered", \
+                "actor_kind=flowbc_vf climbs the index's centred reward view: reward_actor_reward=latent_centered"
+        if bool(config.get("reward_q_center", False)):
+            assert str(config.get("actor_kind", "tanh")) == "flowbc_vf", "reward_q_center is wired for actor_kind=flowbc_vf"
+        index_pool_m = int(config.get("index_pool_m", 0))
+        assert index_pool_m >= 0, "index_pool_m must be >= 0"
+        if index_pool_m > 0:
+            assert policy_index == "reward", "index_pool_m > 0 stores the reward index's readout pool: needs policy_index=reward"
+            assert 1 < index_pool_m <= int(config["batch_size"]), "index_pool_m must be in (1, batch_size]"
+        if str(config.get("ridge_score", "goal")) == "pool_softmax":
+            assert index_pool_m > 0, "ridge_score=pool_softmax reads the frozen index pool: set index_pool_m > 0"
+        measure_ln = bool(config["measure"].get("layer_norm", False))
+        if measure_ln:
+            assert measure_form == "joint", "measure.layer_norm is wired for the joint basis only"
         norm_future_k = int(config.get("norm_future_k", 0))
         assert norm_future_k >= 0, "norm_future_k must be >= 0"
         if norm_future_k > 0:
@@ -456,8 +606,17 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             pool_indices = np.asarray(pool_indices, np.int64).reshape(-1)
             assert pool_obs.ndim == 2 and pool_obs.shape[0] == pool_indices.shape[0] == int(config["pool_size"]), \
                 f"pool_obs {pool_obs.shape} / pool_indices {pool_indices.shape} do not match pool_size={config['pool_size']}"
+        if measure_loss == "pool":
+            assert measure_form != "factorized", "measure_loss=pool is not wired with measure_form=factorized"
+        if measure_form == "factorized" and policy_index == "reward":
+            # the ridge index lives in R^z_dim and reads fb_feature = f(s+) in R^f_dim (see fb_feature)
+            assert int(config.get("f_dim", 128)) == int(config["z_dim"]), \
+                "measure_form=factorized with policy_index=reward: the index reads f(s+), so f_dim must equal z_dim"
         if measure_loss in ("softmax", "pool"):
-            assert measure_form != "factorized", "measure_loss=softmax is not wired with measure_form=factorized"
+            # measure_form=factorized (2026-11-06): the same cross-entropy on the same mesh, the logits
+            # M_ij = (A(s_i,u_i)^T f(g_j))^T w_i + beta(s_i,u_i)^T f(g_j) assembled by mesh_phi_b; f once
+            # per mesh state. f_ortho_coef is NOT added under the softmax (the loss equals the joint path's);
+            # f_ortho_loss is logged as a diagnostic only.
             assert float(config.get("ortho_coef", 0.0)) == 0.0, "measure_loss=softmax needs ortho_coef=0"
             assert int(config["batch_size"]) > int(config["k_goals"]), \
                 "measure_loss=softmax reads batch_size - k_goals reference columns at test time"
@@ -502,16 +661,62 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         ex_u = jnp.zeros((ex_observations.shape[0], action_dim))
         ex_z = jnp.zeros((ex_observations.shape[0], code_dim))
         ex_w = jnp.zeros((ex_observations.shape[0], z_dim))   # actor's z-input is the coefficient w (z_dim)
+        # goal_input=hit_blocks: every goal-taking net is built on the block slice of a goal state
+        goal_input = str(config.get("goal_input", "full"))
+        assert goal_input in GOAL_INPUTS, f"goal_input must be one of {GOAL_INPUTS}"
+        if goal_input == "hit_blocks":
+            for (a, b, _) in parse_hit_spec(config["fb_hit_spec"]):
+                assert 0 <= a < b <= int(ex_observations.shape[-1]), \
+                    f"goal_input=hit_blocks: fb_hit_spec block {a}:{b} is outside the {ex_observations.shape[-1]}-d observation"
+            ex_goal = goal_input_blocks(ex_observations, config["fb_hit_spec"])
+        else:
+            ex_goal = ex_observations
 
+        # critic_heads / critic_action_input (2026-11-02; default 1 / latent = the single basis on [s, u, s+]).
+        critic_heads = int(config.get("critic_heads", 1))
+        critic_action_input = str(config.get("critic_action_input", "latent"))
+        assert critic_heads >= 1, "critic_heads must be >= 1"
+        assert critic_action_input in CRITIC_ACTION_INPUTS, f"critic_action_input must be one of {CRITIC_ACTION_INPUTS}"
+        factorized_index_input = bool(config.get("factorized_index_input", False))
         if measure_form == "factorized":
-            basis_def = FactorizedMeasure(z_dim=z_dim, f_dim=int(config.get("f_dim", 128)),
-                                          hidden_dim=config["measure"]["hidden_dim"],
-                                          hidden_layers=config["measure"]["hidden_layers"])
+            assert critic_action_input == "latent", "measure_form=factorized: critic_action_input=latent"
+            if factorized_index_input:
+                # the (s,u) trunk reads w: only the per-row index paths are wired (training rows, the ridge
+                # readouts); per-column-w scorers (hgoal_each, reward_gpi, pool_reward, Lagrangian) are not
+                assert policy_index == "reward" and str(config.get("coef_source")) == "ridge", \
+                    "factorized_index_input needs policy_index=reward, coef_source=ridge"
+                assert str(config.get("ridge_score", "goal")) in ("goal", "pool_softmax"), \
+                    "factorized_index_input: ridge_score must be goal or pool_softmax"
+        else:
+            assert not factorized_index_input, "factorized_index_input needs measure_form=factorized"
+        if critic_heads > 1:
+            assert measure_loss != "pool", "critic_heads > 1 is not wired with measure_loss=pool"
+        if int(config.get("bootstrap_bon_n", 0)) > 0:
+            assert policy_index == "reward", "bootstrap_bon_n > 0 needs policy_index=reward (the reward readout)"
+        # latent_and_action: the basis's u slot is [u, G(s, u)], twice the latent width
+        ex_u_basis = jnp.concatenate([ex_u, ex_u], -1) if critic_action_input == "latent_and_action" else ex_u
+        ex_w_init = ()
+        if measure_form == "factorized":
+            fact_kw = {"z_dim": z_dim, "f_dim": int(config.get("f_dim", 128)),
+                       "hidden_dim": config["measure"]["hidden_dim"],
+                       "hidden_layers": config["measure"]["hidden_layers"],
+                       "index_dim": z_dim if factorized_index_input else 0}
+            # critic_heads > 1 (2026-11-16): independent factorised heads, params stacked on a leading
+            # axis like the joint ensemble; each head is applied alone through `_fact_apply`
+            basis_def = ensemblize(FactorizedMeasure, critic_heads)(**fact_kw) if critic_heads > 1 \
+                else FactorizedMeasure(**fact_kw)
+            if factorized_index_input:
+                ex_w_init = (jnp.zeros((ex_observations.shape[0], z_dim), jnp.float32),)
+        elif critic_heads > 1:
+            # independent heads, params stacked on a leading axis (Density FB `_ensemblize`)
+            basis_def = ensemblize(RLUMeasure, critic_heads)(
+                z_dim=z_dim, hidden_dim=config["measure"]["hidden_dim"],
+                hidden_layers=config["measure"]["hidden_layers"], trunk_layer_norm=measure_ln)
         else:
             basis_def = RLUMeasure(z_dim=z_dim, hidden_dim=config["measure"]["hidden_dim"],
-                                   hidden_layers=config["measure"]["hidden_layers"])
+                                   hidden_layers=config["measure"]["hidden_layers"], trunk_layer_norm=measure_ln)
         basis = TrainState.create(
-            basis_def, basis_def.init(r_b, ex_observations, ex_u, ex_observations)["params"],
+            basis_def, basis_def.init(r_b, ex_observations, ex_u_basis, ex_goal, *ex_w_init)["params"],
             tx=optax.adam(config["lr_measure"]))
         w_def = PolicyCoefficient(z_dim=z_dim, hidden_dim=config["w"]["hidden_dim"],
                                      hidden_layers=config["w"]["hidden_layers"])
@@ -520,13 +725,13 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         l_def = TripleMultiplier(hidden_dim=config["l"]["hidden_dim"],
                                     hidden_layers=config["l"]["hidden_layers"])
         l = TrainState.create(
-            l_def, l_def.init(r_l, ex_observations, ex_u, ex_observations)["params"],
+            l_def, l_def.init(r_l, ex_observations, ex_u, ex_goal)["params"],
             tx=optax.adam(config["lr_l"]))
         actor_def = TanhGaussianLatentActor(action_dim=action_dim,
                                             hidden_dim=config["actor"]["hidden_dim"],
                                             hidden_layers=config["actor"]["hidden_layers"])
         # actor_input=goal: the actor's second input is the raw goal state, not the coefficient.
-        ex_actor_in = ex_observations if actor_input == "goal" else ex_w
+        ex_actor_in = ex_goal if actor_input == "goal" else ex_w
         actor = TrainState.create(actor_def, actor_def.init(r_a, ex_observations, ex_actor_in)["params"],
                                   tx=optax.adam(config["lr_actor"]))
         # h(g): goal -> sqrt(D) sphere. Always built so a restore has the slot; trained only
@@ -535,7 +740,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         gc = config.get("w_star", {"hidden_dim": 256, "hidden_layers": 2})
         w_star_def = GoalCoefficient(z_dim=z_dim, hidden_dim=gc["hidden_dim"],
                                         hidden_layers=gc["hidden_layers"])
-        w_star = TrainState.create(w_star_def, w_star_def.init(r_g, ex_observations)["params"],
+        w_star = TrainState.create(w_star_def, w_star_def.init(r_g, ex_goal)["params"],
                                       tx=optax.adam(config.get("lr_goal", 1.0e-4)))
         # Joint actor heads (2026-10-05). Keyed off r_a by fold_in so the rng chain above is
         # unchanged (the default agent stays bit-identical). Always built so a restore has
@@ -543,7 +748,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         delta_def = LatentResidualActor(action_dim=action_dim, hidden_dim=config["actor"]["hidden_dim"],
                                         hidden_layers=config["actor"]["hidden_layers"])
         # policy_index=reward: delta's goal slot takes the index w (z_dim) instead of a goal state.
-        ex_delta_cond = ex_w if policy_index == "reward" else ex_observations
+        ex_delta_cond = ex_w if policy_index == "reward" else ex_goal
         ag_actor = bool(config.get("ag_actor", False))
         if ag_actor:
             # advantage-guided actor (2026-10-20, docs/design/2026-10-20-advantage-guided-actor.md): delta's goal
@@ -556,7 +761,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             assert str(config.get("bootstrap_switch", "none")) == "none" and float(config.get("bootstrap_delta_scale", 1.0)) == 1.0, \
                 "ag_actor: bootstrap_switch=none, bootstrap_delta_scale=1"
             assert int(config.get("ag_k", 64)) >= 2 and float(config.get("ag_delta_tau", 0.005)) > 0.0, "ag_actor: ag_k >= 2, ag_delta_tau > 0"
-            ex_delta_cond = jnp.concatenate([ex_observations, jnp.zeros((ex_observations.shape[0], 1), jnp.float32)], axis=-1)
+            ex_delta_cond = jnp.concatenate([ex_goal, jnp.zeros((ex_observations.shape[0], 1), jnp.float32)], axis=-1)
         delta = TrainState.create(
             delta_def, delta_def.init(jax.random.fold_in(r_a, 1), ex_observations, ex_delta_cond, ex_u)["params"],
             tx=optax.adam(config["lr_actor"]))
@@ -569,6 +774,26 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                     str(fpath), int(config.get("frozen_delta_epoch", 500000)), delta.params)
             else:   # tests/smokes only (allow_untrained_flow): start from delta's own init, replace() later
                 frozen_delta_params = copy.deepcopy(delta.params)
+        # bootstrap_source=student: load the distilled student and keep it fixed.
+        student_boot = None
+        if str(config.get("bootstrap_source", "actor")) == "student":
+            student_boot = _load_student_boot(config.get("student_path", None), int(ex_observations.shape[-1]), int(ex_u.shape[-1]), config)
+        # actor_kind=flowbc_vf (2026-11-03): Density FB's FlowBC actor on the latent, keyed by fold_in off r_a
+        # (the rng chain above is unchanged); built only under that actor kind.
+        fbc_actor = fbc_vf = None
+        if str(config.get("actor_kind", "tanh")) == "flowbc_vf":
+            fa = config["fbc_actor"]
+            fa_def = NoiseConditionedActor(action_dim=action_dim, hidden_dim=int(fa["hidden_dim"]),
+                                           hidden_layers=int(fa["hidden_layers"]),
+                                           embedding_layers=int(fa["embedding_layers"]))
+            fbc_actor = TrainState.create(
+                fa_def, fa_def.init(jax.random.fold_in(r_a, 4), ex_observations, ex_w, ex_u)["params"],
+                tx=optax.adam(float(fa["lr"])))
+            fv_def = FlowVectorField(action_dim=action_dim, hidden_dim=int(fa["flow_vf_hidden_dim"]),
+                                     hidden_layers=int(fa["flow_vf_hidden_layers"]))
+            fbc_vf = TrainState.create(
+                fv_def, fv_def.init(jax.random.fold_in(r_a, 5), ex_observations, ex_u, ex_u[..., :1])["params"],
+                tx=optax.adam(float(fa["lr_vf"])))
         dsrl = config.get("dsrl_actor", {"target_entropy": 0.0, "init_alpha": 1.0, "lr_alpha": 3.0e-4})
         log_alpha_def = LogAlpha(init_value=float(np.log(float(dsrl["init_alpha"]))))
         log_alpha = TrainState.create(log_alpha_def, log_alpha_def.init(jax.random.fold_in(r_a, 2))["params"],
@@ -627,6 +852,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                    eval_actor_goal=jnp.zeros((ob_dim,), jnp.float32),
                    eval_goal_w=jnp.zeros((int(config["k_goals"]), z_dim), jnp.float32),
                    delta=delta, log_alpha=log_alpha, frozen_delta_params=frozen_delta_params,
+                   student_boot=student_boot,
                    delta_target=copy.deepcopy(delta.params) if ag_actor else None,
                    eval_cand_w=jnp.zeros((int(config["k_goals"]), z_dim), jnp.float32),
                    eval_ref_reward=jnp.zeros((max(int(config["batch_size"]) - int(config["k_goals"]), 1),),
@@ -634,39 +860,129 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                    pool_states=pool_states, pool_indices=pool_rows, pool_scale=pool_scale,
                    eval_bank=jnp.zeros((int(config.get("pool_eval_size", 512)), ob_dim), jnp.float32),
                    eval_bank_r=jnp.zeros((int(config.get("pool_eval_size", 512)),), jnp.float32),
-                   eval_bank_w=jnp.ones((int(config.get("pool_eval_size", 512)),), jnp.float32))
+                   eval_bank_w=jnp.ones((int(config.get("pool_eval_size", 512)),), jnp.float32),
+                   fbc_actor=fbc_actor, fbc_vf=fbc_vf,
+                   index_pool=jnp.zeros((index_pool_m, ob_dim), jnp.float32) if index_pool_m > 0 else None,
+                   index_pool_filled=jnp.zeros((), jnp.float32) if index_pool_m > 0 else None,
+                   eval_pool_reward=jnp.zeros((index_pool_m,), jnp.float32) if index_pool_m > 0 else None)
+
+    # ------------------------------------------------------------------ goal input
+    def _goal_in(self, g):
+        """The goal argument every goal-taking net reads (phi, b, h, l, the goal-fed actor and delta).
+        goal_input=full: g itself (no op). hit_blocks: `goal_input_blocks` on fb_hit_spec. Callers keep
+        passing full states; the projection sits in the lowest-level wrappers below."""
+        if str(self.config.get("goal_input", "full")) == "hit_blocks":
+            return goal_input_blocks(g, self.config["fb_hit_spec"])
+        return g
+
+    def _critic_heads(self):
+        return int(self.config.get("critic_heads", 1))
+
+    def _critic_u(self, obs, u):
+        """The basis's u slot. critic_action_input=latent: u. latent_and_action: [u, G(s, u)], the
+        frozen flow's decode (`decode`, clipped to [-1, 1]) behind a stop_gradient, so no gradient
+        reaches u through the flow."""
+        if str(self.config.get("critic_action_input", "latent")) == "latent":
+            return u
+        a = jax.lax.stop_gradient(self.decode(obs, u))
+        return jnp.concatenate([u, a], -1)
+
+    def _basis_raw(self, obs, u_in, g, params=None, head=None):
+        """(phi, b) at an already-built u slot u_in (`_critic_u`). critic_heads > 1: head `head`
+        (None -> head 0) applied alone with its slice of the stacked params."""
+        if self._critic_heads() == 1:
+            return self.basis(obs, u_in, self._goal_in(g), params=params)
+        p = self.basis.params if params is None else params
+        k = 0 if head is None else int(head)
+        p_k = jax.tree_util.tree_map(lambda x: x[k], p)
+        one = RLUMeasure(z_dim=int(self.config["z_dim"]), hidden_dim=self.config["measure"]["hidden_dim"],
+                         hidden_layers=self.config["measure"]["hidden_layers"],
+                         trunk_layer_norm=bool(self.config["measure"].get("layer_norm", False)))
+        return one.apply({"params": p_k}, obs, u_in, self._goal_in(g))
+
+    def _basis_fwd(self, obs, u, g, params=None, head=None):
+        """phi(s,u,g), b(s,u,g) of the joint basis at full-state goals g (projected here).
+        critic_heads > 1: head `head` (None -> head 0; the scoring paths take the min over heads)."""
+        return self._basis_raw(obs, self._critic_u(obs, u), g, params=params, head=head)
+
+    def _fact_index_input(self):
+        return bool(self.config.get("factorized_index_input", False))
+
+    def _fact_apply(self, method, params, head, *args):
+        """measure_form=factorized: `method` of the factorised basis. critic_heads = 1: the module itself
+        (unchanged path). critic_heads > 1: head `head` (None -> 0) alone, on its slice of the stacked params."""
+        if self._critic_heads() == 1:
+            return self.basis(*args, params=params, method=method)
+        p = self.basis.params if params is None else params
+        k = 0 if head is None else int(head)
+        p_k = jax.tree_util.tree_map(lambda x: x[k], p)
+        one = FactorizedMeasure(z_dim=int(self.config["z_dim"]), f_dim=int(self.config.get("f_dim", 128)),
+                                hidden_dim=self.config["measure"]["hidden_dim"],
+                                hidden_layers=self.config["measure"]["hidden_layers"],
+                                index_dim=int(self.config["z_dim"]) if self._fact_index_input() else 0)
+        return one.apply({"params": p_k}, *args, method=method)
+
+    def _features_fwd(self, goals, params=None, head=None):
+        """measure_form=factorized: f(g) at full-state goals (projected here). critic_heads > 1: head `head`
+        (None -> 0; the index feature and the diagnostics read head 0)."""
+        return self._fact_apply("features", params, head, self._goal_in(goals))
+
+    def _h_fwd(self, goals, params=None):
+        """h(g) at full-state goals (projected here); params=None reads the stored head."""
+        return self.w_star(self._goal_in(goals), params=params)
+
+    def _l_fwd(self, obs, u, g, params=None):
+        """The multiplier l(s,u,g) at full-state goals (projected here)."""
+        return self.l(obs, u, self._goal_in(g), params=params)
+
+    def _actor_fwd(self, obs, x, params=None):
+        """The tanh-Gaussian actor at its second input x: the goal state under actor_input=goal (projected
+        here), the coefficient otherwise (passed through)."""
+        x = self._goal_in(x) if self._actor_takes_goal() else x
+        return self.actor(obs, x, params=params)
+
+    def _delta_cond(self, cond):
+        """delta's goal slot: the goal state (projected here) under policy_index=goal, the index w under
+        policy_index=reward (passed through)."""
+        return cond if self._reward_index() else self._goal_in(cond)
 
     # ------------------------------------------------------------------ the measure
-    def M(self, obs, u, g, w, params=None):
+    def M(self, obs, u, g, w, params=None, head=None):
         """M(s,u,g) = phi(s,u,g)^T w + b -> (B,). Single-point measure; the mesh_M reference
         used in tests. w is (B, z_dim) or (z_dim,)."""
-        phi, b = self.basis(obs, u, g, params=self.basis.params if params is None else params)
+        phi, b = self._basis_fwd(obs, u, g, params=params, head=head)
         return (phi * jnp.atleast_2d(w)).sum(-1) + b
 
-    def mesh_phi_b(self, obs, u, goals, params=None):
+    def mesh_phi_b(self, obs, u, goals, params=None, head=None, w_rows=None):
         """The state x goal mesh of the basis: phi_ij = phi(s_i,u_i,g_j) (N, G, z_dim) and
-        b_ij = b(s_i,u_i,g_j) (N, G). obs, u are (N, .) rows; goals (G, ob)."""
+        b_ij = b(s_i,u_i,g_j) (N, G). obs, u are (N, .) rows; goals (G, ob). w_rows (N, z_dim) is read
+        only under factorized_index_input (A, beta on [s, u, w]); phi^T w is still taken by the caller."""
         # all-pairs state x goal mesh (RLU discrete_psm.py:374-384): row i = (s_i,u_i), col j = g_j.
         if self._factorized():
             # phi_ij = A(s_i,u_i)^T f(g_j), b_ij = beta(s_i,u_i)^T f(g_j): A once per row.
             p = self.basis.params if params is None else params
-            A, beta = self.basis(obs, u, params=p, method="operators")       # (N, K, D), (N, K)
-            f = self.basis(goals, params=p, method="features")               # (G, K)
+            if self._fact_index_input():
+                assert w_rows is not None, "factorized_index_input: mesh_phi_b needs w_rows"
+                A, beta = self._fact_apply("operators", p, head, obs, u, w_rows)    # (N, K, D), (N, K)
+            else:
+                A, beta = self._fact_apply("operators", p, head, obs, u)            # (N, K, D), (N, K)
+            f = self._features_fwd(goals, params=p, head=head)                     # (G, K)
             return jnp.einsum('nkd,gk->ngd', A, f), jnp.einsum('nk,gk->ng', beta, f)
         N, G = obs.shape[0], goals.shape[0]
+        u = self._critic_u(obs, u)          # one decode per (s, u) row (latent_and_action), then broadcast
         obs_r = jnp.broadcast_to(obs[:, None], (N, G, obs.shape[-1])).reshape(N * G, -1)
         u_r = jnp.broadcast_to(u[:, None], (N, G, u.shape[-1])).reshape(N * G, -1)
         g_r = jnp.broadcast_to(goals[None], (N, G, goals.shape[-1])).reshape(N * G, -1)
-        # (phi, b) from the single-critic basis; params=None -> online params.
-        phi, b = self.basis(obs_r, u_r, g_r, params=self.basis.params if params is None else params)
+        # (phi, b) from the basis (head `head` under critic_heads > 1); params=None -> online params.
+        phi, b = self._basis_raw(obs_r, u_r, g_r, params=params, head=head)
         return phi.reshape(N, G, -1), b.reshape(N, G)
 
-    def mesh_M(self, obs, u, goals, w_rows, params=None):
+    def mesh_M(self, obs, u, goals, w_rows, params=None, head=None):
         """The state x goal mesh: M_ij = phi(s_i,u_i,g_j)^T w_i + b(s_i,u_i,g_j).
 
         obs, u are (N, .) rows; goals (G, ob); w_rows (N, z_dim). Returns (N, G).
         """
-        phi, b = self.mesh_phi_b(obs, u, goals, params=params)
+        phi, b = self.mesh_phi_b(obs, u, goals, params=params, head=head, w_rows=w_rows)
         return (phi * w_rows[:, None, :]).sum(-1) + b
 
     def _factorized(self):
@@ -717,7 +1033,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         at (s, g) standardises to c, so mu(., +1) - mu(., -1) is the latent direction from low- to
         high-scoring draws at the state (Advantage Guidance, Zhou & Levine 2026, in the start-noise
         parameterisation)."""
-        cond = jnp.concatenate([goals, jnp.asarray(c, jnp.float32)[:, None]], axis=-1)
+        cond = jnp.concatenate([self._goal_in(goals), jnp.asarray(c, jnp.float32)[:, None]], axis=-1)
         return self.delta(obs, cond, jnp.zeros_like(obs[:, : int(self.config["action_dim"])]),
                           params=self.delta.params if params is None else params)
 
@@ -762,7 +1078,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         eps = jax.random.normal(jax.random.fold_in(self.rng, AG_DRAW_KEY), (K, N, d))
         u_rows = jnp.clip(eps, -u_clip, u_clip)                                                 # (K, N, d)
         bp = jax.lax.stop_gradient(self.basis.params)
-        w_rows = jax.lax.stop_gradient(self.w_star(goals))                                     # (N, z)
+        w_rows = jax.lax.stop_gradient(self._h_fwd(goals))                                     # (N, z)
         q = jax.lax.map(lambda u_k: self.actor_value(obs, u_k, pool, goals, w_rows, bp), u_rows)  # (K, N)
         q = jax.lax.stop_gradient(q)
         mu_q, var_q = jnp.mean(q, axis=0, keepdims=True), jnp.var(q, axis=0, keepdims=True)
@@ -795,6 +1111,9 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
     def _frozen_delta_bootstrap(self):
         return str(self.config.get("bootstrap_source", "actor")) == "frozen_delta"
 
+    def _student_bootstrap(self):
+        return str(self.config.get("bootstrap_source", "actor")) == "student"
+
     def _bc_mean_bootstrap(self):
         return str(self.config.get("bootstrap_source", "actor")) == "bc_mean"
 
@@ -819,7 +1138,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         policy_index=bank: the one shared w (`bank_w`) broadcast to every row; z, goals unused.
         target=True reads the Polyak copy; otherwise `params` (None -> the online params)."""
         if self._goal_index():
-            return self.w_star(goals, params=self.target_w_star if target else params)
+            return self._h_fwd(goals, params=self.target_w_star if target else params)
         if self._bank_index():
             n = (z if z is not None else goals).shape[0]
             return jnp.broadcast_to(self.bank_w(params=params, target=target), (n, int(self.config["z_dim"])))
@@ -856,22 +1175,27 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             total = total + col_sum(goals[n_full * chunk:])
         return total / G
 
-    def _hgoal_each_score(self, obs, u, goals, goal_w, refs, params=None, chunk=None):
+    def _hgoal_each_score(self, obs, u, goals, goal_w, refs, params=None, chunk=None, head=None):
         """coef_source=hgoal_each: each goal scored with its own coefficient h(g_j), (N,).
         measure_loss=squared: mean_j M(s_i,u_i,g_j; h(g_j)).
         measure_loss=softmax: for each j the share of g_j among [g_j + refs] at w = h(g_j),
         exp(M_ij/t) / (exp(M_ij/t) + sum_r exp(M(s_i,u_i,ref_r; h(g_j))/t)), averaged over j.
         goal_w (G, z_dim) is h(g_j). Goals are scored `chunk` (GOAL_CHUNK) columns per network
-        call; phi, b at the reference columns are computed once."""
+        call; phi, b at the reference columns are computed once.
+        critic_heads > 1 (head=None): the elementwise min over the heads' scores."""
+        if self._critic_heads() > 1 and head is None:
+            return jnp.min(jnp.stack([self._hgoal_each_score(obs, u, goals, goal_w, refs, params=params,
+                                                             chunk=chunk, head=k)
+                                      for k in range(self._critic_heads())]), axis=0)
         chunk = GOAL_CHUNK if chunk is None else int(chunk)
         G = goals.shape[0]
         temp = float(self.config["measure_temp"])
         softmax = self._softmax()
         if softmax:
-            phi_r, b_r = self.mesh_phi_b(obs, u, refs, params=params)      # (N, R, z), (N, R)
+            phi_r, b_r = self.mesh_phi_b(obs, u, refs, params=params, head=head)      # (N, R, z), (N, R)
 
         def col_sum(g, hw):
-            phi_g, b_g = self.mesh_phi_b(obs, u, g, params=params)         # (N, C, z), (N, C)
+            phi_g, b_g = self.mesh_phi_b(obs, u, g, params=params, head=head)         # (N, C, z), (N, C)
             m_g = jnp.einsum('ncz,cz->nc', phi_g, hw) + b_g                # M(s_i,u_i,g_j; h_j)
             if not softmax:
                 return jnp.sum(m_g, axis=1)
@@ -963,7 +1287,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         the latent box. Used as the TD backup when train_actor (the FB idea: the bootstrap
         action is the actor's, not a fixed proto draw). Returns (N, d_a)."""
         u_clip = float(self.config["u_clip"])
-        mu, _ = self.actor(next_obs, w)
+        mu, _ = self._actor_fwd(next_obs, w)
         return jnp.clip(u_clip * jnp.tanh(mu), -u_clip, u_clip)
 
     def _select_u_next(self, batch, z):
@@ -978,7 +1302,14 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         if self._reward_index():
             # the flowbc actor at (s', w_i), w_i the row's index (batch['index_w'], `reward_index_rows`)
             next_obs = jnp.asarray(batch["next_observations"])
+            if int(c.get("bootstrap_bon_n", 0)) > 0:
+                # HQL-style (2026-11-16): the best of bootstrap_bon_n clipped prior draws at (s', w_i) under
+                # the critic's own reward readout, in place of the actor's draw
+                return self.bon_bootstrap(batch)[0]
             eps = jax.random.normal(jax.random.fold_in(self.rng, FLOWBC_BOOT_KEY), (next_obs.shape[0], int(c["action_dim"])))
+            if self._actor_kind() == "flowbc_vf":
+                # Density FB: the FlowBC one-step actor's draw at (s', w_value)
+                return jax.lax.stop_gradient(self.fbc_actor_u(next_obs, jnp.asarray(batch["index_w"]), eps))
             return jax.lax.stop_gradient(self.flowbc_latent(next_obs, jnp.asarray(batch["index_w"]), eps)[0])
         if self._bank_index():
             # the behaviour policy: one clipped prior draw at s', the same key stream as the flowbc bootstrap
@@ -994,6 +1325,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             return self.prior_draws(jnp.asarray(batch["next_observations"]).shape[0])
         if self._frozen_delta_bootstrap():
             return self.frozen_delta_bootstrap(batch)
+        if self._student_bootstrap():
+            return self.student_bootstrap(batch)
         if bool(c.get("train_actor", False)):
             next_obs = jnp.asarray(batch["next_observations"])
             goals = jnp.asarray(batch["goals"]) if self._goal_index() else None
@@ -1028,6 +1361,37 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         index = jnp.asarray(batch["index"]) if "index" in batch else jnp.arange(N)
         return self.proto_bootstrap(z, index)
 
+    def student_latent(self, obs, goals, eps=None):
+        """The loaded student at (s, g): mu (N, d) with eps=None, else mu + L eps. obs raw (N, ob),
+        goals raw goal states (N, ob) (the student's goal features are the goal state itself,
+        set_features=goal); both standardised with the student's own statistics; each goal is a
+        set of one."""
+        sb = self.student_boot
+        ob = sb["x_mean"].shape[0]
+        s = (obs[:, :ob] - sb["x_mean"]) / sb["x_std"]
+        g = ((goals[:, : sb["set_mean"].shape[0]] - sb["set_mean"]) / sb["set_std"])[:, None, :]
+        mu, raw = self._student_net().apply(sb["variables"], s, g)
+        if eps is None:
+            return mu
+        return mu + jnp.einsum("nij,nj->ni", student_tril(raw, mu.shape[-1]), eps)
+
+    def _student_net(self):
+        c = self.config
+        return GaussianLatentStudent(d=int(c["action_dim"]), hidden=int(c.get("student_hidden", 512)),
+                                     n_layers=int(c.get("student_layers", 2)))
+
+    def student_bootstrap(self, batch):
+        """bootstrap_source=student (2026-10-28): u'_i = clip(student(s'_i, g_i)); mode: the mean,
+        sample: mean + L eps with eps from the flowbc bootstrap's key stream. Stop-gradded."""
+        c = self.config
+        next_obs = jnp.asarray(batch["next_observations"])
+        goals = jnp.asarray(batch["goals"])
+        eps = None
+        if str(c.get("student_boot_mode", "mode")) == "sample":
+            eps = jax.random.normal(jax.random.fold_in(self.rng, FLOWBC_BOOT_KEY), (next_obs.shape[0], int(c["action_dim"])))
+        u = self.student_latent(next_obs, goals, eps)
+        return jax.lax.stop_gradient(jnp.clip(u, -float(c["u_clip"]), float(c["u_clip"])))
+
     def frozen_delta_bootstrap(self, batch):
         """bootstrap_source=frozen_delta (2026-10-17). eps ~ N(0, I) from the same key stream as the
         flowbc actor bootstrap (so mode=plus with the live params would be bit-identical to it);
@@ -1041,7 +1405,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         goals = jnp.asarray(batch["goals"])
         N, d_a = next_obs.shape[0], int(c["action_dim"])
         eps = jax.random.normal(jax.random.fold_in(self.rng, FLOWBC_BOOT_KEY), (N, d_a))
-        d = self.delta(next_obs, goals, eps, params=self.frozen_delta_params)
+        d = self.delta(next_obs, self._delta_cond(goals), eps, params=self.frozen_delta_params)
         mode = str(c.get("frozen_delta_mode", "plus"))
         if mode == "plus":
             step = d
@@ -1071,16 +1435,44 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         eps = self.prior_draws(N)
         w_t = self._coef(None, goals, target=True)                               # (N, z)
 
-        def score(u):
-            m_g = self.M(next_obs, u, goals, w_t, params=self.target_basis)       # (N,)
+        def score_head(u, head):
+            m_g = self.M(next_obs, u, goals, w_t, params=self.target_basis, head=head)       # (N,)
             if not self._softmax():
                 return m_g
-            M = self.mesh_M(next_obs, u, next_obs, w_t, params=self.target_basis)  # (N, N)
+            M = self.mesh_M(next_obs, u, next_obs, w_t, params=self.target_basis, head=head)  # (N, N)
             lse = jax.nn.logsumexp(jnp.concatenate([m_g[:, None], M], axis=1) / temp, axis=1)
             return jnp.exp(m_g / temp - lse)
 
+        def score(u):
+            # critic_heads > 1: the min over the heads' target scores
+            if self._critic_heads() == 1:
+                return score_head(u, None)
+            return jnp.min(jnp.stack([score_head(u, k) for k in range(self._critic_heads())]), axis=0)
+
         scores = jax.lax.map(score, eps)                                          # (n, N)
         best = jnp.argmax(scores, axis=0)                                         # (N,)
+        u_next = eps[best, jnp.arange(N)]
+        return jax.lax.stop_gradient(u_next), jax.lax.stop_gradient(scores)
+
+    def bon_bootstrap(self, batch):
+        """bootstrap_bon_n > 0 (2026-11-16, HQL: ryanxhr.github.io/hql), policy_index=reward: u+ is the best
+        of n = bootstrap_bon_n clipped prior draws at s' under the critic's OWN reward readout
+        `reward_softmax_q` (the value the actor climbs: Q = sum_j softmax_j(M(s', u, y_j; w_i)/temp) r_j,
+        min over heads) at the row's index w_i (batch['index_w']), the batch's next states as the pool
+        y_j and r_j = (f(y_j) - mu)^T w_i / sqrt(D) from batch['index_f']. The scores are read at the TARGET
+        basis params, the params the measure target M_bar(s', u+, .) is read at. Draws from the BON_BOOT_KEY
+        stream, scored one at a time (lax.map). Returns (u+ (N, d), scores (n, N)), stop-gradded."""
+        c = self.config
+        n, d, u_clip = int(c["bootstrap_bon_n"]), int(c["action_dim"]), float(c["u_clip"])
+        next_obs = jnp.asarray(batch["next_observations"])
+        w_rows = jax.lax.stop_gradient(jnp.asarray(batch["index_w"]))                            # (N, z)
+        f_centered = jax.lax.stop_gradient(jnp.asarray(batch["index_f"]) - self.fb_mu[None])    # (P, D)
+        N = next_obs.shape[0]
+        eps = jax.random.normal(jax.random.fold_in(self.rng, BON_BOOT_KEY), (n, N, d))
+        eps = jnp.clip(eps, -u_clip, u_clip)                                                     # (n, N, d)
+        tp = jax.lax.stop_gradient(self.target_basis)
+        scores = jax.lax.map(lambda u: self.reward_softmax_q(next_obs, u, next_obs, w_rows, f_centered, tp)[0], eps)
+        best = jnp.argmax(scores, axis=0)                                                        # (N,)
         u_next = eps[best, jnp.arange(N)]
         return jax.lax.stop_gradient(u_next), jax.lax.stop_gradient(scores)
 
@@ -1092,13 +1484,13 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         eps = jax.random.normal(jax.random.fold_in(self.rng, ARGMAX_BOOT_KEY), (n, N, d))
         return jax.lax.stop_gradient(jnp.clip(eps, -u_clip, u_clip))
 
-    def bc_mean_target(self, next_obs, eps, goals, w_t):
+    def bc_mean_target(self, next_obs, eps, goals, w_t, head=None):
         """bootstrap_source=bc_mean: the target measure at s' averaged over the BC draws eps
         (n, N, d), as (N, N) target logits. Squared loss: mean_n M_bar(s', u_n, s+). Softmax loss:
         temp * log mean_n softmax_j(M_bar_n / temp), so softmax_j(target / temp) is the mean of the
         draws' softmax rows (the successor measure of the BC policy at s'), not the softmax of the
         mean logit. n = 1 returns the single draw's target up to a per-row shift."""
-        Ms = jax.lax.map(lambda u: self.mesh_M(next_obs, u, goals, w_t, params=self.target_basis), eps)
+        Ms = jax.lax.map(lambda u: self.mesh_M(next_obs, u, goals, w_t, params=self.target_basis, head=head), eps)
         if not self._softmax():
             return Ms.mean(0)
         temp = float(self.config["measure_temp"])
@@ -1107,6 +1499,18 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
 
     # ------------------------------------------------------------------ basis loss
     def measure_loss(self, basis_params, w_params, batch, z, u_next):
+        """The measure loss. critic_heads = 1: `_measure_loss_head`. critic_heads > 1: the sum of the
+        heads' losses, each with its own logits and its own target net (Density FB's stage_loss); info
+        is head 0's with psm_loss replaced by the sum and psm_loss_h{k} per head."""
+        H = self._critic_heads()
+        if H == 1:
+            return self._measure_loss_head(basis_params, w_params, batch, z, u_next)
+        parts = [self._measure_loss_head(basis_params, w_params, batch, z, u_next, head=k) for k in range(H)]
+        loss = sum(p[0] for p in parts)
+        info = {**parts[0][1], "psm_loss": loss, **{f"psm_loss_h{k}": p[0] for k, p in enumerate(parts)}}
+        return loss, info
+
+    def _measure_loss_head(self, basis_params, w_params, batch, z, u_next, head=None):
         """RLU `update_psm`: squared TD on the off-diagonal of the state x goal mesh plus a
         `-(1-gamma)` diagonal pull. Gradient reaches phi, b (basis) and w (w).
 
@@ -1142,12 +1546,12 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         else:
             w = self._coef(z, row_goals, params=w_params)            # (N, z), online
             w_t = self._coef(z, row_goals, target=True)              # (N, z), target
-        phi, b = self.mesh_phi_b(obs, u, goals, params=basis_params)             # (N, S, z), (N, S)
+        phi, b = self.mesh_phi_b(obs, u, goals, params=basis_params, head=head, w_rows=w)  # (N, S, z), (N, S)
         M = (phi * w[:, None, :]).sum(-1) + b                                     # (N, S); S = N unless norm_future_k
         if u_next.ndim == 3:                                     # bootstrap_source=bc_mean
-            M_bar = self.bc_mean_target(next_obs, u_next, goals, w_t)
+            M_bar = self.bc_mean_target(next_obs, u_next, goals, w_t, head=head)
         else:
-            M_bar = self.mesh_M(next_obs, u_next, goals, w_t, params=self.target_basis)
+            M_bar = self.mesh_M(next_obs, u_next, goals, w_t, params=self.target_basis, head=head)
         target_M = jax.lax.stop_gradient(M_bar)
         if self._pool():
             return self._pool_measure_loss(M, target_M, phi, w, anchor, obs, basis_params)
@@ -1155,6 +1559,9 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             loss, info = self._softmax_measure_loss(M, target_M, phi, w)
             if self._reward_index():
                 info = {**info, **self.reward_index_info(batch, w)}
+            if self._factorized():
+                # diagnostic only: f's Gram over the mesh states; f_ortho_coef does not enter the softmax loss
+                info = {**info, "f_ortho_loss": f_ortho_loss(self._features_fwd(goals, params=basis_params))}
             return loss, info
         # Successor-measure Bellman fit (PSM Eq. 2 + Cor. 4.2, arXiv 2411.19418 v2; RLU
         # discrete_psm.py:427-434): off-diagonal = squared TD to gamma*target; diagonal =
@@ -1177,7 +1584,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         if self._factorized():
             # f orthogonality over the batch's s+ pool: ||E[f f^T] - I||_F^2 (f on the
             # sqrt(f_dim) sphere, so tr E[f f^T] = f_dim = tr I).
-            f_ortho = f_ortho_loss(self.basis(goals, params=basis_params, method="features"))
+            f_ortho = f_ortho_loss(self._features_fwd(goals, params=basis_params))
             loss = loss + float(c.get("f_ortho_coef", 1.0)) * f_ortho
             f_info = {"f_ortho_loss": f_ortho, "psm_loss": loss}
         info = {"psm_loss": loss, "psm_offdiag": off_diag, "psm_diag": diag,
@@ -1288,7 +1695,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         goals = jnp.asarray(batch["goals"])                    # (N, ob) hindsight goal per row
         next_obs = jnp.asarray(batch["next_observations"])
         bp = jax.lax.stop_gradient(self.basis.params)
-        w_g = self.w_star(goals, params=w_star_params)   # (N, z), grad to h only
+        w_g = self._h_fwd(goals, params=w_star_params)   # (N, z), grad to h only
         obj = jnp.mean(self.M(obs, u, goals, w_g, params=bp))  # value at own goal
         cons = self.mesh_M(obs, u, next_obs[perm], w_g, params=bp)   # (N, N) M at off-goals
         pen = jnp.mean(jax.nn.relu(-cons))                     # hinge on non-negativity
@@ -1337,14 +1744,14 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             temp = float(c["actor_temp"])
             q_coeff, bc_coeff = float(c.get("q_coeff", 1.0)), float(c.get("bc_coeff", 0.0))
             bp = jax.lax.stop_gradient(self.basis.params)
-            mu, log_std = self.actor(obs, w_rows, params=actor_params)
+            mu, log_std = self._actor_fwd(obs, w_rows, params=actor_params)
             u, logp = tanh_gaussian_sample(mu, log_std, noise, scale)
             q = jnp.mean(self.mesh_M(obs, u, goals, w_rows, params=bp), axis=1)     # (N,) mean over goals
             qscale = jax.lax.stop_gradient(jnp.abs(q).mean() + 1e-8)
             loss = q_coeff * (-jnp.mean(q) / qscale) + temp * jnp.mean(logp) + bc_coeff * jnp.mean(u ** 2)
             return loss, {"actor_q": jnp.mean(q), "actor_logp": jnp.mean(logp),
                           "actor_u_absmean": jnp.mean(jnp.abs(u))}
-        mu, log_std = self.actor(obs, w_rows, params=actor_params)
+        mu, log_std = self._actor_fwd(obs, w_rows, params=actor_params)
         logpi = tanh_gaussian_logprob(mu, log_std, u_data, scale)                   # (N,)
         if objective == "bc":
             loss = -jnp.mean(logpi)
@@ -1361,11 +1768,19 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
     def fb_feature(self, states, params, anchors):
         """f(s+) = psm_norm(mean_{u in U} mean_{a in anchors} phi(s+, u, a)): the goal- and
         action-marginalized projected phi (PsmgoalProjectedPhi), read at `params` (the slow
-        EMA basis). U = fb_k_u fixed clipped prior latents from fb_proj_seed. (n, ob) -> (n, D)."""
+        EMA basis). U = fb_k_u fixed clipped prior latents from fb_proj_seed. (n, ob) -> (n, D).
+
+        measure_form=factorized (2026-11-06): f(s+) is the factored basis's own goal feature f (the
+        side of M that reads the next state; on the sqrt(f_dim) sphere, f_dim = z_dim asserted in
+        create), at `params`. U and the anchors are unused: the joint recipe's projection would put the
+        next state in the A(s+, u) slot, not in the slot the measure reads it from, and would build one
+        (f_dim x z_dim) operator per (state, u, anchor) triple."""
         from agents.f_psmflow import _sample_projection_u
         from utils.psm_networks import psm_norm
 
         c = self.config
+        if self._factorized():
+            return self._features_fwd(states, params=params)
         U = _sample_projection_u(int(c["fb_proj_seed"]), int(c["fb_k_u"]),
                                  int(c["action_dim"]), float(c["u_clip"]))
         n, d = states.shape
@@ -1373,7 +1788,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         o = jnp.broadcast_to(states[:, None, None, :], (n, ku, kg, d)).reshape(n * ku * kg, d)
         u = jnp.broadcast_to(U[None, :, None, :], (n, ku, kg, U.shape[-1])).reshape(n * ku * kg, -1)
         g = jnp.broadcast_to(anchors[None, None], (n, ku, kg, anchors.shape[-1])).reshape(n * ku * kg, -1)
-        phi, _ = self.basis(o, u, g, params=params)
+        phi, _ = self._basis_fwd(o, u, g, params=params)
         return psm_norm(phi.reshape(n, ku, kg, -1).mean(axis=(1, 2)))
 
     def fb_task_fit(self, f_pool, rewards):
@@ -1411,7 +1826,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         c = self.config
         scale = float(c["u_clip"])
         bp = jax.lax.stop_gradient(self.basis.params)
-        mu, log_std = self.actor(obs, w_task, params=actor_params)
+        mu, log_std = self._actor_fwd(obs, w_task, params=actor_params)
         u, logp = tanh_gaussian_sample(mu, log_std, noise, scale)
         M = self.mesh_M(obs, u, pool, w_task, params=bp)                          # (N, P)
         r = jax.lax.stop_gradient(w_task @ f_centered.T / jnp.sqrt(float(c["z_dim"])))  # (N, P)
@@ -1477,12 +1892,22 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         assert pool.shape[0] >= k_anchor, "batch must hold at least fb_k_anchor next states"
         anchors = jnp.where(self.fb_filled > 0.5, self.fb_anchor, pool[:k_anchor])
         f_pool = jax.lax.stop_gradient(self.fb_feature(pool, self.fb_zenc, anchors))          # (P, D)
-        w_m, h_m = self.fb_sample_tasks(f_pool, jnp.asarray(batch["goals"]), pool,
+        goals = jnp.asarray(batch["goals"])
+        extra = {}
+        p_cur = float(self.config.get("goal_cur_obs_frac", 0.0))
+        if p_cur > 0.0:
+            # Density FB value goals (GCDataset value_p_curgoal): a p_cur share of rows takes the row's own
+            # observation obs[idx] as its measure goal; the dataset served the trajectory / random mix.
+            obs = jnp.asarray(batch["observations"])
+            is_cur = jax.random.uniform(jax.random.fold_in(self.rng, DFB_CUR_GOAL_KEY), (obs.shape[0], 1)) < p_cur
+            goals = jnp.where(is_cur, obs, goals)
+            extra = {"goals": goals, "index_cur_goal": is_cur.astype(jnp.float32)}
+        w_m, h_m = self.fb_sample_tasks(f_pool, goals, pool,
                                         jax.random.fold_in(self.rng, REWARD_INDEX_KEY))
         w_a, h_a = self.fb_sample_tasks(f_pool, jnp.asarray(batch["fb_goals"]), pool,
                                         jax.random.fold_in(self.rng, REWARD_ACTOR_KEY))
         return {"index_w": w_m, "index_w_actor": w_a, "index_f": f_pool, "index_anchor": anchors,
-                "index_hindsight": h_m, "index_hindsight_actor": h_a}
+                "index_hindsight": h_m, "index_hindsight_actor": h_a, **extra}
 
     def reward_index_info(self, batch, w):
         """Training-log diagnostics of the reward index (docs/design/2026-10-19-reward-index.md):
@@ -1559,6 +1984,14 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         (_, info), g_d = jax.value_and_grad(self.actor_loss_flowbc_reward, has_aux=True)(
             self.delta.params, obs, pool, w_a, r, eps, u_data)
         delta = self.delta.apply_gradients(grads=g_d)
+        upd = {"delta": delta, **self.index_state_update(f_pool, anchors)}
+        return upd, {**info, "index_hindsight_frac_actor": jnp.mean(jnp.asarray(batch["index_hindsight_actor"]))}
+
+    def index_state_update(self, f_pool, anchors):
+        """The reward index's state after one update (Density FB update_stats order): the slow tower fb_zenc
+        EMAs toward the PRE-step basis self.basis.params at fb_enc_tau; mu, C EMA at fb_sigma_tau from f_pool,
+        the batch's next states' f at the OLD tower; the anchors are kept. Returns the field updates."""
+        c = self.config
         tz, ts = float(c["fb_enc_tau"]), float(c["fb_sigma_tau"])
         zenc = jax.tree_util.tree_map(lambda p, e: p * tz + e * (1.0 - tz), self.basis.params, self.fb_zenc)
         mu_b = jnp.mean(f_pool, axis=0)
@@ -1567,8 +2000,99 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         mu = self.fb_mu * (1.0 - ts) + mu_b * ts
         cov = self.fb_cov * (1.0 - ts) + cov_b * ts
         cov = 0.5 * (cov + cov.T)
-        upd = {"delta": delta, "fb_zenc": zenc, "fb_mu": mu, "fb_cov": cov, "fb_anchor": anchors,
-               "fb_filled": jnp.ones_like(self.fb_filled)}
+        return {"fb_zenc": zenc, "fb_mu": mu, "fb_cov": cov, "fb_anchor": anchors,
+                "fb_filled": jnp.ones_like(self.fb_filled)}
+
+    # ----------------------------------------------- Density FB recipe (2026-11-03): readout and FlowBC actor
+    def reward_softmax_q(self, obs, u, pool, w_rows, f_centered, basis_params):
+        """Density FB's actor value (Factored-FB density_fb.py q_fn, actor_value=softmax,
+        z_actor_reward=latent_centered) on the joint critic: per head h,
+        Q_h = sum_j softmax_j(M_h(s, u, y_j; w)/measure_temp) r_j, r_j = (f(y_j) - mu)^T w / sqrt(D),
+        f_centered (P, D) = f(y) - mu at the slow tower (stop-gradded). Returns (min over heads (N,),
+        per-head values (H, N)). basis_params are used as given (callers stop-grad them)."""
+        c = self.config
+        temp = float(c["measure_temp"])
+        r = jax.lax.stop_gradient(w_rows @ f_centered.T / jnp.sqrt(float(c["z_dim"])))          # (N, P)
+        H = self._critic_heads()
+        qs = []
+        for h in range(H):
+            M = self.mesh_M(obs, u, pool, w_rows, params=basis_params, head=None if H == 1 else h)
+            qs.append(jnp.sum(jax.nn.softmax(M / temp, axis=1) * r, axis=1))
+        q_heads = jnp.stack(qs)                                                                  # (H, N)
+        return jnp.min(q_heads, axis=0), q_heads
+
+    def fbc_actor_u(self, obs, w, noise, params=None):
+        """actor_kind=flowbc_vf: the one-step FlowBC actor on the latent, u = u_clip * tanh(actor(s, w, noise))."""
+        p = self.fbc_actor.params if params is None else params
+        return float(self.config["u_clip"]) * self.fbc_actor(obs, w, noise, params=p)
+
+    def fbc_rollout(self, vf_params, obs, noise):
+        """FlowBC's own flow over u from `noise` (flow_steps Euler steps), clipped at +-u_clip: the target the
+        one-step actor is distilled toward (Factored-FB flowbc.py `compute_flow_actions`)."""
+        steps = int(self.config["fbc_actor"]["flow_steps"])
+        a = noise
+        for i in range(steps):
+            t = jnp.full((obs.shape[0], 1), i / steps)
+            a = a + self.fbc_vf(obs, a, t, params=vf_params) / steps
+        u_clip = float(self.config["u_clip"])
+        return jnp.clip(a, -u_clip, u_clip)
+
+    def actor_loss_fbc_vf(self, actor_params, vf_params, basis_params, obs, pool, w_rows, f_centered, u_data, inj):
+        """Factored-FB flowbc.py `loss` on the latent: flow matching of the actor's flow toward the clipped
+        preimage u_data, -q_coeff Q / sg(max(mean|Qs|, 1e-6)) + bc_coeff ||u - sg(rollout)||^2, Q from
+        `reward_softmax_q` (min over heads) at the stop-gradded basis; Qs = Q - mean Q under reward_q_center
+        (the centring enters the normaliser only), else the per-head values."""
+        c = self.config
+        fa = c["fbc_actor"]
+        q_coeff, bc_coeff = float(fa["q_coeff"]), float(fa["bc_coeff"])
+        x0, t, noise = inj["x0"], inj["t"], inj["noise"]
+        xt = (1 - t) * x0 + t * u_data
+        bc_flow = jnp.mean((self.fbc_vf(obs, xt, t, params=vf_params) - (u_data - x0)) ** 2)
+        u = self.fbc_actor_u(obs, w_rows, noise, params=actor_params)
+        q, q_heads = self.reward_softmax_q(obs, u, pool, w_rows, f_centered, jax.lax.stop_gradient(basis_params))
+        qs = (q - q.mean())[None] if bool(c.get("reward_q_center", False)) else q_heads
+        loss = -q_coeff * q.mean()
+        info = {"actor_q": q.mean(), "actor_bc_flow": bc_flow,
+                "actor_u_data_gap": jnp.mean((jax.lax.stop_gradient(u) - u_data) ** 2),
+                "actor_u_absmean": jnp.mean(jnp.abs(u))}
+        if bc_coeff > 0:
+            tgt = jax.lax.stop_gradient(self.fbc_rollout(vf_params, obs, noise))
+            distill = jnp.mean((u - tgt) ** 2)
+            if q_coeff == 0.0:
+                loss = bc_coeff * distill
+            else:
+                q_scale = jax.lax.stop_gradient(jnp.maximum(jnp.abs(qs).mean(), 1e-6))
+                loss = loss / q_scale + bc_coeff * distill
+                info["actor_q_absmean"] = q_scale
+            info["actor_bc_err"] = distill
+        loss = loss + bc_flow
+        info["actor_loss"] = loss
+        return loss, info
+
+    def fbc_actor_step(self, batch, basis_params):
+        """actor_kind=flowbc_vf: one FlowBC step at the actor index rows batch['index_w_actor'] against the
+        critic AFTER this update's step (`basis_params`, Density FB's order), then the index-state update and,
+        once, the frozen readout pool (the first update's first index_pool_m next states)."""
+        c = self.config
+        obs = jnp.asarray(batch["observations"])
+        pool = jnp.asarray(batch["next_observations"])
+        w_a = jnp.asarray(batch["index_w_actor"])
+        f_pool = jnp.asarray(batch["index_f"])
+        anchors = jnp.asarray(batch["index_anchor"])
+        f_centered = f_pool - self.fb_mu[None]
+        n, d_u = obs.shape[0], int(c["action_dim"])
+        k_x0, k_t, k_n = jax.random.split(jax.random.fold_in(self.rng, FBC_ACTOR_KEY), 3)
+        inj = {"x0": jax.random.normal(k_x0, (n, d_u)), "t": jax.random.uniform(k_t, (n, 1)),
+               "noise": jax.random.normal(k_n, (n, d_u))}
+        u_data = jnp.clip(jnp.asarray(batch["noise_preimage"]), -c["u_clip"], c["u_clip"])
+        (_, info), (g_a, g_v) = jax.value_and_grad(self.actor_loss_fbc_vf, argnums=(0, 1), has_aux=True)(
+            self.fbc_actor.params, self.fbc_vf.params, basis_params, obs, pool, w_a, f_centered, u_data, inj)
+        upd = {"fbc_actor": self.fbc_actor.apply_gradients(grads=g_a),
+               "fbc_vf": self.fbc_vf.apply_gradients(grads=g_v), **self.index_state_update(f_pool, anchors)}
+        if self.index_pool is not None:
+            m = self.index_pool.shape[0]
+            upd["index_pool"] = jnp.where(self.index_pool_filled > 0.5, self.index_pool, pool[:m])
+            upd["index_pool_filled"] = jnp.ones_like(self.index_pool_filled)
         return upd, {**info, "index_hindsight_frac_actor": jnp.mean(jnp.asarray(batch["index_hindsight_actor"]))}
 
     # ----------------------------------------------- goal-conditioned actor (policy_index=goal)
@@ -1584,8 +2108,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         c = self.config
         scale = float(c["u_clip"])
         bp = jax.lax.stop_gradient(self.basis.params)
-        w_rows = jax.lax.stop_gradient(self.w_star(goals))                        # (N, z) h(g_i)
-        mu, log_std = self.actor(obs, goals if self._actor_takes_goal() else w_rows,
+        w_rows = jax.lax.stop_gradient(self._h_fwd(goals))                        # (N, z) h(g_i)
+        mu, log_std = self._actor_fwd(obs, goals if self._actor_takes_goal() else w_rows,
                                  params=actor_params)
         u, logp = tanh_gaussian_sample(mu, log_std, noise, scale)
         q, v_info = self.actor_value(obs, u, pool, goals, w_rows, bp, with_info=True)
@@ -1598,7 +2122,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                       "actor_u_absmean": jnp.mean(jnp.abs(u)), **v_info}
 
     # ------------------------------------------------- joint actor heads (2026-10-05)
-    def actor_value(self, obs, u, pool, goals, w_rows, basis_params, with_info=False):
+    def actor_value(self, obs, u, pool, goals, w_rows, basis_params, with_info=False, head=None):
         """The value the goal actor climbs, (N,). Rows (s_i, u_i) at w_i = h(g_i), g_i the
         actor goal, pool the batch's next states s+_j.
         actor_value_kind=shaped: Q_i = sum_j p_ij k(g_i, s+_j), p = softmax_j(M_ij/measure_temp)
@@ -1606,12 +2130,18 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         actor_value_kind=point: softmax loss: the share of g_i among [g_i + pool],
           exp(M_ig/t) / (exp(M_ig/t) + sum_j exp(M_ij/t)); squared loss: M(s_i,u_i,g_i).
         with_info=True also returns the softmax weight on the row's own next state
-        (column i of the pool) and the mesh statistics."""
+        (column i of the pool) and the mesh statistics.
+        critic_heads > 1 (head=None): the elementwise min over the heads' values; info is head 0's."""
+        if self._critic_heads() > 1 and head is None:
+            outs = [self.actor_value(obs, u, pool, goals, w_rows, basis_params, with_info=True, head=k)
+                    for k in range(self._critic_heads())]
+            q = jnp.min(jnp.stack([o[0] for o in outs]), axis=0)
+            return (q, outs[0][1]) if with_info else q
         c = self.config
         temp = float(c["measure_temp"])
-        M = self.mesh_M(obs, u, pool, w_rows, params=basis_params)                 # (N, P)
+        M = self.mesh_M(obs, u, pool, w_rows, params=basis_params, head=head)                 # (N, P)
         if self._point_value():
-            m_g = self.M(obs, u, goals, w_rows, params=basis_params)                # (N,)
+            m_g = self.M(obs, u, goals, w_rows, params=basis_params, head=head)                # (N,)
             if self._softmax():
                 lse = jax.nn.logsumexp(jnp.concatenate([m_g[:, None], M], axis=1) / temp, axis=1)
                 q = jnp.exp(m_g / temp - lse)
@@ -1634,7 +2164,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
     def flowbc_latent(self, obs, goals, eps, params=None):
         """actor_kind=flowbc: u = clip(eps + delta(s, g, eps), +-u_clip). Returns (u, delta)."""
         u_clip = float(self.config["u_clip"])
-        d = self.delta(obs, goals, eps, params=self.delta.params if params is None else params)
+        d = self.delta(obs, self._delta_cond(goals), eps, params=self.delta.params if params is None else params)
         return jnp.clip(eps + d, -u_clip, u_clip), d
 
     def actor_loss_flowbc(self, delta_params, obs, pool, goals, eps, u_data):
@@ -1645,7 +2175,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         phi, b and h are stop-gradded; only delta moves. u_data is read for logging only."""
         c = self.config
         bp = jax.lax.stop_gradient(self.basis.params)
-        w_rows = jax.lax.stop_gradient(self.w_star(goals))                        # (N, z) h(g_i)
+        w_rows = jax.lax.stop_gradient(self._h_fwd(goals))                        # (N, z) h(g_i)
         u, d = self.flowbc_latent(obs, goals, eps, params=delta_params)
         q, v_info = self.actor_value(obs, u, pool, goals, w_rows, bp, with_info=True)
         qscale = jax.lax.stop_gradient(jnp.maximum(jnp.abs(q).mean(), 1e-6))
@@ -1663,8 +2193,8 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         dsrl_actor.target_entropy). No BC term. phi, b and h are stop-gradded."""
         c = self.config
         bp = jax.lax.stop_gradient(self.basis.params)
-        w_rows = jax.lax.stop_gradient(self.w_star(goals))
-        mu, log_std = self.actor(obs, goals, params=actor_params)
+        w_rows = jax.lax.stop_gradient(self._h_fwd(goals))
+        mu, log_std = self._actor_fwd(obs, goals, params=actor_params)
         u, logp = tanh_gaussian_sample(mu, log_std, noise, float(c["u_clip"]))
         q, v_info = self.actor_value(obs, u, pool, goals, w_rows, bp, with_info=True)
         qscale = jax.lax.stop_gradient(jnp.maximum(jnp.abs(q).mean(), 1e-6))
@@ -1678,7 +2208,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         """SAC's entropy-coefficient loss, -log_alpha * sg(logp + target_entropy), mean over
         rows; DSRL's target_ent = 0 in the squashed, unscaled space of `tanh_gaussian_sample`."""
         c = self.config
-        mu, log_std = self.actor(obs, goals)
+        mu, log_std = self._actor_fwd(obs, goals)
         _, logp = tanh_gaussian_sample(mu, log_std, noise, float(c["u_clip"]))
         la = self.log_alpha(params=alpha_params)
         target = float(c["dsrl_actor"]["target_entropy"])
@@ -1751,6 +2281,11 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             # actor_kind=flowbc moves `delta`, dsrl moves `actor` and `log_alpha`.
             upd, a_info = self.ag_actor_step(batch) if self._ag() else self.goal_actor_step(batch)
             actor = upd.pop("actor", self.actor)
+            fb_state = upd
+            info = {**info, **a_info}
+        elif self._reward_index() and bool(c.get("train_actor", False)) and self._actor_kind() == "flowbc_vf":
+            # Density FB recipe: the FlowBC actor against the stepped critic, plus the index-state update.
+            upd, a_info = self.fbc_actor_step(batch, basis.params)
             fb_state = upd
             info = {**info, **a_info}
         elif self._reward_index() and bool(c.get("train_actor", False)):
@@ -1833,7 +2368,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         obs_p, u_p = obs[perm], u[perm]
         # constraint value per (permuted sample, goal): phi.w + b, averaged over goals
         cons = self.mesh_M(obs_p, u_p, goals, jnp.broadcast_to(w, (obs_p.shape[0], w.shape[0])), params=bp)
-        l = self.l(
+        l = self._l_fwd(
             jnp.repeat(obs_p, goals.shape[0], axis=0),
             jnp.repeat(u_p, goals.shape[0], axis=0),
             jnp.tile(goals, (obs_p.shape[0], 1)),
@@ -1959,7 +2494,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         phi_cons, b_cons = cache["phi_cons"], cache["b_cons"]
 
         def multiplier(l_params):
-            return self.l(cache["l_obs"], cache["l_u"], cache["l_goals"], params=l_params).reshape(b_cons.shape)
+            return self._l_fwd(cache["l_obs"], cache["l_u"], cache["l_goals"], params=l_params).reshape(b_cons.shape)
 
         def w_loss(w):
             obj = jnp.mean(cache["phi_mean"] @ w + cache["b_mean"])
@@ -2033,10 +2568,26 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                                         self.eval_bank_w)
         elif self._ridge_reward_score():
             q = self._reward_gpi_score(obs, u_cand, self.eval_cand_w, self.eval_ref, self.eval_ref_reward)
+        elif self._reward_index() and str(c.get("ridge_score", "goal")) == "pool_softmax":
+            # Density FB's readout on the frozen pool at the ridge w: min over heads of the softmax-weighted
+            # pool reward eval_pool_reward_j = (f(y_j) - mu)^T w / sqrt(D) (set by infer_eval_goals)
+            w = jnp.broadcast_to(self.eval_w_star, (K, self.eval_w_star.shape[0]))
+            q = self.pool_softmax_score(obs, u_cand, w)
         else:
             w = jnp.broadcast_to(self.eval_w_star, (K, self.eval_w_star.shape[0]))
             q = self._goal_score(obs, u_cand, self.eval_goals, self.eval_ref, w)   # (K,)
         return u_cand[jnp.argmax(q)]
+
+    def pool_softmax_score(self, obs, u, w_rows):
+        """ridge_score=pool_softmax: `reward_softmax_q` on the frozen index pool with the stored pool reward
+        (eval_pool_reward, the reward view at eval_w_star), min over heads. (K,)."""
+        temp = float(self.config["measure_temp"])
+        H = self._critic_heads()
+        qs = []
+        for h in range(H):
+            M = self.mesh_M(obs, u, self.index_pool, w_rows, head=None if H == 1 else h)
+            qs.append(jnp.sum(jax.nn.softmax(M / temp, axis=1) * self.eval_pool_reward[None], axis=1))
+        return jnp.min(jnp.stack(qs), axis=0)
 
     def select_latent_sfbc(self, observations, seed):
         """acting=sfbc: draw sfbc_num_u candidate latents from the trained actor a_theta(s,
@@ -2049,7 +2600,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         K, d_a, scale = int(c["sfbc_num_u"]), c["action_dim"], float(c["u_clip"])
         obs = jnp.broadcast_to(observations, (K, observations.shape[-1]))
         w = jnp.broadcast_to(self.eval_w_star, (K, self.eval_w_star.shape[0]))
-        mu, log_std = self.actor(obs, w)
+        mu, log_std = self._actor_fwd(obs, w)
         u_cand, _ = tanh_gaussian_sample(mu, log_std, jax.random.normal(seed, (K, d_a)), scale)
         u_cand = jnp.clip(u_cand, -scale, scale)
         q = jnp.mean(self.mesh_M(obs, u_cand, self.eval_goals, w), axis=1)   # (K,)
@@ -2078,7 +2629,11 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         seed = self.rng if seed is None else seed
         if self.config["acting"] == "distill":
             actor_in = self.eval_actor_goal if self._actor_takes_goal() else self.eval_w_star
-            if self._actor_kind() == "flowbc":
+            if self._actor_kind() == "flowbc_vf":
+                # the FlowBC one-step actor at the ridge w, fresh N(0, I) noise per step (flowbc.py sample_actions)
+                eps = jax.random.normal(seed, (1, self.config["action_dim"]))
+                u_star = self.fbc_actor_u(observations[None], actor_in[None], eps)[0]
+            elif self._actor_kind() == "flowbc":
                 # one prior draw eps per step, corrected by delta(s, g, eps) (policy_index=goal) or
                 # delta(s, w, eps) at the ridge w (policy_index=reward)
                 eps = jax.random.normal(seed, (1, self.config["action_dim"]))
@@ -2087,7 +2642,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                 else:
                     u_star = self.flowbc_latent(observations[None], actor_in[None], eps)[0][0]
             else:
-                mu, _ = self.actor(observations[None], actor_in[None])
+                mu, _ = self._actor_fwd(observations[None], actor_in[None])
                 u_star = self.config["u_clip"] * jnp.tanh(mu[0])
         elif self.config["acting"] == "sfbc":
             u_star = self.select_latent_sfbc(observations, seed)
@@ -2122,7 +2677,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
 
         def actor_loss(params, o, noise):
             z_in = jnp.broadcast_to(self.eval_w_star, (o.shape[0], self.eval_w_star.shape[0]))
-            mu, log_std = self.actor(o, z_in, params=params)
+            mu, log_std = self._actor_fwd(o, z_in, params=params)
             u, logp = tanh_gaussian_sample(mu, log_std, noise, scale)
             q = jax.vmap(lambda oo, uu: jnp.mean(
                 self.mesh_M(oo[None], uu[None], self.eval_goals,
@@ -2200,6 +2755,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         ref_reward = self.eval_ref_reward
         cand_w = self.eval_cand_w
         bank, bank_r, bank_w = self.eval_bank, self.eval_bank_r, self.eval_bank_w
+        pool_r = self.eval_pool_reward
         if pool_reward and self._bank_index():
             goals = self.eval_goals          # the bank's single w needs no goal set
         elif reward_gpi:
@@ -2267,22 +2823,22 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
         elif coef_source == "amortized":
             # A/B goal_conditioned: amortized coefficient from the trained goal head.
             # w = normalize(mean_{g in G} h(g)) -- the design's sum-over-goals readout.
-            w = self._project(jnp.mean(self.w_star(goals), axis=0))
+            w = self._project(jnp.mean(self._h_fwd(goals), axis=0))
         elif coef_source == "hgoal_each":
             # Each goal keeps its own h(g_j); the score is taken per goal (`_hgoal_each_score`),
             # so there is no single coefficient.
-            goal_w = self.w_star(goals)
+            goal_w = self._h_fwd(goals)
             w = jnp.zeros_like(self.eval_w_star)
         elif coef_source == "reward_gpi":
             # Each candidate goal keeps its own h(g_c); the score is the max over candidates of
             # the expected state reward (`_reward_gpi_score`), so there is no single coefficient.
-            cand_w = self.w_star(goals)
+            cand_w = self._h_fwd(goals)
             goal_w = cand_w
             w = jnp.zeros_like(self.eval_w_star)
         elif coef_source == "pool_reward":
             # The candidate coefficients the reward integral is maximised over: h(g_c) per goal, or
             # the bank's one w. No single coefficient.
-            cand_w = self.w_star(goals) if self._goal_index() else self.bank_w()
+            cand_w = self._h_fwd(goals) if self._goal_index() else self.bank_w()
             w = jnp.zeros_like(self.eval_w_star)
         elif coef_source == "regression":
             # Least-squares coefficient on the same features the LP path reads. Fit reward from
@@ -2303,7 +2859,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                 o_r = jnp.broadcast_to(next_obs[:, None], (nrow, ng, next_obs.shape[-1])).reshape(nrow * ng, -1)
                 u_r = jnp.broadcast_to(u[:, None], (nrow, ng, u.shape[-1])).reshape(nrow * ng, -1)
                 g_r = jnp.broadcast_to(goals[None], (nrow, ng, goals.shape[-1])).reshape(nrow * ng, -1)
-                phi_part, _ = self.basis(o_r, u_r, g_r, params=self.basis.params)
+                phi_part, _ = self._basis_fwd(o_r, u_r, g_r)
                 phi_mean = phi_part.reshape(nrow, ng, -1).mean(axis=1)     # (n, z_dim)
             w_reg = jnp.linalg.lstsq(phi_mean, r_sub, rcond=None)[0]   # (z_dim,)
             w = self._project(w_reg)
@@ -2320,6 +2876,10 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
                 rows_r = np.random.choice(rewards.shape[0], size=n_ref, replace=rewards.shape[0] < n_ref)
                 refs = jnp.asarray(np.asarray(batch["next_observations"])[rows_r], jnp.float32)
                 ref_reward = jnp.asarray(rewards[rows_r], jnp.float32)
+            if str(c.get("ridge_score", "goal")) == "pool_softmax":
+                # the frozen pool's reward view at this w (Density FB eval_support + q_fn's kg)
+                f_c = self.fb_feature(self.index_pool, self.fb_zenc, self.fb_anchor) - self.fb_mu[None]
+                pool_r = jax.lax.stop_gradient(f_c @ w / jnp.sqrt(float(c["z_dim"])))
         elif coef_source == "trained":
             # The coefficient M was trained with: project(mean_z w(z)). No inference is run.
             w = self.trained_coef()
@@ -2331,7 +2891,7 @@ class PSMGoalAgent(flax.struct.PyTreeNode):
             w = self.run_inference(obs, u, goals, key, refs=refs if self._softmax() else None)
         agent = self.replace(eval_goals=goals, eval_w_star=w, eval_ref=refs, eval_actor_goal=actor_goal,
                              eval_goal_w=goal_w, eval_cand_w=cand_w, eval_ref_reward=ref_reward,
-                             eval_bank=bank, eval_bank_r=bank_r, eval_bank_w=bank_w)
+                             eval_bank=bank, eval_bank_r=bank_r, eval_bank_w=bank_w, eval_pool_reward=pool_r)
         # acting=distill re-distills the actor at eval by default. With eval_redistill=false the
         # in-loop-trained actor (train_actor) is used directly, without eval re-distillation.
         if c["acting"] == "distill" and bool(c.get("eval_redistill", True)):
@@ -2400,6 +2960,7 @@ def get_config():
         "discount": 0.98,           # gamma
         "tau": 0.01,                # Polyak rate of the phi,b,w targets
         "measure_form": "joint",    # joint (RLUMeasure on [s,u,g]) | factorized (A(s,u)^T f(g), beta^T f(g))
+        "factorized_index_input": False,  # factorized: A, beta on [s, u, w] (Density FB's F(s,u,z)); 2026-11-16
         "f_dim": 128,               # factorized: width of f(g) (on the sqrt(f_dim) sphere)
         "f_ortho_coef": 1.0,        # factorized: weight on ||E[f f^T] - I||_F^2 over s+ (ignored when joint)
         "ortho_coef": 0.0,          # F1: weight on ||mean phi phi^T - I||_F^2 over the TD mesh (0 = off)
@@ -2441,6 +3002,10 @@ def get_config():
         "frozen_delta_path": None,     # bootstrap_source=frozen_delta: run dir whose delta params are loaded
         "frozen_delta_epoch": 500000,  # ... at this checkpoint
         "frozen_delta_mode": "plus",   # plus | minus | random | zero
+        "student_path": None,          # bootstrap_source=student: dir of the saved student (set, goal features)
+        "student_boot_mode": "mode",   # mode (clip(mu)) | sample (clip(mu + L eps))
+        "student_hidden": 512,         # the student's trunk width (must match its config.json)
+        "student_layers": 2,           # ... and depth
         # --- advantage-guided actor (2026-10-20; OFF by default) ---
         "ag_actor": False,          # delta regresses prior draws conditioned on their standardised critic score
         "ag_k": 64,                 # prior draws scored per row and update
@@ -2451,6 +3016,13 @@ def get_config():
         "ag_pool": 0,               # next states the score's normaliser reads (0 = the whole batch)
         "fb_rand_frac": 0.5,        # fraction of rows whose task is a random sqrt(D) direction
         "fb_hit_spec": "19:22:0.4",  # kernel reward blocks a:b:eps (cube: cube xyz, eps 0.4)
+        # full (every goal-taking net reads the whole goal state) | hit_blocks (only the fb_hit_spec blocks)
+        "goal_input": "full",
+        # critic_heads: independent (phi, b) basis heads, each with its own target, trained by the summed
+        # measure loss; every action score (actor value, best-of-64, argmax bootstrap) is the min over heads
+        "critic_heads": 1,
+        # critic_action_input: latent ([s, u, s+]) | latent_and_action ([s, u, G(s, u), s+], G the frozen decode)
+        "critic_action_input": "latent",
         "fb_ridge_lambda_mult": 0.01,   # lam = mult * tr(C)/D
         "fb_cov_eig_floor": 1.0e-6,     # eigenvalue floor on C, multiple of tr(C)/D
         "fb_const_eps": 1.0e-6,         # ||c|| below this -> neutral task 1_D
@@ -2467,7 +3039,15 @@ def get_config():
         # eval only: the importance-weighted reward integral over a bank of pool_eval_size relabel next states)
         "coef_source": "lp",
         "reward_actor_reward": "latent_centered",  # policy_index=reward, actor reward rows: the index's centered view | the exact kernel reward on hindsight rows (kernel)
-        "ridge_score": "goal",      # policy_index=reward, eval: best-of-64 by the goal mass at w (goal) | the expected relabel reward over eval_ref at w (reward)
+        "ridge_score": "goal",      # policy_index=reward, eval: best-of-64 by the goal mass at w (goal) | the expected relabel reward over eval_ref at w (reward) | Density FB's softmax readout on the frozen index pool (pool_softmax)
+        # Density FB recipe (2026-11-03, docs/design/2026-11-03-psmgoal-dfb-recipe.md; all off by default)
+        "dfb_recipe": False,        # true: main.py writes DFB_RECIPE into the config (batch_size left to the caller)
+        "goal_cur_obs_frac": 0.0,   # policy_index=reward: share of measure goals replaced by the row's own observation
+        "index_pool_m": 0,          # policy_index=reward: frozen readout pool size (first update's next states); 0 = none
+        "reward_q_center": False,   # actor_kind=flowbc_vf: centre Q in the actor's normaliser only
+        "fbc_actor": {"hidden_dim": 512, "hidden_layers": 2, "embedding_layers": 2, "bc_coeff": 3.0, "q_coeff": 1.0,
+                      "flow_steps": 10, "lr": 1.0e-4, "lr_vf": 3.0e-4, "flow_vf_hidden_dim": 512,
+                      "flow_vf_hidden_layers": 4},   # actor_kind=flowbc_vf: Density FB's FlowBC actor
         "pool_eval_size": 512,      # coef_source=pool_reward: bank size (a quarter rewarding at most)
         # coef_source=reward_gpi: candidate goals = top (k_goals highest-reward rows) | random
         # (k_goals uniform rows) | both (k_goals//2 top + the rest uniform)
@@ -2504,6 +3084,10 @@ def get_config():
         # bootstrap_source=argmax: number of clipped prior draws scored at s' (1 = a BC draw);
         # bc_mean: number of draws the target is averaged over
         "bootstrap_n": 8,
+        # bootstrap_bon_n (2026-11-16, HQL): policy_index=reward: u+ = the best of this many clipped prior
+        # draws at s' under `reward_softmax_q` (min over heads) at the row's index w on the TARGET basis;
+        # 0 = the actor's draw (bit-identical to before). The actor itself trains unchanged.
+        "bootstrap_bon_n": 0,
         # --- 2026-10-04 ablations (OFF by default) ---
         # policy_index=goal: geometric (hindsight offset ~ Geometric(1 - goal_discount)) |
         # uniform (the row's own s' and every later state of its trajectory, equally likely)
@@ -2530,7 +3114,7 @@ def get_config():
         # actor_kind=dsrl: SAC's alpha, the f_psmflow dsrl_sac head's values
         "dsrl_actor": {"target_entropy": 0.0, "init_alpha": 1.0, "lr_alpha": 3.0e-4},
         # --- nets ---
-        "measure": {"hidden_dim": 512, "hidden_layers": 2},
+        "measure": {"hidden_dim": 512, "hidden_layers": 2, "layer_norm": False},
         "w": {"hidden_dim": 256, "hidden_layers": 2},
         "l": {"hidden_dim": 256, "hidden_layers": 2},
         "actor": {"hidden_dim": 512, "hidden_layers": 2},

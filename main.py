@@ -48,6 +48,20 @@ def main(cfg: DictConfig):
 
     # Build the agent config (ml_collections.ConfigDict) from the Hydra agent group.
     config = ml_collections.ConfigDict(_lists_to_tuples(OmegaConf.to_container(cfg.agent, resolve=True)))
+    if config['agent_name'] in ('psmgoal', 'psmz') and bool(config.get('dfb_recipe', False)):
+        # psmgoal dfb_recipe (2026-11-03): expand the Density FB bundle before the dataset and the agent are
+        # built, and record the expanded values in flags.json so an eval restores exactly what trained.
+        from agents.psmgoal import DFB_RECIPE, apply_dfb_recipe
+        apply_dfb_recipe(config)
+        _flags_path = os.path.join(save_dir, 'flags.json')
+        with open(_flags_path) as f:
+            _flags = json.load(f)
+        for _k in DFB_RECIPE:
+            _v = config[_k]
+            _flags['agent'][_k] = _v.to_dict() if isinstance(_v, ml_collections.ConfigDict) else _v
+        with open(_flags_path, 'w') as f:
+            json.dump(_flags, f, default=str)
+        print(f'psmgoal dfb_recipe: {len(DFB_RECIPE)} keys written into the agent config and {_flags_path}')
 
     # Make environment and datasets.
     env, eval_env, train_dataset, val_dataset = make_env_and_datasets(cfg.env_name, frame_stack=cfg.frame_stack,
@@ -71,7 +85,7 @@ def main(cfg: DictConfig):
             # re-wrap it here or it stays a plain dict when p_aug/frame_stack are set.
             val_dataset = Dataset.create(**val_dataset)
 
-    if config['agent_name'] in ('psmflow', 'f_psmflow', 'f_psmgoal2p', 'psmgoal'):
+    if config['agent_name'] in ('psmflow', 'f_psmflow', 'f_psmgoal2p', 'psmgoal', 'psmz', 'fb_latent', 'density_fb_latent'):
         # These train on the preimage-augmented dataset (latents per transition).
         from utils.flow_inversion import load_augmented_dataset, repair_invalid_preimages
         assert config.get('preimage_path'), (
@@ -243,12 +257,12 @@ def main(cfg: DictConfig):
         if dataset is not None:
             dataset.p_aug = cfg.p_aug
             dataset.frame_stack = cfg.frame_stack
-            if config['agent_name'] in ('psmflow', 'f_psmflow', 'f_psmgoal2p', 'psmgoal'):
+            if config['agent_name'] in ('psmflow', 'f_psmflow', 'f_psmgoal2p', 'psmgoal', 'psmz', 'fb_latent', 'density_fb_latent'):
                 # Emit u_0 / u_0' per transition: either a draw from the stored EM mixture
                 # or the exact backward-ODE point, per the point-vs-mixture ablation.
                 dataset.return_preimage_noise = True
                 dataset.preimage_point_mode = bool(config.get('use_point_preimage', False))
-            if config['agent_name'] == 'psmgoal':
+            if config['agent_name'] in ('psmgoal', 'psmz'):
                 # RLU port: basis goals are the batch's own next states used as an all-pairs
                 # state x goal mesh, so no hindsight-goal sampling is needed. The fixed
                 # z-indexed bootstrap policy is keyed on the dataset ROW, so the batch must
@@ -287,6 +301,26 @@ def main(cfg: DictConfig):
                 # latent are not sampled (utils/datasets.py `_next_preimage_rows`).
                 if str(config.get('bootstrap_source', 'actor')) == 'data':
                     dataset.return_next_preimage = True
+            if config['agent_name'] == 'density_fb_latent':
+                # Density FB goal sampling (GCDataset value_p_curgoal 0.2 / trajgoal 0.5 / randomgoal 0.3,
+                # geometric at the discount; actor goals uniform over the trajectory future). The dataset
+                # serves the traj/random mix as batch['goals'] and the trajectory-uniform goal as
+                # batch['fb_goals']; the agent draws the cur-goal share itself (agents/density_fb_latent.py
+                # `dataset_goal_knobs`).
+                from agents.density_fb_latent import dataset_goal_knobs
+                dataset.return_goals = True
+                for _k, _v in dataset_goal_knobs(config).items():
+                    setattr(dataset, _k, _v)
+                dataset.return_fb_goals = True
+            if config['agent_name'] == 'fb_latent' and bool(config.get('density_reward_index', False)):
+                # Density FB reward index on fb_latent: each training row's task vector is the ridge
+                # fit of its hindsight goal's kernel reward, so the batch must carry batch['goals']
+                # (docs/design/2026-10-19-reward-index.md, same dataset seam as psmgoal).
+                dataset.return_goals = True
+                dataset.goal_discount = float(config.get('goal_discount', 0.98))
+                dataset.goal_random_frac = float(config.get('goal_random_frac', 0.0))
+                dataset.goal_cur_frac = float(config.get('goal_cur_frac', 0.0))
+                dataset.goal_sampling = str(config.get('goal_sampling', 'geometric'))
 
     # Create agent.
     example_batch = train_dataset.sample(1)
@@ -309,7 +343,7 @@ def main(cfg: DictConfig):
     # The pool states are the rows' next states. `create` records sha1(rows) as agent.pool_hash, which is
     # written back into flags.json below so an eval can assert it rebuilt the same pool.
     agent_kw = {}
-    if config['agent_name'] == 'psmgoal' and str(config.get('measure_loss', 'squared')) == 'pool':
+    if config['agent_name'] in ('psmgoal', 'psmz') and str(config.get('measure_loss', 'squared')) == 'pool':
         from utils.flow_inversion import PREIMAGE_VALID_KEY
         from utils.psm_common import draw_pool_indices
         _n_rows = int(train_dataset.size)
@@ -323,6 +357,17 @@ def main(cfg: DictConfig):
         print(f"pool measure: {len(_pool_rows)} rows drawn from {len(_valid_rows)} valid-preimage rows "
               f"(of {_n_rows}) at pool_seed={int(config['pool_seed'])}")
 
+    # density_fb_latent kernel_input=state (2026-11-03): the training kernel standardises the full observation
+    # by the dataset's per-dim next_observations std, computed once here and written back to flags.json.
+    _kernel_std_filled = False
+    if (config['agent_name'] == 'density_fb_latent' and str(config.get('kernel_input', 'hit_spec')) == 'state'
+            and config.get('kernel_state_std', None) is None):
+        _std = np.maximum(np.asarray(train_dataset['next_observations'], np.float64).std(0), 1e-6)
+        config['kernel_state_std'] = tuple(float(v) for v in _std)
+        _kernel_std_filled = True
+        print(f"kernel_input=state: dataset next_observations std over {len(_std)} dims "
+              f"(min {_std.min():.4g}, max {_std.max():.4g}), radius {float(config['kernel_state_radius'])}")
+
     agent_class = agents[config['agent_name']]
     agent = agent_class.create(
         cfg.seed,
@@ -331,6 +376,13 @@ def main(cfg: DictConfig):
         config,
         **agent_kw,
     )
+    if _kernel_std_filled:
+        _flags_path = os.path.join(save_dir, 'flags.json')
+        with open(_flags_path) as f:
+            _flags = json.load(f)
+        _flags['agent']['kernel_state_std'] = list(config['kernel_state_std'])
+        with open(_flags_path, 'w') as f:
+            json.dump(_flags, f, default=str)
     if agent_kw:
         _pool_hash = str(agent.config['pool_hash'])
         _flags_path = os.path.join(save_dir, 'flags.json')

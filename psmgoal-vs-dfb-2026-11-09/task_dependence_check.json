@@ -1,0 +1,12 @@
+{
+ "L_bc0p3": {
+  "cos_own_vs_permuted_index": 0.24522775411605835,
+  "cos_two_sphere_indices": 0.14891420304775238,
+  "run": "/mnt/home/amohan/psm-data/exp/PSMFLows/dfb_latent_oc_bc0p3_cube/sd000_aws_500k"
+ },
+ "P_bc03_sd000": {
+  "cos_own_vs_permuted_index": 0.07786677032709122,
+  "cos_two_sphere_indices": 0.16695207357406616,
+  "run": "/mnt/home/amohan/psm-data/exp/PSMFLows/psmgoal_recipe_bc03_cube/sd000_s_2528791.0.20261104_142244"
+ }
+}

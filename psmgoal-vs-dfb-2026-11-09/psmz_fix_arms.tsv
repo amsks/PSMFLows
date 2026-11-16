@@ -1,0 +1,7 @@
+cd_heads2	cubedouble	agent.fb_hit_spec='19:22:0.4,28:31:0.4' agent.goal_input=hit_blocks agent.batch_size=1024 agent.discount=0.99 agent.goal_discount=0.99 agent.critic_heads=2
+cd_windex	cubedouble	agent.fb_hit_spec='19:22:0.4,28:31:0.4' agent.goal_input=hit_blocks agent.batch_size=1024 agent.discount=0.99 agent.goal_discount=0.99 agent.factorized_index_input=true
+cd_both	cubedouble	agent.fb_hit_spec='19:22:0.4,28:31:0.4' agent.goal_input=hit_blocks agent.batch_size=1024 agent.discount=0.99 agent.goal_discount=0.99 agent.critic_heads=2 agent.factorized_index_input=true
+cs_heads2	cube	agent.batch_size=1024 agent.critic_heads=2
+cs_windex	cube	agent.batch_size=1024 agent.factorized_index_input=true
+cs_both	cube	agent.batch_size=1024 agent.critic_heads=2 agent.factorized_index_input=true
+cd_bon4h2	cubedouble	agent.fb_hit_spec='19:22:0.4,28:31:0.4' agent.goal_input=hit_blocks agent.batch_size=1024 agent.discount=0.99 agent.goal_discount=0.99 agent.critic_heads=2 agent.bootstrap_bon_n=4

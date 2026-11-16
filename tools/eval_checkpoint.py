@@ -244,6 +244,8 @@ LEGACY_AGENT_DEFAULTS = {
         "n_bank": 1,
     },
 }
+# psmz (2026-11-10) is psmgoal under another name and config file: same legacy fallbacks.
+LEGACY_AGENT_DEFAULTS["psmz"] = LEGACY_AGENT_DEFAULTS["psmgoal"]
 
 
 def build_eval_pool(train_dataset, config):
@@ -395,7 +397,7 @@ def _evaluate_shard(payload):
     # psmgoal's coefficient inference reads the dataset preimages (noise_preimage). The plain
     # eval dataset lacks them, so splice the preimage arrays from the npz (same rows / same env
     # data as training, this env's task reward kept) and serve them the way main.py does.
-    _psmgoal_preimages = name == "psmgoal" and config.get("preimage_path")
+    _psmgoal_preimages = name in ("psmgoal", "psmz") and config.get("preimage_path")
     if _psmgoal_preimages:
         from utils.flow_inversion import load_augmented_dataset, repair_invalid_preimages
         aug, _ = repair_invalid_preimages(load_augmented_dataset(config["preimage_path"]))
@@ -433,7 +435,7 @@ def _evaluate_shard(payload):
     # run's pool_seed, and its hash checked against the run's flags.json (`build_eval_pool`).
     agent_kw = {}
     pool_hash_checked = None
-    if name == "psmgoal" and str(config.get("measure_loss", "squared")) == "pool":
+    if name in ("psmgoal", "psmz") and str(config.get("measure_loss", "squared")) == "pool":
         _pool_src = {"next_observations": train_dataset["next_observations"]}
         if _psmgoal_preimages and _preimage_valid is not None:
             _pool_src[PREIMAGE_VALID_KEY] = _preimage_valid
@@ -448,7 +450,7 @@ def _evaluate_shard(payload):
     agent = agents[name].create(base_seed, ex["observations"], ex["actions"], config, **agent_kw)
     # psmgoal actor_kind=flowbc (2026-10-05) deploys `delta`, not the tanh-Gaussian actor.
     fresh_actor = None
-    if name == "psmgoal":
+    if name in ("psmgoal", "psmz"):
         fresh_actor = (agent.delta.params if str(config.get("actor_kind", "tanh")) == "flowbc"
                        else agent.actor.params)
     agent = restore_agent(agent, payload["restore_path"], payload["restore_epoch"])
@@ -620,12 +622,17 @@ def main(cfg):
         # `argmax` is the shipped rule. An ablation eval differs from the deployed one by
         # this string alone, so it has to be in the report, not only in the filename.
         sel = str(config.get("gpi_select", "argmax"))
-        if name == "psmgoal" and config.get("acting") == "distill" and config.get("actor_input") == "goal":
+        if name in ("psmgoal", "psmz") and config.get("acting") == "distill" and config.get("actor_input") == "goal":
             # goal-fed actor readout (2026-10-01): no coefficient, no argmax over prior draws.
             src = (f"psmgoal actor ({config.get('actor_kind', 'tanh')}) fed the goal state, goal from "
                    f"{config.get('eval_goal_source')}")
-        elif name == "psmgoal":
-            draws = "flowbc actor draws (one goal each)" if config.get("acting") == "flowbc_gpi" else "u"
+        elif (name in ("psmgoal", "psmz") and config.get("acting") == "gpi"
+              and str(config.get("ridge_score", "goal")) == "pool_softmax"):
+            # Density FB recipe readout (2026-11-03): report label only
+            src = (f"psmgoal argmax over K={config.get('gpi_num_u')} u of the softmax-weighted pool reward at the "
+                   f"ridge w, min over heads, frozen pool of {config.get('index_pool_m')} next states")
+        elif name in ("psmgoal", "psmz"):
+            draws ="flowbc actor draws (one goal each)" if config.get("acting") == "flowbc_gpi" else "u"
             src = (f"psmgoal argmax over K={config.get('gpi_num_u')} {draws} of the goal-averaged "
                    f"measure, K_g={config.get('k_goals')} rewarding goals")
             if str(config.get("eval_goal_pool", "relabel")) == "dataset":
@@ -638,6 +645,42 @@ def main(cfg):
             # PSM Eq. 10 (2026-09-15): one fitted coefficient c in place of the u' panel.
             src = (f"fixed_coeff argmax over K={config.get('gpi_num_u')} u at c from "
                    f"{config.get('fixed_index_coeff_path')}")
+        elif name == "density_fb_latent":
+            # Density FB on the flow latents (2026-11-02): the FlowBC actor at z_eval, or the best of
+            # gpi_num_u prior draws by the softmax actor value on the frozen pool; z by eval_z_mode.
+            z_mode = str(config.get("eval_z_mode", "ridge"))
+            if config.get("acting") == "bon":
+                src = (f"density_fb_latent best-of-{config.get('gpi_num_u')} prior draws by the softmax "
+                       f"actor value, z by {z_mode}")
+            elif config.get("acting") == "bon_proto":
+                # proto head (2026-11-04): PSM's GPI over the code-indexed family for the one-step choice --
+                # argmax over (u, c) pairs of the pool-softmax reward readout with F_p(s, u, c) in place of F.
+                src = (f"density_fb_latent proto GPI: argmax over K={config.get('gpi_num_u')} prior draws x "
+                       f"{config.get('proto_bank')} bank codes of the softmax reward readout under F_p, z by {z_mode}")
+            elif config.get("acting") == "proto_policy":
+                # the family itself: the fixed hash latent u'(s, c*) at every state, c* picked once per task.
+                src = (f"density_fb_latent proto_policy: fixed {config.get('proto_policy')} family latent u'(s, c*), "
+                       f"c* the best of {config.get('proto_bank')} bank codes by mean readout, z by {z_mode}")
+            else:
+                src = f"density_fb_latent FlowBC actor at z, z by {z_mode}"
+            src += f" [backward_input={config.get('backward_input', 'hit_spec')}]"
+            if config.get("proto_head", False):
+                src += (f" [proto_head: {config.get('proto_code_bits')} bits, coef {config.get('proto_loss_coef')}, "
+                        f"bank seed {config.get('proto_bank_seed')}]")
+        elif name == "fb_latent":
+            # FB on the flow latents (2026-11-02): the actor mean at z_eval, or the best of
+            # gpi_num_u prior draws by F^T z; z from eval_z_mode (auto = ridge under the reward index).
+            z_mode = str(config.get("eval_z_mode", "auto"))
+            if z_mode == "auto":
+                z_mode = "ridge" if config.get("density_reward_index") else "goals"
+            if config.get("acting") == "bon":
+                src = f"fb_latent best-of-{config.get('gpi_num_u')} prior draws by F^T z, z by {z_mode}"
+            else:
+                src = f"fb_latent TD3 actor mean at z, z by {z_mode}"
+            density = [k for k in ("density_backward", "density_reward_index", "density_kernel_actor")
+                       if config.get(k)]
+            if density:
+                src += " [" + ", ".join(density) + "]"
         else:
             src = f"amortized actor latent [{config.get('actor_mode', 'ddpg')}]"
         mode = f"decode({src}) — action branch disabled"
